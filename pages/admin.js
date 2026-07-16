@@ -1,6 +1,15 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 
+const MODEL_OPTIONS = [
+  { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna (fast, low cost)' },
+  { id: 'gpt-5.6', label: 'GPT-5.6 (strongest)' },
+  { id: 'gpt-5.5', label: 'GPT-5.5' },
+  { id: 'gpt-4.1-mini', label: 'GPT-4.1 mini' },
+  { id: 'gpt-4o', label: 'GPT-4o' }
+];
+const CUSTOM = '__custom__';
+
 export default function Admin() {
   const [pw, setPw] = useState('');
   const [authed, setAuthed] = useState(false);
@@ -9,7 +18,10 @@ export default function Admin() {
   const [status, setStatus] = useState(null);
   const [intercom, setIntercom] = useState('');
   const [openai, setOpenai] = useState('');
-  const [model, setModel] = useState('');
+
+  const [selectedModel, setSelectedModel] = useState('gpt-5.6-luna');
+  const [customModel, setCustomModel] = useState('');
+  const [makeDefault, setMakeDefault] = useState(false);
 
   const [msg, setMsg] = useState('');
   const [error, setError] = useState('');
@@ -27,7 +39,13 @@ export default function Admin() {
       const j = await r.json();
       if (!r.ok) { if (r.status === 401) logout(); throw new Error(j.error || 'Could not load.'); }
       setStatus(j);
-      setModel(j.chatModel || '');
+      const current = j.chatModel || 'gpt-5.6-luna';
+      if (MODEL_OPTIONS.some((m) => m.id === current)) {
+        setSelectedModel(current);
+      } else {
+        setSelectedModel(CUSTOM);
+        setCustomModel(current);
+      }
     } catch (e) { setError(e.message); }
   }
 
@@ -47,8 +65,11 @@ export default function Admin() {
       const body = {};
       if (intercom.trim()) body.intercomToken = intercom.trim();
       if (openai.trim()) body.openaiKey = openai.trim();
-      if (model.trim()) body.chatModel = model.trim();
-      if (Object.keys(body).length === 0) { setMsg('Nothing to save.'); setSaving(false); return; }
+      if (makeDefault) {
+        const chosen = selectedModel === CUSTOM ? customModel.trim() : selectedModel;
+        if (chosen) body.chatModel = chosen;
+      }
+      if (Object.keys(body).length === 0) { setMsg('Nothing to save. (Tick "Set as default" to change the model.)'); setSaving(false); return; }
       const r = await fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-app-password': pw },
@@ -57,7 +78,7 @@ export default function Admin() {
       const j = await r.json();
       if (!r.ok) { if (r.status === 401) logout(); throw new Error(j.error || 'Save failed.'); }
       setStatus(j);
-      setIntercom(''); setOpenai('');
+      setIntercom(''); setOpenai(''); setMakeDefault(false);
       setMsg('Saved.');
     } catch (e) { setError(e.message); } finally { setSaving(false); }
   }
@@ -125,10 +146,35 @@ export default function Admin() {
         </div>
 
         <div style={{ marginBottom: 18 }}>
-          <label className="field-label" htmlFor="md">Answering model</label>
-          <input id="md" type="text" value={model} placeholder="gpt-5.6-luna"
-            onChange={(e) => setModel(e.target.value)} />
-          <p className="help">If you ever get a "model" error when searching, change this (e.g. try <code>gpt-5.6</code> or <code>gpt-5.5</code>) and save.</p>
+          <div className="row" style={{ justifyContent: 'space-between' }}>
+            <label className="field-label" htmlFor="md">Answering model</label>
+            <span className="pill">default: {status ? status.chatModel : '—'}</span>
+          </div>
+          <select
+            id="md"
+            value={selectedModel}
+            onChange={(e) => setSelectedModel(e.target.value)}
+            style={{ width: '100%', padding: '12px 13px', border: '1px solid var(--line)', borderRadius: 8, fontSize: 15, background: '#fbfcfd', color: 'var(--ink)' }}
+          >
+            {MODEL_OPTIONS.map((m) => (
+              <option key={m.id} value={m.id}>{m.label}</option>
+            ))}
+            <option value={CUSTOM}>Custom…</option>
+          </select>
+          {selectedModel === CUSTOM && (
+            <input
+              type="text"
+              value={customModel}
+              placeholder="Type an exact model id, e.g. gpt-4"
+              onChange={(e) => setCustomModel(e.target.value)}
+              style={{ marginTop: 10 }}
+            />
+          )}
+          <label className="row" style={{ marginTop: 12, cursor: 'pointer' }}>
+            <input type="checkbox" checked={makeDefault} onChange={(e) => setMakeDefault(e.target.checked)} />
+            <span style={{ fontSize: 14 }}>Set this model as the default</span>
+          </label>
+          <p className="help">The default is what every search uses. If a model ever errors, pick another and re-tick this box.</p>
         </div>
 
         <div className="row">
