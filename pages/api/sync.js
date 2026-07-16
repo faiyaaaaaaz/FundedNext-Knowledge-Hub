@@ -63,18 +63,29 @@ export default async function handler(req, res) {
       const url = a.url || '';
       const pieces = chunkText(htmlToText(a.body || ''));
 
-      // turn each piece into "meaning" numbers, in batches
-      let embeddings = [];
-      for (let i = 0; i < pieces.length; i += 96) {
-        const vecs = await openaiEmbed(openaiKey, pieces.slice(i, i + 96));
-        embeddings = embeddings.concat(vecs);
-      }
+      // 5a. Make sure the parent article row exists FIRST (with a temporary
+      //     fingerprint), so the pieces have something to attach to.
+      const { error: eUp } = await sb.from('articles').upsert({
+        intercom_id: id,
+        title,
+        url,
+        state: 'published',
+        updated_at: a.updated_at || null,
+        content_hash: 'pending',
+        last_indexed_at: new Date().toISOString()
+      });
+      if (eUp) throw new Error('Preparing article failed: ' + eUp.message);
 
-      // replace this article's old pieces with the fresh ones
+      // 5b. Replace this article's old pieces with fresh ones
       const { error: eC } = await sb.from('chunks').delete().eq('article_id', id);
       if (eC) throw new Error('Clearing old pieces failed: ' + eC.message);
 
       if (pieces.length) {
+        let embeddings = [];
+        for (let i = 0; i < pieces.length; i += 96) {
+          const vecs = await openaiEmbed(openaiKey, pieces.slice(i, i + 96));
+          embeddings = embeddings.concat(vecs);
+        }
         const rows = pieces.map((content, idx) => ({
           article_id: id,
           article_title: title,
@@ -89,17 +100,14 @@ export default async function handler(req, res) {
         }
       }
 
-      // mark this article as done (so a retry never re-does it)
-      const { error: eA } = await sb.from('articles').upsert({
-        intercom_id: id,
-        title,
-        url,
-        state: 'published',
-        updated_at: a.updated_at || null,
-        content_hash: hash,
-        last_indexed_at: new Date().toISOString()
-      });
-      if (eA) throw new Error('Marking article done failed: ' + eA.message);
+      // 5c. Only now mark the article fully done with its real fingerprint.
+      //     (If anything above failed or timed out, the fingerprint stays
+      //     "pending" and the next run redoes this article cleanly.)
+      const { error: eF } = await sb
+        .from('articles')
+        .update({ content_hash: hash, last_indexed_at: new Date().toISOString() })
+        .eq('intercom_id', id);
+      if (eF) throw new Error('Finalizing article failed: ' + eF.message);
 
       processed++;
       remaining--;
