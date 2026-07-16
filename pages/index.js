@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 
 export default function Home() {
@@ -14,17 +14,21 @@ export default function Home() {
 
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
+  const [elapsed, setElapsed] = useState(0);
+  const timerRef = useRef(null);
 
   useEffect(() => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem('appPw') : '';
     if (saved) { setPw(saved); setAuthed(true); }
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, []);
+
+  function fmt(s) { const m = Math.floor(s / 60); const sec = s % 60; return `${m}:${String(sec).padStart(2, '0')}`; }
 
   function login() {
     if (!pwInput) return;
     localStorage.setItem('appPw', pwInput);
-    setPw(pwInput);
-    setAuthed(true);
+    setPw(pwInput); setAuthed(true);
   }
   function logout() {
     localStorage.removeItem('appPw');
@@ -49,15 +53,19 @@ export default function Home() {
   }
 
   async function checkUpdates() {
-    setError(''); setSyncing(true); setSyncMsg('Checking Intercom for changes…');
+    setError(''); setSyncing(true);
+    setSyncMsg('Reading your Intercom articles… (the first step can take up to a minute)');
+    const start = Date.now();
+    setElapsed(0);
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
     try {
       let totalProcessed = 0;
       let totalDeleted = 0;
       let published = 0;
       let guard = 0;
-      // Keep calling until the server says it's finished.
       for (;;) {
-        if (++guard > 300) break;
+        if (++guard > 400) break;
         const r = await fetch('/api/sync', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'x-app-password': pw },
@@ -71,12 +79,13 @@ export default function Home() {
         if (j.done) {
           const parts = [`${totalProcessed} article${totalProcessed === 1 ? '' : 's'} updated`];
           if (totalDeleted) parts.push(`${totalDeleted} removed`);
-          setSyncMsg(`Up to date — ${parts.join(', ')}. ${published} published articles in total.`);
+          setSyncMsg(`✓ Up to date — ${parts.join(', ')}. ${published} published articles in total.`);
           break;
         }
-        setSyncMsg(`Updating… ${totalProcessed} done, ${j.remaining} to go.`);
+        setSyncMsg(`Building knowledge base… ${totalProcessed} done, ${j.remaining} to go.`);
       }
-    } catch (e) { setError(e.message); setSyncMsg(''); } finally { setSyncing(false); }
+    } catch (e) { setError(e.message); setSyncMsg(''); }
+    finally { setSyncing(false); if (timerRef.current) clearInterval(timerRef.current); }
   }
 
   if (!authed) {
@@ -118,10 +127,11 @@ export default function Home() {
         <div className="row" style={{ justifyContent: 'space-between' }}>
           <span className="help" style={{ marginTop: 0 }}>Pull the latest published FAQs from Intercom. Only changed articles are re-processed.</span>
           <button className="btn btn-ghost" onClick={checkUpdates} disabled={syncing}>
-            {syncing ? 'Working…' : 'Check for updates'}
+            {syncing ? `Working… ${fmt(elapsed)}` : 'Check for updates'}
           </button>
         </div>
         {syncMsg && <div className="status-line">{syncMsg}</div>}
+        {syncing && <div className="status-line">Working for {fmt(elapsed)} — safe to leave this tab open.</div>}
       </div>
 
       <div className="card">
