@@ -2,6 +2,7 @@ import {
   checkPassword,
   getPassword,
   getKeys,
+  getPrompt,
   supabaseAdmin,
   openaiEmbed,
   openaiChat
@@ -20,28 +21,39 @@ export default async function handler(req, res) {
 
     const sb = supabaseAdmin();
 
-    // 1. Find the closest pieces (fewer + a slightly higher bar = tighter results)
+    // ---- HYBRID SEARCH: meaning-search + exact keyword-search ----
     const [qvec] = await openaiEmbed(openaiKey, [question]);
-    const { data: matches, error } = await sb.rpc('match_chunks', {
+    const vec = await sb.rpc('match_chunks', {
       query_embedding: qvec,
-      match_threshold: 0.35,
-      match_count: 5
+      match_threshold: 0.15,
+      match_count: 8
     });
-    if (error) throw new Error('Search failed: ' + error.message);
+    if (vec.error) throw new Error('Search failed: ' + vec.error.message);
 
-    if (!matches || !matches.length) {
+    let kwData = [];
+    try {
+      const kw = await sb.rpc('keyword_chunks', { query_text: question, match_count: 8 });
+      if (!kw.error && Array.isArray(kw.data)) kwData = kw.data;
+    } catch (e) {
+      // keyword search not installed yet; meaning-search still works
+    }
+
+    const byId = new Map();
+    for (const m of vec.data || []) byId.set(m.id, m);
+    for (const m of kwData) if (!byId.has(m.id)) byId.set(m.id, m);
+    const matches = [...byId.values()].slice(0, 10);
+
+    if (!matches.length) {
       return res.status(200).json({
         answer: "I couldn't find anything about that in the knowledge base.",
         sources: []
       });
     }
 
-    // 2. Context for the model
     const context = matches
       .map((m, i) => `[${i + 1}] ${m.article_title}\nURL: ${m.article_url}\n${m.content}`)
       .join('\n\n---\n\n');
 
-    // 3. Authoritative source list (URLs come from our data, never invented)
     const seen = new Set();
     const sources = [];
     for (const m of matches) {
@@ -51,17 +63,8 @@ export default async function handler(req, res) {
       }
     }
 
-    const system =
-      'You are a support knowledge assistant for FundedNext. Answer the user\'s ' +
-      'question directly and concisely using ONLY the knowledge-base excerpts provided.\n' +
-      'Rules:\n' +
-      '1. Answer ONLY what was asked. Do not add related details the user did not request.\n' +
-      "2. If the excerpts do not contain the answer, reply only that you couldn't find it in the knowledge base.\n" +
-      '3. Be brief: a few sentences, or a short list using "- " lines when the answer is genuinely a list.\n' +
-      '4. You may use **bold** for key terms.\n' +
-      '5. Never write URLs yourself; sources are displayed separately.';
+    const system = await getPrompt();
     const user = `Question: ${question}\n\nKnowledge-base excerpts:\n${context}`;
-
     const answer = await openaiChat(openaiKey, chatModel, [
       { role: 'system', content: system },
       { role: 'user', content: user }
