@@ -1,8 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 
-// Turn the AI's light markdown into clean React (bold + bullet lists), so
-// **word** shows as bold and "- item" shows as a real bullet.
 function inline(s) {
   const parts = String(s).split(/(\*\*[^*]+\*\*)/g);
   return parts.map((p, i) =>
@@ -40,9 +38,8 @@ export default function Home() {
   const [authed, setAuthed] = useState(false);
   const [pwInput, setPwInput] = useState('');
 
-  const [question, setQuestion] = useState('');
-  const [answer, setAnswer] = useState(null);
-  const [sources, setSources] = useState([]);
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -50,6 +47,7 @@ export default function Home() {
   const [syncMsg, setSyncMsg] = useState('');
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef(null);
+  const threadRef = useRef(null);
 
   useEffect(() => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem('appPw') : '';
@@ -57,34 +55,44 @@ export default function Home() {
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, []);
 
+  useEffect(() => {
+    if (threadRef.current) threadRef.current.scrollTop = threadRef.current.scrollHeight;
+  }, [messages, loading]);
+
   function fmt(s) { const m = Math.floor(s / 60); const sec = s % 60; return `${m}:${String(sec).padStart(2, '0')}`; }
   function login() { if (!pwInput) return; localStorage.setItem('appPw', pwInput); setPw(pwInput); setAuthed(true); }
   function logout() { localStorage.removeItem('appPw'); setPw(''); setAuthed(false); setPwInput(''); }
+  function newChat() { setMessages([]); setError(''); setInput(''); }
 
-  async function ask() {
-    setError(''); setAnswer(null); setSources([]);
-    if (!question.trim()) return;
+  async function send() {
+    const q = input.trim();
+    if (!q || loading) return;
+    setError('');
+    setMessages((m) => [...m, { role: 'user', content: q }]);
+    setInput('');
     setLoading(true);
     try {
       const r = await fetch('/api/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-app-password': pw },
-        body: JSON.stringify({ question })
+        body: JSON.stringify({ question: q })
       });
       const j = await r.json();
       if (!r.ok) { if (r.status === 401) logout(); throw new Error(j.error || 'Something went wrong.'); }
-      setAnswer(j.answer); setSources(j.sources || []);
-    } catch (e) { setError(e.message); } finally { setLoading(false); }
+      setMessages((m) => [...m, { role: 'bot', content: j.answer, sources: j.sources || [] }]);
+    } catch (e) {
+      setMessages((m) => [...m, { role: 'bot', content: 'Error: ' + e.message, sources: [] }]);
+    } finally { setLoading(false); }
   }
 
   async function checkUpdates() {
     setError(''); setSyncing(true);
-    setSyncMsg('Reading your Intercom articles… (the first step can take up to a minute)');
+    setSyncMsg('Reading your Intercom articles… (first step can take up to a minute)');
     const start = Date.now(); setElapsed(0);
     if (timerRef.current) clearInterval(timerRef.current);
     timerRef.current = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
     try {
-      let totalProcessed = 0, totalDeleted = 0, published = 0, guard = 0;
+      let done = 0, del = 0, pub = 0, guard = 0;
       for (;;) {
         if (++guard > 400) break;
         const r = await fetch('/api/sync', {
@@ -94,18 +102,16 @@ export default function Home() {
         });
         const j = await r.json();
         if (!r.ok) { if (r.status === 401) logout(); throw new Error(j.error || 'Sync failed.'); }
-        totalProcessed += j.processed || 0;
-        totalDeleted = j.deleted || totalDeleted;
-        published = j.totalPublished || published;
+        done += j.processed || 0; del = j.deleted || del; pub = j.totalPublished || pub;
         if (j.done) {
-          const parts = [`${totalProcessed} article${totalProcessed === 1 ? '' : 's'} updated`];
-          if (totalDeleted) parts.push(`${totalDeleted} removed`);
-          setSyncMsg(`✓ Up to date — ${parts.join(', ')}. ${published} published articles in total.`);
+          const parts = [`${done} article${done === 1 ? '' : 's'} updated`];
+          if (del) parts.push(`${del} removed`);
+          setSyncMsg(`✓ Up to date — ${parts.join(', ')}. ${pub} published in total.`);
           break;
         }
-        setSyncMsg(`Building knowledge base… ${totalProcessed} done, ${j.remaining} to go.`);
+        setSyncMsg(`Building knowledge base… ${done} done, ${j.remaining} to go.`);
       }
-    } catch (e) { setError(e.message); setSyncMsg(''); }
+    } catch (e) { setSyncMsg('Error: ' + e.message); }
     finally { setSyncing(false); if (timerRef.current) clearInterval(timerRef.current); }
   }
 
@@ -126,59 +132,73 @@ export default function Home() {
   }
 
   return (
-    <div className="wrap">
+    <div className="wrap chat-wrap">
       <header className="topbar">
         <div>
           <div className="eyebrow">Knowledge Hub</div>
-          <div className="wordmark">Support <span>Answers</span></div>
+          <div className="wordmark">Support <span>Assistant</span></div>
         </div>
         <nav className="row">
+          <button className="navlink" style={{ background: 'none', border: 'none', cursor: 'pointer' }} onClick={newChat}>New chat</button>
           <Link className="navlink" href="/admin">Admin</Link>
           <button className="navlink" style={{ background: 'none', border: 'none', cursor: 'pointer' }} onClick={logout}>Sign out</button>
         </nav>
       </header>
 
-      <section className="card">
-        <span className="field-label">Knowledge base</span>
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start' }}>
-          <span className="help" style={{ marginTop: 0, maxWidth: '70%' }}>Pull the latest published FAQs from Intercom. Only changed articles are re-processed.</span>
-          <button className="btn btn-ghost" onClick={checkUpdates} disabled={syncing}>
-            {syncing ? `Working… ${fmt(elapsed)}` : 'Check for updates'}
-          </button>
-        </div>
-        {syncMsg && <div className="status-line">{syncMsg}</div>}
-        {syncing && <div className="status-line">Safe to leave this tab open while it runs.</div>}
-      </section>
+      <div className="kb-bar">
+        <span className="help" style={{ marginTop: 0 }}>Knowledge base synced from Intercom · only changed articles re-processed</span>
+        <button className="btn btn-ghost btn-sm" onClick={checkUpdates} disabled={syncing}>
+          {syncing ? `Updating… ${fmt(elapsed)}` : 'Check for updates'}
+        </button>
+      </div>
+      {syncMsg && <div className="status-line kb-status">{syncMsg}</div>}
 
-      <section className="card">
-        <label className="field-label" htmlFor="q">Ask a question</label>
-        <textarea id="q" value={question} placeholder="e.g. How long do withdrawals take?"
-          onChange={(e) => setQuestion(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) ask(); }} />
-        <div className="row" style={{ marginTop: 12 }}>
-          <button className="btn" onClick={ask} disabled={loading}>{loading ? 'Searching…' : 'Search knowledge base'}</button>
-          <span className="help" style={{ marginTop: 0 }}>Tip: Ctrl/⌘ + Enter to search</span>
-        </div>
-        {error && <div className="error">{error}</div>}
-      </section>
-
-      {answer && (
-        <section className="card answer-card">
-          <span className="field-label">Answer</span>
-          <div className="answer">{renderAnswer(answer)}</div>
-          {sources.length > 0 && (
-            <div className="sources">
-              <h4>Referenced articles</h4>
-              {sources.map((s, i) => (
-                <a className="source-item" key={i} href={s.url} target="_blank" rel="noreferrer">
-                  <span className="st">{s.title} <span className="arr">↗</span></span>
-                  <span className="su">{s.url}</span>
-                </a>
-              ))}
+      <div className="chat card">
+        <div className="chat-thread" ref={threadRef}>
+          {messages.length === 0 && !loading && (
+            <div className="empty-state">
+              <div className="empty-title">Ask about your FAQs</div>
+              <div className="empty-sub">Every answer cites the exact article and link it came from.</div>
             </div>
           )}
-        </section>
-      )}
+          {messages.map((m, i) => (
+            m.role === 'user' ? (
+              <div className="msg msg-user" key={i}><div className="bubble bubble-user">{m.content}</div></div>
+            ) : (
+              <div className="msg msg-bot" key={i}>
+                <div className="bubble bubble-bot">
+                  <div className="answer">{renderAnswer(m.content)}</div>
+                  {m.sources && m.sources.length > 0 && (
+                    <div className="sources">
+                      <h4>Referenced articles</h4>
+                      {m.sources.map((s, j) => (
+                        <a className="source-item" key={j} href={s.url} target="_blank" rel="noreferrer">
+                          <span className="st">{s.title} <span className="arr">↗</span></span>
+                          <span className="su">{s.url}</span>
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )
+          ))}
+          {loading && (
+            <div className="msg msg-bot"><div className="bubble bubble-bot typing"><span></span><span></span><span></span></div></div>
+          )}
+        </div>
+
+        <div className="composer">
+          <textarea
+            value={input}
+            placeholder="Ask a question…  (Enter to send, Shift+Enter for a new line)"
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+          />
+          <button className="btn send-btn" onClick={send} disabled={loading || !input.trim()}>Send</button>
+        </div>
+      </div>
+      {error && <div className="error">{error}</div>}
     </div>
   );
 }
