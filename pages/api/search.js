@@ -20,12 +20,12 @@ export default async function handler(req, res) {
 
     const sb = supabaseAdmin();
 
-    // 1. Turn the question into "meaning" numbers and find the closest pieces
+    // 1. Find the closest pieces (fewer + a slightly higher bar = tighter results)
     const [qvec] = await openaiEmbed(openaiKey, [question]);
     const { data: matches, error } = await sb.rpc('match_chunks', {
       query_embedding: qvec,
-      match_threshold: 0.3,
-      match_count: 8
+      match_threshold: 0.35,
+      match_count: 5
     });
     if (error) throw new Error('Search failed: ' + error.message);
 
@@ -36,12 +36,12 @@ export default async function handler(req, res) {
       });
     }
 
-    // 2. Build the context we hand to GPT
+    // 2. Context for the model
     const context = matches
       .map((m, i) => `[${i + 1}] ${m.article_title}\nURL: ${m.article_url}\n${m.content}`)
       .join('\n\n---\n\n');
 
-    // 3. Build the authoritative source list ourselves (URLs cannot be invented)
+    // 3. Authoritative source list (URLs come from our data, never invented)
     const seen = new Set();
     const sources = [];
     for (const m of matches) {
@@ -52,10 +52,14 @@ export default async function handler(req, res) {
     }
 
     const system =
-      'You are a support knowledge assistant. Answer the question using ONLY the ' +
-      'knowledge-base excerpts provided. If the answer is not in them, say you ' +
-      "couldn't find it in the knowledge base. Be clear and concise. Do not write " +
-      'URLs yourself — the app displays the sources separately.';
+      'You are a support knowledge assistant for FundedNext. Answer the user\'s ' +
+      'question directly and concisely using ONLY the knowledge-base excerpts provided.\n' +
+      'Rules:\n' +
+      '1. Answer ONLY what was asked. Do not add related details the user did not request.\n' +
+      "2. If the excerpts do not contain the answer, reply only that you couldn't find it in the knowledge base.\n" +
+      '3. Be brief: a few sentences, or a short list using "- " lines when the answer is genuinely a list.\n' +
+      '4. You may use **bold** for key terms.\n' +
+      '5. Never write URLs yourself; sources are displayed separately.';
     const user = `Question: ${question}\n\nKnowledge-base excerpts:\n${context}`;
 
     const answer = await openaiChat(openaiKey, chatModel, [
