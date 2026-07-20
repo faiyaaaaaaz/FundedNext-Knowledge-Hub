@@ -103,39 +103,63 @@ export default function Home() {
 
   async function checkUpdates() {
     setError(''); setSyncing(true); cancelRef.current = false;
-    const controller = new AbortController();
-    abortRef.current = controller;
     setSyncMsg('Reading your Intercom articles…');
     const start = Date.now(); setElapsed(0);
     if (timerRef.current) clearInterval(timerRef.current);
     timerRef.current = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
+
+    let done = 0, del = 0, pub = 0, guard = 0, fails = 0;
     try {
-      let done = 0, del = 0, pub = 0, guard = 0;
       for (;;) {
         if (cancelRef.current) { setSyncMsg(`Stopped at ${done} articles. Progress is saved — press Check for updates to resume.`); break; }
-        if (++guard > 400) break;
-        const r = await fetch('/api/sync', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-app-password': pw },
-          body: JSON.stringify({}),
-          signal: controller.signal
-        });
-        const j = await r.json();
-        if (!r.ok) { if (r.status === 401) logout(); throw new Error(j.error || 'Sync failed.'); }
+        if (++guard > 3000) break;
+
+        const ctrl = new AbortController();
+        abortRef.current = ctrl;
+        const killer = setTimeout(() => ctrl.abort(), 90000); // abort a stuck call after 90s
+
+        let j;
+        try {
+          const r = await fetch('/api/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-app-password': pw },
+            body: JSON.stringify({}),
+            signal: ctrl.signal
+          });
+          clearTimeout(killer);
+          if (r.status === 401) { logout(); setSyncMsg('Signed out — please sign in again.'); break; }
+          if (!r.ok) throw new Error('server ' + r.status);
+          j = await r.json();
+        } catch (err) {
+          clearTimeout(killer);
+          if (cancelRef.current) { setSyncMsg(`Stopped at ${done} articles. Progress is saved — press Check for updates to resume.`); break; }
+          fails++;
+          if (fails > 8) { setSyncMsg(`Paused after several connection issues at ${done} done. Press Check for updates to continue.`); break; }
+          setSyncMsg(`Reconnecting… ${done} done so far (retry ${fails}).`);
+          await new Promise((res) => setTimeout(res, 2500));
+          continue; // one bad call never stops the whole build
+        }
+
+        fails = 0;
+        if (j.error) { setSyncMsg('Error: ' + j.error); break; }
         done += j.processed || 0; del = j.deleted || del; pub = j.totalPublished || pub;
         if (j.done) {
-          const parts = [`${done} article${done === 1 ? '' : 's'} updated`];
+          const parts = [`${done} article${done === 1 ? '' : 's'} indexed`];
           if (del) parts.push(`${del} removed`);
-          setSyncMsg(`✓ Up to date — ${parts.join(', ')}. ${pub} published in total.`);
+          setSyncMsg(`✓ Up to date — ${parts.join(', ')}. ${pub || ''} published in total.`);
           break;
         }
-        setSyncMsg(`Building knowledge base… ${done} done, ${j.remaining} to go.`);
+        if (j.phase === 'detecting') {
+          setSyncMsg(`Scanning all articles for changes… found ${j.remaining} to index (one-time step, ~1 min).`);
+        } else {
+          const latest = (j.sampleTitles && j.sampleTitles.length) ? `  ·  Latest: ${j.sampleTitles.join(', ')}` : '';
+          setSyncMsg(`Indexing… ${done} done, ${j.remaining} to go.${latest}`);
+        }
       }
-    } catch (e) {
-      if (e.name === 'AbortError' || cancelRef.current) setSyncMsg('Stopped. Progress is saved — press Check for updates to resume.');
-      else setSyncMsg('Error: ' + e.message);
+    } finally {
+      setSyncing(false);
+      if (timerRef.current) clearInterval(timerRef.current);
     }
-    finally { setSyncing(false); if (timerRef.current) clearInterval(timerRef.current); }
   }
 
   const ThemeBtn = (
@@ -187,6 +211,7 @@ export default function Home() {
         </div>
       </div>
       {syncMsg && <div className="status-line kb-status">{syncMsg}</div>}
+      {syncing && <div className="status-line" style={{ marginBottom: 10 }}>● Working — {fmt(elapsed)} elapsed. This number ticking means it's alive; the count above jumps every few seconds.</div>}
 
       <div className="chat card">
         <div className="chat-thread" ref={threadRef}>
