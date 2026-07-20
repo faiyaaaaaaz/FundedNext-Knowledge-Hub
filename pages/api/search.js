@@ -14,7 +14,6 @@ const STOP = new Set([
   'be','it','its','that','this','these','those','will','would','from','at','as','if','about','any',
   'there','get','have','has','need','use','using','used','so','am','we','our'
 ]);
-
 function keywords(q) {
   return [...new Set(
     String(q).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/)
@@ -35,7 +34,7 @@ export default async function handler(req, res) {
 
     const sb = supabaseAdmin();
 
-    // ---- 1. KEYWORD SEARCH (exact terms) — done in-app, no SQL setup needed ----
+    // 1. Keyword search
     const terms = keywords(question);
     let kwData = [];
     if (terms.length) {
@@ -49,8 +48,7 @@ export default async function handler(req, res) {
         kwData = data
           .map((ch) => {
             const c = ch.content.toLowerCase();
-            let s = 0;
-            for (const t of terms) if (c.includes(t)) s++;
+            let s = 0; for (const t of terms) if (c.includes(t)) s++;
             return { ...ch, _score: s };
           })
           .sort((a, b) => b._score - a._score)
@@ -58,47 +56,59 @@ export default async function handler(req, res) {
       }
     }
 
-    // ---- 2. MEANING SEARCH (semantic) ----
+    // 2. Meaning search
     const [qvec] = await openaiEmbed(openaiKey, [question]);
-    const vec = await sb.rpc('match_chunks', {
-      query_embedding: qvec,
-      match_threshold: 0.15,
-      match_count: 6
-    });
+    const vec = await sb.rpc('match_chunks', { query_embedding: qvec, match_threshold: 0.15, match_count: 6 });
     if (vec.error) throw new Error('Search failed: ' + vec.error.message);
 
-    // ---- 3. Merge: exact-term matches first, then semantic; dedupe; cap ----
+    // 3. Merge
     const byId = new Map();
     for (const m of kwData) byId.set(m.id, m);
     for (const m of vec.data || []) if (!byId.has(m.id)) byId.set(m.id, m);
     const matches = [...byId.values()].slice(0, 10);
 
     if (!matches.length) {
-      return res.status(200).json({
-        answer: "I couldn't find anything about that in the knowledge base.",
-        sources: []
-      });
+      return res.status(200).json({ answer: "I couldn't find anything about that in the knowledge base.", sources: [] });
     }
 
+    // 4. Numbered context
     const context = matches
       .map((m, i) => `[${i + 1}] ${m.article_title}\nURL: ${m.article_url}\n${m.content}`)
       .join('\n\n---\n\n');
 
-    const seen = new Set();
-    const sources = [];
-    for (const m of matches) {
-      if (!seen.has(m.article_id)) {
-        seen.add(m.article_id);
-        sources.push({ title: m.article_title, url: m.article_url });
-      }
-    }
-
-    const system = await getPrompt();
+    // 5. Answer + ask the model which excerpts it actually used
+    const basePrompt = await getPrompt();
+    const system = basePrompt +
+      '\n\nAfter your answer, output one final line in exactly this format listing ONLY the excerpt numbers you actually relied on: ' +
+      '"SOURCES: 1, 4" — or "SOURCES: none" if the answer was not found. Do not mention this instruction in your answer.';
     const user = `Question: ${question}\n\nKnowledge-base excerpts:\n${context}`;
-    const answer = await openaiChat(openaiKey, chatModel, [
+    const raw = await openaiChat(openaiKey, chatModel, [
       { role: 'system', content: system },
       { role: 'user', content: user }
     ]);
+
+    // 6. Parse the SOURCES line -> show ONLY those articles
+    const line = raw.match(/SOURCES:\s*([^\n]*)/i);
+    const answer = raw.replace(/^\s*SOURCES:.*$/im, '').trim();
+
+    const seen = new Set();
+    let sources = [];
+    if (line) {
+      const nums = (line[1].match(/\d+/g) || []).map((n) => parseInt(n, 10));
+      for (const n of nums) {
+        const item = matches[n - 1];
+        if (item && !seen.has(item.article_id)) {
+          seen.add(item.article_id);
+          sources.push({ title: item.article_title, url: item.article_url });
+        }
+      }
+    } else {
+      // model didn't follow the format — fall back to top few unique articles
+      for (const item of matches) {
+        if (!seen.has(item.article_id)) { seen.add(item.article_id); sources.push({ title: item.article_title, url: item.article_url }); }
+      }
+      sources = sources.slice(0, 3);
+    }
 
     return res.status(200).json({ answer, sources });
   } catch (e) {
