@@ -41,17 +41,25 @@ export default function Home() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [openSrc, setOpenSrc] = useState({});
   const [error, setError] = useState('');
 
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
   const [elapsed, setElapsed] = useState(0);
+  const [theme, setTheme] = useState('light');
   const timerRef = useRef(null);
   const threadRef = useRef(null);
+  const cancelRef = useRef(false);
 
   useEffect(() => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem('appPw') : '';
     if (saved) { setPw(saved); setAuthed(true); }
+    try {
+      const t = localStorage.getItem('theme') || 'light';
+      setTheme(t);
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {}
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, []);
 
@@ -59,10 +67,17 @@ export default function Home() {
     if (threadRef.current) threadRef.current.scrollTop = threadRef.current.scrollHeight;
   }, [messages, loading]);
 
+  function toggleTheme() {
+    const t = theme === 'dark' ? 'light' : 'dark';
+    setTheme(t);
+    try { localStorage.setItem('theme', t); } catch (e) {}
+    document.documentElement.setAttribute('data-theme', t);
+  }
+
   function fmt(s) { const m = Math.floor(s / 60); const sec = s % 60; return `${m}:${String(sec).padStart(2, '0')}`; }
   function login() { if (!pwInput) return; localStorage.setItem('appPw', pwInput); setPw(pwInput); setAuthed(true); }
   function logout() { localStorage.removeItem('appPw'); setPw(''); setAuthed(false); setPwInput(''); }
-  function newChat() { setMessages([]); setError(''); setInput(''); }
+  function newChat() { setMessages([]); setError(''); setInput(''); setOpenSrc({}); }
 
   async function send() {
     const q = input.trim();
@@ -86,14 +101,15 @@ export default function Home() {
   }
 
   async function checkUpdates() {
-    setError(''); setSyncing(true);
-    setSyncMsg('Reading your Intercom articles… (first step can take up to a minute)');
+    setError(''); setSyncing(true); cancelRef.current = false;
+    setSyncMsg('Reading your Intercom articles…');
     const start = Date.now(); setElapsed(0);
     if (timerRef.current) clearInterval(timerRef.current);
     timerRef.current = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
     try {
       let done = 0, del = 0, pub = 0, guard = 0;
       for (;;) {
+        if (cancelRef.current) { setSyncMsg(`Stopped at ${done} articles. Progress is saved — press Check for updates to resume.`); break; }
         if (++guard > 400) break;
         const r = await fetch('/api/sync', {
           method: 'POST',
@@ -115,6 +131,12 @@ export default function Home() {
     finally { setSyncing(false); if (timerRef.current) clearInterval(timerRef.current); }
   }
 
+  const ThemeBtn = (
+    <button className="navlink" style={{ background: 'none', border: 'none', cursor: 'pointer' }} onClick={toggleTheme} title="Toggle theme">
+      {theme === 'dark' ? '☀ Light' : '☾ Dark'}
+    </button>
+  );
+
   if (!authed) {
     return (
       <div className="wrap center-screen">
@@ -132,13 +154,14 @@ export default function Home() {
   }
 
   return (
-    <div className="wrap chat-wrap">
+    <div className="chat-page">
       <header className="topbar">
         <div>
           <div className="eyebrow">Knowledge Hub</div>
           <div className="wordmark">Support <span>Assistant</span></div>
         </div>
         <nav className="row">
+          {ThemeBtn}
           <button className="navlink" style={{ background: 'none', border: 'none', cursor: 'pointer' }} onClick={newChat}>New chat</button>
           <Link className="navlink" href="/admin">Admin</Link>
           <button className="navlink" style={{ background: 'none', border: 'none', cursor: 'pointer' }} onClick={logout}>Sign out</button>
@@ -146,10 +169,15 @@ export default function Home() {
       </header>
 
       <div className="kb-bar">
-        <span className="help" style={{ marginTop: 0 }}>Knowledge base synced from Intercom · only changed articles re-processed</span>
-        <button className="btn btn-ghost btn-sm" onClick={checkUpdates} disabled={syncing}>
-          {syncing ? `Updating… ${fmt(elapsed)}` : 'Check for updates'}
-        </button>
+        <span className="help" style={{ marginTop: 0 }}>Knowledge base synced from Intercom · published articles only</span>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn btn-ghost btn-sm" onClick={checkUpdates} disabled={syncing}>
+            {syncing ? `Updating… ${fmt(elapsed)}` : 'Check for updates'}
+          </button>
+          {syncing && (
+            <button className="btn btn-ghost btn-sm" onClick={() => { cancelRef.current = true; }}>Cancel</button>
+          )}
+        </div>
       </div>
       {syncMsg && <div className="status-line kb-status">{syncMsg}</div>}
 
@@ -170,13 +198,19 @@ export default function Home() {
                   <div className="answer">{renderAnswer(m.content)}</div>
                   {m.sources && m.sources.length > 0 && (
                     <div className="sources">
-                      <h4>Referenced articles</h4>
-                      {m.sources.map((s, j) => (
-                        <a className="source-item" key={j} href={s.url} target="_blank" rel="noreferrer">
-                          <span className="st">{s.title} <span className="arr">↗</span></span>
-                          <span className="su">{s.url}</span>
-                        </a>
-                      ))}
+                      <button className="sources-toggle" onClick={() => setOpenSrc((o) => ({ ...o, [i]: !o[i] }))}>
+                        {openSrc[i] ? '▾' : '▸'} {m.sources.length} referenced article{m.sources.length > 1 ? 's' : ''}
+                      </button>
+                      {openSrc[i] && (
+                        <div className="sources-list">
+                          {m.sources.map((s, j) => (
+                            <a className="source-item" key={j} href={s.url} target="_blank" rel="noreferrer">
+                              <span className="st">{s.title} <span className="arr">↗</span></span>
+                              <span className="su">{s.url}</span>
+                            </a>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
