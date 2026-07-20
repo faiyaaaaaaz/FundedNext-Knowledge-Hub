@@ -10,8 +10,6 @@ import {
   openaiEmbed
 } from '../../lib/server';
 
-// Give the function up to 60 seconds. The frontend calls this repeatedly
-// until it reports "done", so even a very large help center finishes safely.
 export const config = { maxDuration: 60 };
 
 export default async function handler(req, res) {
@@ -25,9 +23,9 @@ export default async function handler(req, res) {
 
     const sb = supabaseAdmin();
     const started = Date.now();
-    const budgetMs = 50000; // stop before the 60s limit; frontend will call again
+    const budgetMs = 50000;
 
-    // 1. Get every published article from Intercom
+    // 1. Get every published article from Intercom (all pages)
     const articles = await fetchAllPublishedArticles(intercomToken);
     const liveIds = new Set(articles.map((a) => String(a.id)));
 
@@ -36,16 +34,24 @@ export default async function handler(req, res) {
     if (e1) throw new Error('Reading stored articles failed: ' + e1.message);
     const storedMap = new Map((stored || []).map((r) => [r.intercom_id, r.content_hash]));
 
-    // 3. Remove anything that is no longer published (chunks removed automatically)
-    const toDelete = [...storedMap.keys()].filter((id) => !liveIds.has(id));
+    // 3. SAFETY GUARD: only remove "gone" articles if this fetch looks complete.
+    //    If the fetch returned nothing, or far fewer than we already have, we
+    //    assume it was incomplete and skip deletion — so a bad fetch can never
+    //    wipe the knowledge base.
+    const storedCount = storedMap.size;
+    const fetchedCount = liveIds.size;
+    const safeToDelete = fetchedCount > 0 && (storedCount === 0 || fetchedCount >= storedCount * 0.5);
     let deleted = 0;
-    if (toDelete.length) {
-      const { error } = await sb.from('articles').delete().in('intercom_id', toDelete);
-      if (error) throw new Error('Removing old articles failed: ' + error.message);
-      deleted = toDelete.length;
+    if (safeToDelete) {
+      const toDelete = [...storedMap.keys()].filter((id) => !liveIds.has(id));
+      if (toDelete.length) {
+        const { error } = await sb.from('articles').delete().in('intercom_id', toDelete);
+        if (error) throw new Error('Removing old articles failed: ' + error.message);
+        deleted = toDelete.length;
+      }
     }
 
-    // 4. Find articles that are new or changed (compare a fingerprint of the content)
+    // 4. Find articles that are new or changed
     const pending = [];
     for (const a of articles) {
       const id = String(a.id);
@@ -53,7 +59,7 @@ export default async function handler(req, res) {
       if (storedMap.get(id) !== hash) pending.push({ a, id, hash });
     }
 
-    // 5. Process the changed ones (only until the time budget runs out)
+    // 5. Process changed ones until the time budget runs out
     let processed = 0;
     let remaining = pending.length;
     for (const { a, id, hash } of pending) {
@@ -63,8 +69,6 @@ export default async function handler(req, res) {
       const url = a.url || '';
       const pieces = chunkText(htmlToText(a.body || ''));
 
-      // 5a. Make sure the parent article row exists FIRST (with a temporary
-      //     fingerprint), so the pieces have something to attach to.
       const { error: eUp } = await sb.from('articles').upsert({
         intercom_id: id,
         title,
@@ -76,7 +80,6 @@ export default async function handler(req, res) {
       });
       if (eUp) throw new Error('Preparing article failed: ' + eUp.message);
 
-      // 5b. Replace this article's old pieces with fresh ones
       const { error: eC } = await sb.from('chunks').delete().eq('article_id', id);
       if (eC) throw new Error('Clearing old pieces failed: ' + eC.message);
 
@@ -100,9 +103,6 @@ export default async function handler(req, res) {
         }
       }
 
-      // 5c. Only now mark the article fully done with its real fingerprint.
-      //     (If anything above failed or timed out, the fingerprint stays
-      //     "pending" and the next run redoes this article cleanly.)
       const { error: eF } = await sb
         .from('articles')
         .update({ content_hash: hash, last_indexed_at: new Date().toISOString() })
