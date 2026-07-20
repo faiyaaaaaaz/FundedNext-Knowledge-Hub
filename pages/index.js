@@ -51,6 +51,7 @@ export default function Home() {
   const timerRef = useRef(null);
   const threadRef = useRef(null);
   const cancelRef = useRef(false);
+  const abortRef = useRef(null);
 
   useEffect(() => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem('appPw') : '';
@@ -102,6 +103,8 @@ export default function Home() {
 
   async function checkUpdates() {
     setError(''); setSyncing(true); cancelRef.current = false;
+    const controller = new AbortController();
+    abortRef.current = controller;
     setSyncMsg('Reading your Intercom articles…');
     const start = Date.now(); setElapsed(0);
     if (timerRef.current) clearInterval(timerRef.current);
@@ -114,7 +117,8 @@ export default function Home() {
         const r = await fetch('/api/sync', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'x-app-password': pw },
-          body: JSON.stringify({})
+          body: JSON.stringify({}),
+          signal: controller.signal
         });
         const j = await r.json();
         if (!r.ok) { if (r.status === 401) logout(); throw new Error(j.error || 'Sync failed.'); }
@@ -127,7 +131,10 @@ export default function Home() {
         }
         setSyncMsg(`Building knowledge base… ${done} done, ${j.remaining} to go.`);
       }
-    } catch (e) { setSyncMsg('Error: ' + e.message); }
+    } catch (e) {
+      if (e.name === 'AbortError' || cancelRef.current) setSyncMsg('Stopped. Progress is saved — press Check for updates to resume.');
+      else setSyncMsg('Error: ' + e.message);
+    }
     finally { setSyncing(false); if (timerRef.current) clearInterval(timerRef.current); }
   }
 
@@ -175,7 +182,7 @@ export default function Home() {
             {syncing ? `Updating… ${fmt(elapsed)}` : 'Check for updates'}
           </button>
           {syncing && (
-            <button className="btn btn-ghost btn-sm" onClick={() => { cancelRef.current = true; }}>Cancel</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => { cancelRef.current = true; if (abortRef.current) abortRef.current.abort(); }}>Cancel</button>
           )}
         </div>
       </div>
