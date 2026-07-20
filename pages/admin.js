@@ -140,7 +140,7 @@ export default function Admin() {
             <span className="pill">default: {status ? status.chatModel : '—'}</span>
           </div>
           <select id="md" value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}
-            style={{ width: '100%', padding: '13px 14px', border: '1px solid var(--line)', borderRadius: 10, fontSize: 15, background: '#fbfcfe', color: 'var(--ink)' }}>
+            style={{ width: '100%', padding: '13px 14px', border: '1px solid var(--line)', borderRadius: 10, fontSize: 15, background: 'var(--input-bg)', color: 'var(--ink)' }}>
             {MODEL_OPTIONS.map((m) => (<option key={m.id} value={m.id}>{m.label}</option>))}
             <option value={CUSTOM}>Custom…</option>
           </select>
