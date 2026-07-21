@@ -107,8 +107,17 @@ export default async function handler(req, res) {
     }
 
     // 6. Parse the SOURCES line -> show ONLY those articles
-    const line = raw.match(/SOURCES:\s*([^\n]*)/i);
-    const answer = raw.replace(/^\s*SOURCES:.*$/im, '').trim();
+    // Models sometimes add their own line citations, for example [1†L1-L9].
+    // Our source cards already provide the real article links, so remove those
+    // visual artifacts and the hidden source-selection instruction.
+    const line = raw.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
+    const answer = raw
+      .replace(/^\s*(?:\*\*)?SOURCES(?:\*\*)?\s*:.*$/gim, '')
+      .replace(/[\[{(]?\d+†L\d+(?:\s*[-–]\s*L?\d+)?[\]})]?/g, '')
+      .replace(/【\d+†L\d+(?:\s*[-–]\s*L?\d+)?】/g, '')
+      .replace(/[ \t]+([,.;:!?])/g, '$1')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
 
     const seen = new Set();
     let sources = [];
