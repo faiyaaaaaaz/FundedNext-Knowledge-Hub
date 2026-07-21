@@ -13,8 +13,8 @@ export default async function handler(req, res) {
     }
 
     if (req.method === 'POST') {
-      const { intercomToken, openaiKey, chatModel } = req.body || {};
-      await saveKeys({ intercomToken, openaiKey, chatModel });
+      const { intercomToken, openaiKey, groqKey, chatModel, chatProvider, chatPrompt } = req.body || {};
+      await saveKeys({ intercomToken, openaiKey, groqKey, chatModel, chatProvider, chatPrompt });
       const status = await keysStatus();
       return res.status(200).json({ ok: true, ...status });
     }
