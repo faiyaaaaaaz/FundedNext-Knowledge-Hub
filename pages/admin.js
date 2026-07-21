@@ -1,193 +1,134 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 
-const OPENAI_MODELS = [
-  { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna (fast, low cost)' },
-  { id: 'gpt-5.6', label: 'GPT-5.6 (strongest)' },
-  { id: 'gpt-5.5', label: 'GPT-5.5' },
-  { id: 'gpt-4.1-mini', label: 'GPT-4.1 mini' },
-  { id: 'gpt-4o', label: 'GPT-4o' }
-];
-const GROQ_MODELS = [
-  { id: 'openai/gpt-oss-120b', label: 'GPT-OSS 120B (best quality)' },
-  { id: 'openai/gpt-oss-20b', label: 'GPT-OSS 20B (faster)' },
-  { id: 'qwen/qwen3.6-27b', label: 'Qwen 3.6 27B' }
-];
-const CUSTOM = '__custom__';
+const OPENAI_MODELS = ['gpt-5.6-luna', 'gpt-5.6', 'gpt-5.5', 'gpt-4.1-mini', 'gpt-4o'];
+const GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.6-27b'];
+
+function Brand() { return <div className="brand"><img src="/favicon.svg" alt="" /><div><b>FundedNext</b><span>Admin Console</span></div></div>; }
 
 export default function Admin() {
-  const [pw, setPw] = useState('');
-  const [authed, setAuthed] = useState(false);
-  const [pwInput, setPwInput] = useState('');
+  const [session, setSession] = useState('');
+  const [role, setRole] = useState('');
+  const [password, setPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [tab, setTab] = useState('access');
   const [status, setStatus] = useState(null);
   const [intercom, setIntercom] = useState('');
   const [openai, setOpenai] = useState('');
   const [groq, setGroq] = useState('');
-  const [provider, setProvider] = useState('openai');
-  const [selectedModel, setSelectedModel] = useState('gpt-5.6-luna');
+  const [agentPassword, setAgentPassword] = useState('');
+  const [provider, setProvider] = useState('groq');
+  const [model, setModel] = useState('openai/gpt-oss-120b');
   const [customModel, setCustomModel] = useState('');
-  const [makeDefault, setMakeDefault] = useState(false);
   const [prompt, setPrompt] = useState('');
-  const [msg, setMsg] = useState('');
-  const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+  const [theme, setTheme] = useState('light');
 
   useEffect(() => {
-    const saved = typeof window !== 'undefined' ? localStorage.getItem('appPw') : '';
-    if (saved) { setPw(saved); setAuthed(true); loadStatus(saved); }
+    const savedSession = localStorage.getItem('appSession') || '';
+    const savedRole = localStorage.getItem('appRole') || '';
+    const savedTheme = localStorage.getItem('theme') || 'light';
+    setTheme(savedTheme); document.documentElement.setAttribute('data-theme', savedTheme);
+    if (savedSession && savedRole === 'admin') { setSession(savedSession); setRole(savedRole); load(savedSession); }
+    else if (savedSession) { setSession(savedSession); setRole(savedRole); }
   }, []);
 
-  async function loadStatus(password) {
+  async function login() {
+    setLoginError('');
+    try {
+      const response = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not sign in.');
+      if (data.role !== 'admin') throw new Error('This area requires the master password.');
+      localStorage.setItem('appSession', data.token); localStorage.setItem('appRole', data.role);
+      setSession(data.token); setRole(data.role); setPassword(''); load(data.token);
+    } catch (e) { setLoginError(e.message); }
+  }
+
+  async function load(token = session) {
     setError('');
     try {
-      const response = await fetch('/api/settings', { headers: { 'x-app-password': password } });
+      const response = await fetch('/api/settings', { headers: { 'x-app-session': token } });
       const data = await response.json();
-      if (!response.ok) {
-        if (response.status === 401) logout();
-        throw new Error(data.error || 'Could not load.');
-      }
-      setStatus(data);
-      const currentProvider = data.chatProvider === 'groq' ? 'groq' : 'openai';
-      const options = currentProvider === 'groq' ? GROQ_MODELS : OPENAI_MODELS;
-      const currentModel = data.chatModel || (currentProvider === 'groq' ? 'openai/gpt-oss-120b' : 'gpt-5.6-luna');
-      setProvider(currentProvider);
-      if (options.some((model) => model.id === currentModel)) setSelectedModel(currentModel);
-      else { setSelectedModel(CUSTOM); setCustomModel(currentModel); }
-      setPrompt(data.chatPrompt || '');
+      if (!response.ok) throw new Error(data.error || 'Could not load settings.');
+      setStatus(data); setProvider(data.chatProvider || 'openai'); setModel(data.chatModel || 'gpt-4.1-mini'); setPrompt(data.chatPrompt || '');
     } catch (e) { setError(e.message); }
   }
 
-  function login() {
-    if (!pwInput) return;
-    localStorage.setItem('appPw', pwInput);
-    setPw(pwInput); setAuthed(true); loadStatus(pwInput);
+  async function save(body, success) {
+    setSaving(true); setError(''); setNotice('');
+    try {
+      const response = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-app-session': session }, body: JSON.stringify(body) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not save changes.');
+      setStatus(data); setNotice(success); return true;
+    } catch (e) { setError(e.message); return false; } finally { setSaving(false); }
+  }
+
+  async function saveAgentPassword() {
+    if (agentPassword.length < 10) return setError('Use at least 10 characters for the agent password.');
+    if (await save({ agentPassword }, 'Agent password updated. All previous agent sessions were signed out.')) setAgentPassword('');
+  }
+
+  async function logoutAgents() {
+    if (!window.confirm('Log out every agent now? They will need the current agent password to sign in again.')) return;
+    await save({ logoutAgents: true }, 'All agent sessions have been ended.');
+  }
+
+  async function saveProvider() {
+    const chosen = model === '__custom__' ? customModel.trim() : model;
+    if (!chosen) return setError('Enter a model ID.');
+    await save({ chatProvider: provider, chatModel: chosen, chatPrompt: prompt }, 'AI settings saved.');
+  }
+
+  async function saveKeys() {
+    const body = {};
+    if (intercom.trim()) body.intercomToken = intercom.trim();
+    if (openai.trim()) body.openaiKey = openai.trim();
+    if (groq.trim()) body.groqKey = groq.trim();
+    if (await save(body, 'API keys saved securely.')) { setIntercom(''); setOpenai(''); setGroq(''); }
   }
 
   function logout() {
-    localStorage.removeItem('appPw');
-    setPw(''); setAuthed(false); setPwInput(''); setStatus(null);
+    localStorage.removeItem('appSession'); localStorage.removeItem('appRole'); localStorage.removeItem('appPw');
+    setSession(''); setRole(''); setStatus(null);
   }
 
-  function changeProvider(nextProvider) {
-    setProvider(nextProvider);
-    setSelectedModel(nextProvider === 'groq' ? 'openai/gpt-oss-120b' : 'gpt-5.6-luna');
-    setCustomModel('');
-    setMakeDefault(false);
+  function toggleTheme() {
+    const next = theme === 'dark' ? 'light' : 'dark'; setTheme(next);
+    localStorage.setItem('theme', next); document.documentElement.setAttribute('data-theme', next);
   }
 
-  async function save() {
-    setError(''); setMsg(''); setSaving(true);
-    try {
-      const body = { chatPrompt: prompt };
-      if (intercom.trim()) body.intercomToken = intercom.trim();
-      if (openai.trim()) body.openaiKey = openai.trim();
-      if (groq.trim()) body.groqKey = groq.trim();
-      if (makeDefault) {
-        const chosen = selectedModel === CUSTOM ? customModel.trim() : selectedModel;
-        if (!chosen) throw new Error('Please enter a model name.');
-        body.chatProvider = provider;
-        body.chatModel = chosen;
-      }
-      const response = await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-app-password': pw },
-        body: JSON.stringify(body)
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        if (response.status === 401) logout();
-        throw new Error(data.error || 'Save failed.');
-      }
-      setStatus(data);
-      setIntercom(''); setOpenai(''); setGroq(''); setMakeDefault(false);
-      setPrompt(data.chatPrompt || '');
-      setMsg('Saved.');
-    } catch (e) { setError(e.message); } finally { setSaving(false); }
-  }
+  if (!session || role !== 'admin') return <main className="login-page"><section className="login-panel admin-login"><Brand /><div className="login-copy"><span className="status-chip">Restricted area</span><h1>Admin access</h1><p>Use the master password to manage access, AI settings, and integrations.</p></div><div className="login-form"><label htmlFor="admin-password">Master password</label><input id="admin-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && login()} placeholder="Enter master password" /><button className="btn btn-primary" onClick={login}>Open admin console <span>→</span></button>{loginError && <div className="inline-error">{loginError}</div>}<Link href="/" className="back-link">← Back to assistant</Link></div></section></main>;
 
-  const selectStyle = {
-    width: '100%', padding: '13px 14px', border: '1px solid var(--line)',
-    borderRadius: 10, fontSize: 15, background: 'var(--input-bg)', color: 'var(--ink)'
-  };
-
-  if (!authed) {
-    return (
-      <div className="wrap center-screen"><div className="login-box card">
-        <div className="eyebrow">Knowledge Hub · Admin</div>
-        <h2 style={{ marginTop: 6, marginBottom: 18 }}>Enter password</h2>
-        <input type="password" value={pwInput} placeholder="Password" onChange={(e) => setPwInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && login()} />
-        <div style={{ marginTop: 12 }}><button className="btn" onClick={login} style={{ width: '100%' }}>Continue</button></div>
-      </div></div>
-    );
-  }
-
-  function KeyField({ id, label, value, setValue, isSet, help }) {
-    return (
-      <div style={{ marginBottom: 18 }}>
-        <div className="row" style={{ justifyContent: 'space-between' }}>
-          <label className="field-label" htmlFor={id}>{label}</label>
-          <span className={'pill' + (isSet ? ' set' : '')}>{isSet ? 'set ✓' : 'not set'}</span>
-        </div>
-        <input id={id} type="password" value={value} placeholder="Paste to set or replace" onChange={(e) => setValue(e.target.value)} />
-        {help && <p className="help">{help}</p>}
-      </div>
-    );
-  }
-
+  const models = provider === 'groq' ? GROQ_MODELS : OPENAI_MODELS;
   return (
-    <div className="wrap">
-      <header className="topbar">
-        <div><div className="eyebrow">Knowledge Hub</div><div className="wordmark">API <span>Vault</span></div></div>
-        <nav className="row">
-          <Link className="navlink" href="/">Back to chat</Link>
-          <button className="navlink" style={{ background: 'none', border: 'none', cursor: 'pointer' }} onClick={logout}>Sign out</button>
-        </nav>
-      </header>
+    <main className="admin-shell">
+      <aside className="admin-sidebar"><Brand /><nav>{[
+        ['access', '⌁', 'Team access'], ['ai', '✦', 'AI & model'], ['keys', '◇', 'API vault']
+      ].map(([id, icon, label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => { setTab(id); setNotice(''); setError(''); }}><span>{icon}</span>{label}</button>)}</nav><div className="sidebar-foot"><Link href="/">← Back to assistant</Link><button onClick={logout}>Sign out</button></div></aside>
 
-      <section className="card">
-        <p className="help" style={{ marginTop: 0 }}>Keys are encrypted before storage and never shown again. Leave a field blank to keep the current key.</p>
-        <KeyField id="ic" label="Intercom API key" value={intercom} setValue={setIntercom} isSet={status && status.intercomSet} />
-        <KeyField id="oa" label="OpenAI API key" value={openai} setValue={setOpenai} isSet={status && status.openaiSet}
-          help="Required for finding the right knowledge-base articles, even when Groq writes the answer." />
-        <KeyField id="gq" label="Groq API key" value={groq} setValue={setGroq} isSet={status && status.groqSet}
-          help="Optional. When selected below, Groq writes answers and OpenAI is used only as an automatic backup." />
+      <section className="admin-main">
+        <header className="admin-top"><div><span className="eyebrow">Workspace settings</span><h1>{tab === 'access' ? 'Team access' : tab === 'ai' ? 'AI & model' : 'API vault'}</h1></div><button className="icon-btn" onClick={toggleTheme}>{theme === 'dark' ? '☀' : '◐'}</button></header>
+        {notice && <div className="notice success">✓ {notice}</div>}{error && <div className="notice danger">{error}</div>}
 
-        <div style={{ marginBottom: 18 }}>
-          <div className="row" style={{ justifyContent: 'space-between' }}>
-            <label className="field-label" htmlFor="pv">Answer provider</label>
-            <span className="pill">default: {status ? status.chatProvider : '—'}</span>
-          </div>
-          <select id="pv" value={provider} onChange={(e) => changeProvider(e.target.value)} style={selectStyle}>
-            <option value="openai">OpenAI</option><option value="groq">Groq</option>
-          </select>
-        </div>
+        {tab === 'access' && <div className="settings-stack">
+          <section className="settings-card"><div className="settings-head"><div><h2>Agent login</h2><p>Agents can use the assistant but cannot open this console or update the knowledge base.</p></div><span className={`state-pill ${status?.agentPasswordSet ? 'ready' : ''}`}>{status?.agentPasswordSet ? 'Active' : 'Not configured'}</span></div><label>New agent password</label><div className="field-action"><input type="password" value={agentPassword} onChange={(e) => setAgentPassword(e.target.value)} placeholder="At least 10 characters" /><button className="btn btn-primary" onClick={saveAgentPassword} disabled={saving}>Save password</button></div><p className="field-help">Changing this password immediately signs out every existing agent. Your master session remains active.</p></section>
+          <section className="settings-card danger-card"><div className="settings-head"><div><h2>End all agent sessions</h2><p>Use this if a device or login session should no longer have access.</p></div></div><button className="btn btn-danger" onClick={logoutAgents} disabled={saving}>Log out all agents</button><p className="field-help">Agents can sign back in using the current agent password.</p></section>
+          <section className="settings-card"><div className="settings-head"><div><h2>Access permissions</h2><p>Roles are enforced on the server, not just hidden in the interface.</p></div></div><div className="permission-table"><div><b>Capability</b><b>Admin</b><b>Agent</b></div>{[['Ask the assistant','✓','✓'],['View cited articles','✓','✓'],['Update knowledge base','✓','—'],['Manage API keys','✓','—'],['Manage team access','✓','—']].map((row) => <div key={row[0]}><span>{row[0]}</span><span>{row[1]}</span><span>{row[2]}</span></div>)}</div></section>
+        </div>}
 
-        <div style={{ marginBottom: 18 }}>
-          <div className="row" style={{ justifyContent: 'space-between' }}>
-            <label className="field-label" htmlFor="md">Answering model</label>
-            <span className="pill">default: {status ? status.chatModel : '—'}</span>
-          </div>
-          <select id="md" value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)} style={selectStyle}>
-            {(provider === 'groq' ? GROQ_MODELS : OPENAI_MODELS).map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
-            <option value={CUSTOM}>Custom…</option>
-          </select>
-          {selectedModel === CUSTOM && <input type="text" value={customModel} placeholder="Exact model ID" onChange={(e) => setCustomModel(e.target.value)} style={{ marginTop: 10 }} />}
-          <label className="row" style={{ marginTop: 12, cursor: 'pointer' }}>
-            <input type="checkbox" checked={makeDefault} onChange={(e) => setMakeDefault(e.target.checked)} />
-            <span style={{ fontSize: 14 }}>Set this provider and model as the default</span>
-          </label>
-        </div>
+        {tab === 'ai' && <div className="settings-stack">
+          <section className="settings-card"><div className="settings-head"><div><h2>Answer provider</h2><p>OpenAI continues to find relevant articles. This setting controls which model writes the answer.</p></div></div><div className="provider-grid"><button className={provider === 'groq' ? 'selected' : ''} onClick={() => { setProvider('groq'); setModel(GROQ_MODELS[0]); }}><b>Groq</b><span>Fast, cost-efficient answers</span></button><button className={provider === 'openai' ? 'selected' : ''} onClick={() => { setProvider('openai'); setModel(OPENAI_MODELS[0]); }}><b>OpenAI</b><span>Direct OpenAI answers</span></button></div><label>Model</label><select value={models.includes(model) ? model : '__custom__'} onChange={(e) => setModel(e.target.value)}>{models.map((item) => <option key={item} value={item}>{item}</option>)}<option value="__custom__">Custom model…</option></select>{model === '__custom__' && <input value={customModel} onChange={(e) => setCustomModel(e.target.value)} placeholder="Exact model ID" />}</section>
+          <section className="settings-card"><div className="settings-head"><div><h2>Assistant instructions</h2><p>Controls tone, strictness, and how answers use knowledge-base excerpts.</p></div></div><textarea className="prompt-area" value={prompt} onChange={(e) => setPrompt(e.target.value)} /><button className="btn btn-primary" onClick={saveProvider} disabled={saving}>{saving ? 'Saving…' : 'Save AI settings'}</button></section>
+        </div>}
 
-        <div style={{ marginBottom: 18 }}>
-          <label className="field-label" htmlFor="pr">AI instructions (prompt)</label>
-          <textarea id="pr" value={prompt} onChange={(e) => setPrompt(e.target.value)} style={{ minHeight: 200, fontFamily: 'var(--mono)', fontSize: 13, lineHeight: 1.5 }} />
-          <p className="help">This is what the AI is told before every answer. Clear the box and Save to restore the built-in default.</p>
-        </div>
-
-        <div className="row"><button className="btn" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button></div>
-        {msg && <div className="ok">{msg}</div>}
-        {error && <div className="error">{error}</div>}
+        {tab === 'keys' && <div className="settings-stack"><section className="settings-card"><div className="settings-head"><div><h2>Encrypted API keys</h2><p>Keys are encrypted before storage and are never displayed again.</p></div></div>{[
+          ['Intercom API key', intercom, setIntercom, status?.intercomSet], ['OpenAI API key', openai, setOpenai, status?.openaiSet], ['Groq API key', groq, setGroq, status?.groqSet]
+        ].map(([label, value, setter, isSet]) => <div className="vault-field" key={label}><div><label>{label}</label><span className={`state-pill ${isSet ? 'ready' : ''}`}>{isSet ? 'Connected' : 'Not set'}</span></div><input type="password" value={value} onChange={(e) => setter(e.target.value)} placeholder="Paste to set or replace" /></div>)}<button className="btn btn-primary" onClick={saveKeys} disabled={saving}>{saving ? 'Saving…' : 'Save API keys'}</button></section></div>}
       </section>
-    </div>
+    </main>
   );
 }
