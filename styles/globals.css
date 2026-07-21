@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&display=swap');
 
 :root {
   --bg: #f5f5fb; --surface: #ffffff; --surface-2: #f9f8fd; --ink: #171525; --muted: #746f82;
@@ -89,6 +89,7 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 13px; fon
 .answer-head { margin-bottom: 11px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .answer-head span { font-size: 12px; font-weight: 800; }
 .answer-head small { color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.answer { font-family: 'Source Serif 4', Charter, Georgia, serif; font-size: 16.5px; line-height: 1.72; letter-spacing: -.006em; }
 .answer p { margin: 0 0 10px; }
 .answer p:last-child, .answer ul:last-child { margin-bottom: 0; }
 .answer ul { margin: 3px 0 12px; padding-left: 20px; }
