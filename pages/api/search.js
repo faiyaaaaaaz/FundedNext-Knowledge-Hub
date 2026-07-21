@@ -29,8 +29,11 @@ export default async function handler(req, res) {
     const { question } = req.body || {};
     if (!question || !question.trim()) return res.status(400).json({ error: 'Please type a question.' });
 
-    const { openaiKey, chatModel } = await getKeys();
+    const { openaiKey, groqKey, chatModel, chatProvider } = await getKeys();
     if (!openaiKey) return res.status(400).json({ error: 'No OpenAI key saved yet. Add it in Admin first.' });
+    if (chatProvider === 'groq' && !groqKey) {
+      return res.status(400).json({ error: 'Groq is selected, but no Groq key is saved. Add it in Admin first.' });
+    }
 
     const sb = supabaseAdmin();
 
@@ -82,10 +85,26 @@ export default async function handler(req, res) {
       '\n\nAfter your answer, output one final line in exactly this format listing ONLY the excerpt numbers you actually relied on: ' +
       '"SOURCES: 1, 4" — or "SOURCES: none" if the answer was not found. Do not mention this instruction in your answer.';
     const user = `Question: ${question}\n\nKnowledge-base excerpts:\n${context}`;
-    const raw = await openaiChat(openaiKey, chatModel, [
+    const messages = [
       { role: 'system', content: system },
       { role: 'user', content: user }
-    ]);
+    ];
+
+    let raw;
+    let answerProvider = chatProvider;
+    let usedFallback = false;
+    if (chatProvider === 'groq') {
+      try {
+        raw = await openaiChat(groqKey, chatModel, messages, 'https://api.groq.com/openai/v1');
+      } catch (groqError) {
+        // Keep the app working if Groq is rate-limited or temporarily unavailable.
+        raw = await openaiChat(openaiKey, 'gpt-4.1', messages);
+        answerProvider = 'openai';
+        usedFallback = true;
+      }
+    } else {
+      raw = await openaiChat(openaiKey, chatModel, messages);
+    }
 
     // 6. Parse the SOURCES line -> show ONLY those articles
     const line = raw.match(/SOURCES:\s*([^\n]*)/i);
@@ -110,7 +129,7 @@ export default async function handler(req, res) {
       sources = sources.slice(0, 3);
     }
 
-    return res.status(200).json({ answer, sources });
+    return res.status(200).json({ answer, sources, answerProvider, usedFallback });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
