@@ -37,7 +37,9 @@ export default async function handler(req, res) {
       }).select().single();
       if (error) throw error;
       await logActivity({
-        actorRole: access.role, sessionId: access.sessionId, eventType: 'dispute',
+        actorRole: access.role, sessionId: access.sessionId,
+        userName: access.name, userEmail: access.email, authProvider: access.authProvider,
+        eventType: 'dispute',
         provider: body.provider, metadata: { disputeId: data.id, questionPreview: String(body.question).slice(0, 180) }
       });
       return res.status(200).json({ dispute: data });
