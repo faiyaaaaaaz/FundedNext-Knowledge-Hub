@@ -1,6 +1,6 @@
 import {
   authenticateRequest, saveKeys, keysStatus, getAgentAccessStatus,
-  setAgentPassword, revokeAgentSessions, supabaseAdmin
+  revokeAgentSessions, supabaseAdmin
 } from '../../lib/server';
 
 async function fullStatus() {
@@ -22,8 +22,8 @@ export default async function handler(req, res) {
       const body = req.body || {};
       const { intercomToken, openaiKey, groqKey, chatModel, chatProvider, chatPrompt, allowedGoogleDomains } = body;
       await saveKeys({ intercomToken, openaiKey, groqKey, chatModel, chatProvider, chatPrompt, allowedGoogleDomains });
-      if (body.agentPassword) await setAgentPassword(body.agentPassword);
-      else if (body.logoutAgents) await revokeAgentSessions();
+      if (body.agentPassword) return res.status(400).json({ error: 'Agent password login is disabled. Agents must use Google.' });
+      if (body.logoutAgents) await revokeAgentSessions();
       return res.status(200).json({ ok: true, ...(await fullStatus()) });
     }
 
