@@ -1,145 +1,247 @@
 import {
-  authenticateRequest,
-  getKeys,
-  getPrompt,
-  supabaseAdmin,
-  openaiEmbed,
-  openaiChat
+  authenticateRequest, getKeys, getPrompt, supabaseAdmin, openaiEmbed,
+  openaiChatDetailed, getBrandingRules, brandingInstructions,
+  applyBrandingReplacements, getRelevantSnippets, logActivity
 } from '../../lib/server';
 
 const STOP = new Set([
   'the','a','an','of','to','in','on','for','and','or','is','are','was','were','how','much','many',
   'can','could','i','you','your','my','me','do','does','did','what','when','where','which','with',
   'be','it','its','that','this','these','those','will','would','from','at','as','if','about','any',
-  'there','get','have','has','need','use','using','used','so','am','we','our'
+  'there','get','have','has','need','use','using','used','so','am','we','our','please','tell'
 ]);
-function keywords(q) {
-  return [...new Set(
-    String(q).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/)
-      .filter((w) => w.length > 2 && !STOP.has(w))
-  )];
+
+const ACCOUNT_SCOPES = [
+  'stellar instant', 'stellar 1-step', 'stellar 2-step', 'stellar lite',
+  'express consistency', 'express non-consistency', 'rapid', 'legacy', 'bolt',
+  'futures challenge', 'futures fundednext', 'free trial'
+];
+
+const SAFE_UNCONFIRMED =
+  'I’m unable to confirm this accurately right now. Please allow me some time to verify it for you.';
+const CORE_GUARDRAILS =
+  '\n\nNON-OVERRIDABLE QUALITY RULES:\n' +
+  '- Write only a customer-ready reply. Never mention excerpts, source numbers, context, retrieval, database, or knowledge base.\n' +
+  '- Never transfer a rule from one Account type to another.\n' +
+  '- Never guess or generalize with typically, generally, usually, or likely.\n' +
+  `- If direct evidence is insufficient, reply exactly: "${SAFE_UNCONFIRMED}"\n` +
+  '- Factual numbers, dates, percentages, time periods, and conditions must be directly supported by the selected FAQ evidence.';
+
+function keywords(question) {
+  return [...new Set(String(question).toLowerCase().replace(/[^a-z0-9 -]/g, ' ').split(/\s+/)
+    .filter((word) => word.length > 2 && !STOP.has(word)))];
+}
+
+function detectScope(question) {
+  const normalized = String(question).toLowerCase().replace(/[–—]/g, '-');
+  return ACCOUNT_SCOPES.find((scope) => normalized.includes(scope)) || null;
+}
+
+function hasOtherScope(text, target) {
+  const lower = String(text).toLowerCase();
+  return ACCOUNT_SCOPES.some((scope) => scope !== target && lower.includes(scope));
+}
+
+function cleanAnswer(raw) {
+  let answer = String(raw || '')
+    .replace(/^\s*(?:\*\*)?SOURCES(?:\*\*)?\s*:.*$/gim, '')
+    .replace(/^\s*(?:\*\*)?CONFIDENCE(?:\*\*)?\s*:.*$/gim, '')
+    .replace(/\s*\((?:Excerpt|Source)\s*\d+\)/gi, '')
+    .replace(/\b(?:Excerpt|Source)\s*\d+\b/gi, '')
+    .replace(/[\[{(]?\d+†L\d+(?:\s*[-–]\s*L?\d+)?[\]})]?/g, '')
+    .replace(/【\d+†L\d+(?:\s*[-–]\s*L?\d+)?】/g, '')
+    .replace(/[ \t]+([,.;:!?])/g, '$1')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  if (/knowledge\s*base|provided\s+(?:FAQ\s+)?(?:excerpts?|context|information)|the\s+FAQ\s+(?:does\s+not|doesn't)\s+(?:mention|specify|confirm)/i.test(answer)) {
+    answer = SAFE_UNCONFIRMED;
+  }
+  return answer || SAFE_UNCONFIRMED;
+}
+
+function parseNumbers(line) {
+  return (line?.[1]?.match(/\d+/g) || []).map((value) => Number(value));
+}
+
+function estimateCost(provider, model, inputTokens, outputTokens) {
+  if (provider !== 'groq') return null;
+  if (model === 'openai/gpt-oss-120b') return (inputTokens * 0.15 + outputTokens * 0.60) / 1000000;
+  if (model === 'openai/gpt-oss-20b') return (inputTokens * 0.075 + outputTokens * 0.30) / 1000000;
+  return null;
 }
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  const started = Date.now();
+  let access;
   try {
-    const access = await authenticateRequest(req);
+    access = await authenticateRequest(req);
     if (!access) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
 
-    const { question } = req.body || {};
-    if (!question || !question.trim()) return res.status(400).json({ error: 'Please type a question.' });
+    const question = String(req.body?.question || '').trim();
+    if (!question) return res.status(400).json({ error: 'Please type a question.' });
 
     const { openaiKey, groqKey, chatModel, chatProvider } = await getKeys();
-    if (!openaiKey) return res.status(400).json({ error: 'No OpenAI key saved yet. Add it in Admin first.' });
-    if (chatProvider === 'groq' && !groqKey) {
-      return res.status(400).json({ error: 'Groq is selected, but no Groq key is saved. Add it in Admin first.' });
-    }
+    if (!openaiKey) return res.status(400).json({ error: 'No OpenAI key is saved yet.' });
+    if (chatProvider === 'groq' && !groqKey) return res.status(400).json({ error: 'Groq is selected, but no Groq key is saved.' });
 
     const sb = supabaseAdmin();
-
-    // 1. Keyword search
     const terms = keywords(question);
-    let kwData = [];
+    const scope = detectScope(question);
+    let keywordMatches = [];
+
     if (terms.length) {
-      const orExpr = terms.map((t) => `content.ilike.%${t}%`).join(',');
-      const { data, error } = await sb
-        .from('chunks')
+      const expression = terms.map((term) => `content.ilike.%${term}%`).join(',');
+      const { data } = await sb.from('chunks')
         .select('id,article_id,article_title,article_url,content')
-        .or(orExpr)
-        .limit(60);
-      if (!error && Array.isArray(data)) {
-        kwData = data
-          .map((ch) => {
-            const c = ch.content.toLowerCase();
-            let s = 0; for (const t of terms) if (c.includes(t)) s++;
-            return { ...ch, _score: s };
-          })
-          .sort((a, b) => b._score - a._score)
-          .slice(0, 6);
+        .or(expression).limit(80);
+      keywordMatches = data || [];
+    }
+
+    const [queryVector] = await openaiEmbed(openaiKey, [question]);
+    const vectorResult = await sb.rpc('match_chunks', {
+      query_embedding: queryVector,
+      match_threshold: 0.15,
+      match_count: 12
+    });
+    if (vectorResult.error) throw new Error('Search failed: ' + vectorResult.error.message);
+
+    const combined = new Map();
+    for (const item of keywordMatches) combined.set(String(item.id), item);
+    for (const item of vectorResult.data || []) {
+      const key = String(item.id);
+      combined.set(key, { ...(combined.get(key) || {}), ...item });
+    }
+
+    let candidates = [...combined.values()].map((item) => {
+      const title = String(item.article_title || '').toLowerCase();
+      const content = String(item.content || '').toLowerCase();
+      const termScore = terms.reduce((score, term) => score + (title.includes(term) ? 3 : content.includes(term) ? 1 : 0), 0);
+      const scopeScore = scope ? (title.includes(scope) ? 18 : content.includes(scope) ? 8 : hasOtherScope(`${title} ${content}`, scope) ? -18 : 0) : 0;
+      const vectorScore = Number(item.similarity || 0) * 8;
+      return { ...item, _rank: termScore + scopeScore + vectorScore, _scoped: !!scope && (title.includes(scope) || content.includes(scope)) };
+    }).sort((a, b) => b._rank - a._rank);
+
+    if (scope) {
+      const exactScope = candidates.filter((item) => item._scoped);
+      const neutral = candidates.filter((item) => !item._scoped && !hasOtherScope(`${item.article_title} ${item.content}`, scope));
+      candidates = [...exactScope, ...neutral];
+      if (!exactScope.length) {
+        await logActivity({
+          actorRole: access.role, sessionId: access.sessionId, eventType: 'query',
+          success: true, metadata: { scope, confidence: 28, reason: 'No exact Account evidence', durationMs: Date.now() - started }
+        });
+        return res.status(200).json({
+          answer: SAFE_UNCONFIRMED, sources: [], answerProvider: chatProvider,
+          usedFallback: false, confidence: 28, confidenceLabel: 'Needs verification'
+        });
       }
     }
 
-    // 2. Meaning search
-    const [qvec] = await openaiEmbed(openaiKey, [question]);
-    const vec = await sb.rpc('match_chunks', { query_embedding: qvec, match_threshold: 0.15, match_count: 6 });
-    if (vec.error) throw new Error('Search failed: ' + vec.error.message);
-
-    // 3. Merge
-    const byId = new Map();
-    for (const m of kwData) byId.set(m.id, m);
-    for (const m of vec.data || []) if (!byId.has(m.id)) byId.set(m.id, m);
-    const matches = [...byId.values()].slice(0, 10);
-
+    const matches = candidates.slice(0, 10);
     if (!matches.length) {
-      return res.status(200).json({ answer: "I couldn't find anything about that in the knowledge base.", sources: [] });
+      return res.status(200).json({
+        answer: SAFE_UNCONFIRMED, sources: [], answerProvider: chatProvider,
+        usedFallback: false, confidence: 20, confidenceLabel: 'Needs verification'
+      });
     }
 
-    // 4. Numbered context
-    const context = matches
-      .map((m, i) => `[${i + 1}] ${m.article_title}\nURL: ${m.article_url}\n${m.content}`)
-      .join('\n\n---\n\n');
-
-    // 5. Answer + ask the model which excerpts it actually used
-    const basePrompt = await getPrompt();
-    const system = basePrompt +
-      '\n\nAfter your answer, output one final line in exactly this format listing ONLY the excerpt numbers you actually relied on: ' +
-      '"SOURCES: 1, 4" — or "SOURCES: none" if the answer was not found. Do not mention this instruction in your answer.';
-    const user = `Question: ${question}\n\nKnowledge-base excerpts:\n${context}`;
+    const [basePrompt, brandRules, snippets] = await Promise.all([
+      getPrompt(), getBrandingRules(), getRelevantSnippets(question)
+    ]);
+    const context = matches.map((item, index) =>
+      `[${index + 1}] ${item.article_title}\nURL: ${item.article_url}\n${item.content}`
+    ).join('\n\n---\n\n');
+    const snippetText = snippets.length
+      ? '\n\nCORRECTIVE INSTRUCTIONS FROM APPROVED REVIEWS:\n' + snippets.map((item) => `- ${item.instruction}`).join('\n')
+      : '';
+    const scopeText = scope
+      ? `\n\nACCOUNT SCOPE: The question is specifically about "${scope}". Do not use rules belonging to a different Account type.`
+      : '';
+    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText +
+      '\n\nAfter the customer-ready answer, add two private final lines:\n' +
+      'SOURCES: comma-separated evidence numbers actually used, or none\n' +
+      'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim';
     const messages = [
       { role: 'system', content: system },
-      { role: 'user', content: user }
+      { role: 'user', content: `Customer question: ${question}\n\nFAQ evidence:\n${context}` }
     ];
 
-    let raw;
+    let completion;
     let answerProvider = chatProvider;
     let usedFallback = false;
     if (chatProvider === 'groq') {
       try {
-        raw = await openaiChat(groqKey, chatModel, messages, 'https://api.groq.com/openai/v1');
-      } catch (groqError) {
-        // Keep the app working if Groq is rate-limited or temporarily unavailable.
-        raw = await openaiChat(openaiKey, 'gpt-4.1', messages);
+        completion = await openaiChatDetailed(groqKey, chatModel, messages, 'https://api.groq.com/openai/v1');
+      } catch {
+        completion = await openaiChatDetailed(openaiKey, 'gpt-4.1', messages);
         answerProvider = 'openai';
         usedFallback = true;
       }
     } else {
-      raw = await openaiChat(openaiKey, chatModel, messages);
+      completion = await openaiChatDetailed(openaiKey, chatModel, messages);
     }
 
-    // 6. Parse the SOURCES line -> show ONLY those articles
-    // Models sometimes add their own line citations, for example [1†L1-L9].
-    // Our source cards already provide the real article links, so remove those
-    // visual artifacts and the hidden source-selection instruction.
-    const line = raw.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
-    const answer = raw
-      .replace(/^\s*(?:\*\*)?SOURCES(?:\*\*)?\s*:.*$/gim, '')
-      .replace(/[\[{(]?\d+†L\d+(?:\s*[-–]\s*L?\d+)?[\]})]?/g, '')
-      .replace(/【\d+†L\d+(?:\s*[-–]\s*L?\d+)?】/g, '')
-      .replace(/[ \t]+([,.;:!?])/g, '$1')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-
+    const raw = completion.content;
+    const sourceLine = raw.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
+    const confidenceLine = raw.match(/(?:\*\*)?CONFIDENCE(?:\*\*)?\s*:\s*(\d{1,3})/i);
+    const sourceNumbers = parseNumbers(sourceLine);
     const seen = new Set();
     let sources = [];
-    if (line) {
-      const nums = (line[1].match(/\d+/g) || []).map((n) => parseInt(n, 10));
-      for (const n of nums) {
-        const item = matches[n - 1];
-        if (item && !seen.has(item.article_id)) {
+    for (const number of sourceNumbers) {
+      const item = matches[number - 1];
+      if (item && !seen.has(item.article_id)) {
+        seen.add(item.article_id);
+        sources.push({ title: item.article_title, url: item.article_url });
+      }
+    }
+    if (!sourceLine) {
+      for (const item of matches) {
+        if (!seen.has(item.article_id)) {
           seen.add(item.article_id);
           sources.push({ title: item.article_title, url: item.article_url });
         }
+        if (sources.length === 3) break;
       }
-    } else {
-      // model didn't follow the format — fall back to top few unique articles
-      for (const item of matches) {
-        if (!seen.has(item.article_id)) { seen.add(item.article_id); sources.push({ title: item.article_title, url: item.article_url }); }
-      }
-      sources = sources.slice(0, 3);
     }
 
-    return res.status(200).json({ answer, sources, answerProvider, usedFallback });
-  } catch (e) {
-    return res.status(500).json({ error: e.message });
+    const modelConfidence = Math.max(0, Math.min(100, Number(confidenceLine?.[1] || 70)));
+    const scopedCount = matches.filter((item) => item._scoped).length;
+    const evidenceCap = scope ? (scopedCount >= 3 ? 96 : scopedCount === 2 ? 90 : 80) : (sources.length >= 2 ? 92 : 82);
+    const confidence = Math.min(modelConfidence, evidenceCap);
+    const confidenceLabel = confidence >= 85 ? 'High confidence' : confidence >= 65 ? 'Review suggested' : 'Needs verification';
+    let answer = applyBrandingReplacements(cleanAnswer(raw), brandRules);
+    if (confidence < 45) answer = SAFE_UNCONFIRMED;
+
+    const usage = completion.usage || {};
+    const inputTokens = Number(usage.prompt_tokens || usage.input_tokens || 0);
+    const outputTokens = Number(usage.completion_tokens || usage.output_tokens || 0);
+    await logActivity({
+      actorRole: access.role,
+      sessionId: access.sessionId,
+      eventType: 'query',
+      provider: answerProvider,
+      model: usedFallback ? 'gpt-4.1' : chatModel,
+      inputTokens,
+      outputTokens,
+      estimatedCost: estimateCost(answerProvider, usedFallback ? 'gpt-4.1' : chatModel, inputTokens, outputTokens),
+      metadata: {
+        confidence, confidenceLabel, sourceCount: sources.length, scope,
+        fallback: usedFallback, durationMs: Date.now() - started,
+        questionPreview: question.slice(0, 180)
+      }
+    });
+
+    return res.status(200).json({
+      answer, sources, answerProvider, usedFallback, confidence, confidenceLabel
+    });
+  } catch (error) {
+    if (access) await logActivity({
+      actorRole: access.role, sessionId: access.sessionId, eventType: 'query',
+      success: false, metadata: { error: String(error.message || error).slice(0, 300), durationMs: Date.now() - started }
+    });
+    return res.status(500).json({ error: error.message });
   }
 }
