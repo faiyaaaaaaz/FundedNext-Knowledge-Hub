@@ -72,6 +72,10 @@ function estimateCost(provider, model, inputTokens, outputTokens) {
   return null;
 }
 
+function wordCount(text) {
+  return (String(text).trim().match(/\S+/g) || []).length;
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   const started = Date.now();
@@ -130,7 +134,9 @@ export default async function handler(req, res) {
       candidates = [...exactScope, ...neutral];
       if (!exactScope.length) {
         await logActivity({
-          actorRole: access.role, sessionId: access.sessionId, eventType: 'query',
+          actorRole: access.role, sessionId: access.sessionId,
+          userName: access.name, userEmail: access.email, authProvider: access.authProvider,
+          questionWordCount: wordCount(question), eventType: 'query',
           success: true, metadata: { scope, confidence: 28, reason: 'No exact Account evidence', durationMs: Date.now() - started }
         });
         return res.status(200).json({
@@ -171,14 +177,24 @@ export default async function handler(req, res) {
 
     let completion;
     let answerProvider = chatProvider;
-    let usedFallback = false;
+    const usedFallback = false;
     if (chatProvider === 'groq') {
       try {
         completion = await openaiChatDetailed(groqKey, chatModel, messages, 'https://api.groq.com/openai/v1');
-      } catch {
-        completion = await openaiChatDetailed(openaiKey, 'gpt-4.1', messages);
-        answerProvider = 'openai';
-        usedFallback = true;
+      } catch (groqError) {
+        const limited = /429|rate.?limit|too many requests/i.test(String(groqError.message || groqError));
+        await logActivity({
+          actorRole: access.role, sessionId: access.sessionId,
+          userName: access.name, userEmail: access.email, authProvider: access.authProvider,
+          questionWordCount: wordCount(question), eventType: 'query',
+          provider: 'groq', model: chatModel, success: false,
+          metadata: { reason: limited ? 'Groq rate limit reached' : 'Groq request failed', durationMs: Date.now() - started }
+        });
+        return res.status(limited ? 429 : 502).json({
+          error: limited
+            ? 'Groq has reached its current usage limit. Please wait and try again later, or ask an Admin to select a different answering provider.'
+            : 'Groq could not complete the answer. Please try again shortly, or ask an Admin to check the selected model.'
+        });
       }
     } else {
       completion = await openaiChatDetailed(openaiKey, chatModel, messages);
@@ -221,15 +237,19 @@ export default async function handler(req, res) {
     await logActivity({
       actorRole: access.role,
       sessionId: access.sessionId,
+      userName: access.name,
+      userEmail: access.email,
+      authProvider: access.authProvider,
+      questionWordCount: wordCount(question),
       eventType: 'query',
       provider: answerProvider,
-      model: usedFallback ? 'gpt-4.1' : chatModel,
+      model: chatModel,
       inputTokens,
       outputTokens,
-      estimatedCost: estimateCost(answerProvider, usedFallback ? 'gpt-4.1' : chatModel, inputTokens, outputTokens),
+      estimatedCost: estimateCost(answerProvider, chatModel, inputTokens, outputTokens),
       metadata: {
         confidence, confidenceLabel, sourceCount: sources.length, scope,
-        fallback: usedFallback, durationMs: Date.now() - started,
+        fallback: false, durationMs: Date.now() - started,
         questionPreview: question.slice(0, 180)
       }
     });
@@ -240,6 +260,7 @@ export default async function handler(req, res) {
   } catch (error) {
     if (access) await logActivity({
       actorRole: access.role, sessionId: access.sessionId, eventType: 'query',
+      userName: access.name, userEmail: access.email, authProvider: access.authProvider,
       success: false, metadata: { error: String(error.message || error).slice(0, 300), durationMs: Date.now() - started }
     });
     return res.status(500).json({ error: error.message });
