@@ -8,10 +8,15 @@ function Brand() {
   return <div className="brand"><img src="/favicon.svg" alt="" /><div><b>FundedNext</b><span>Support Assistant</span></div></div>;
 }
 
-function inline(text) {
-  return String(text).split(/(\*\*[^*]+\*\*)/g).map((part, index) =>
-    /^\*\*[^*]+\*\*$/.test(part) ? <strong key={index}>{part.slice(2, -2)}</strong> : <span key={index}>{part}</span>
-  );
+function plainText(text) {
+  return String(text || '')
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/__([^_\n]+)__/g, '$1')
+    .replace(/\*([^*\n]+)\*/g, '$1')
+    .replace(/_([^_\n]+)_/g, '$1')
+    .replace(/^\s*#{1,6}\s+/gm, '')
+    .replace(/[*_]/g, '')
+    .trim();
 }
 
 function Answer({ text }) {
@@ -21,7 +26,7 @@ function Answer({ text }) {
   const flush = () => {
     if (!list.length) return;
     const Tag = listType === 'number' ? 'ol' : 'ul';
-    blocks.push(<Tag key={`list-${blocks.length}`}>{list.map((item, index) => <li key={index}>{inline(item)}</li>)}</Tag>);
+    blocks.push(<Tag key={`list-${blocks.length}`}>{list.map((item, index) => <li key={index}>{plainText(item)}</li>)}</Tag>);
     list = []; listType = '';
   };
   String(text).split('\n').forEach((raw) => {
@@ -35,8 +40,7 @@ function Answer({ text }) {
       listType = type; list.push((bullet || numbered)[1]); return;
     }
     flush();
-    if (/^#{1,3}\s+/.test(line)) blocks.push(<h3 key={`h-${blocks.length}`}>{inline(line.replace(/^#{1,3}\s+/, ''))}</h3>);
-    else blocks.push(<p key={`p-${blocks.length}`}>{inline(line)}</p>);
+    blocks.push(<p key={`p-${blocks.length}`}>{plainText(line)}</p>);
   });
   flush();
   return <div className="answer">{blocks}</div>;
@@ -189,7 +193,7 @@ export default function Home() {
   }
 
   async function copyAnswer(index, text) {
-    await navigator.clipboard.writeText(text);
+    await navigator.clipboard.writeText(plainText(text));
     setCopied(index); setTimeout(() => setCopied(null), 1800);
   }
 
@@ -264,9 +268,9 @@ export default function Home() {
 
   return (
     <main className="app-shell">
-      <header className="app-header"><Brand /><div className="header-actions">{identity.name && <div className="user-identity"><b>{identity.name}</b><small>{identity.email}</small></div>}<span className="role-badge">{role}</span><button className="icon-btn" onClick={toggleTheme} title="Change theme">{theme === 'dark' ? '☀' : '◐'}</button>{role === 'admin' && <Link className="btn btn-secondary btn-small" href="/admin">Admin console</Link>}<button className="icon-btn" onClick={logout} title="Sign out">↪</button></div></header>
+      <header className="app-header"><Brand /><div className="header-actions">{identity.name && <div className="user-identity"><b>{identity.name}</b><small>{identity.email}</small></div>}{!identity.name && <span className="role-badge">{role}</span>}<button className="icon-btn" onClick={toggleTheme} title="Change theme">{theme === 'dark' ? '☀' : '◐'}</button>{role === 'admin' && <Link className="btn btn-secondary btn-small" href="/admin">Admin console</Link>}<button className="icon-btn" onClick={logout} title="Sign out">↪</button></div></header>
 
-      {role === 'admin' && <div className={`sync-console ${syncOpen ? 'expanded' : ''}`}><div className="sync-summary"><div><span className={`live-dot ${syncing ? 'working' : ''}`} /><b>{syncState.headline}</b><span>{syncing ? `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')} elapsed` : 'Published Intercom articles'}</span></div><div className="row"><button className="text-button neutral" onClick={() => setSyncOpen(!syncOpen)}>{syncOpen ? 'Hide details' : 'View details'}</button><button className="btn btn-secondary btn-small" onClick={checkUpdates} disabled={syncing}>{syncing ? 'Updating…' : 'Check for updates'}</button>{syncing && <button className="text-button" onClick={() => { cancelRef.current = true; abortRef.current?.abort(); }}>Cancel</button>}</div></div>{syncOpen && <div className="sync-details">{syncState.details.map((detail, index) => <div key={index}><span>{index + 1}</span>{detail}</div>)}</div>}</div>}
+      {role === 'admin' && <div className={`sync-console ${syncOpen ? 'expanded' : ''}`}><div className="sync-summary"><div><span className={`live-dot ${syncing ? 'working' : ''}`} /><b>{syncState.headline}</b><span>{syncing ? `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')} elapsed` : 'Ready for questions'}</span></div><div className="row"><button className="text-button neutral" onClick={() => setSyncOpen(!syncOpen)}>{syncOpen ? 'Hide details' : 'View details'}</button><button className="btn btn-secondary btn-small" onClick={checkUpdates} disabled={syncing}>{syncing ? 'Updating…' : 'Check for updates'}</button>{syncing && <button className="text-button" onClick={() => { cancelRef.current = true; abortRef.current?.abort(); }}>Cancel</button>}</div></div>{syncOpen && <div className="sync-details">{syncState.details.map((detail, index) => <div key={index}><span>{index + 1}</span>{detail}</div>)}</div>}</div>}
 
       <div className="workspace-grid">
         <section className="assistant-card">
