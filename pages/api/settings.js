@@ -20,8 +20,8 @@ export default async function handler(req, res) {
 
     if (req.method === 'POST') {
       const body = req.body || {};
-      const { intercomToken, openaiKey, groqKey, chatModel, chatProvider, chatPrompt } = body;
-      await saveKeys({ intercomToken, openaiKey, groqKey, chatModel, chatProvider, chatPrompt });
+      const { intercomToken, openaiKey, groqKey, chatModel, chatProvider, chatPrompt, allowedGoogleDomains } = body;
+      await saveKeys({ intercomToken, openaiKey, groqKey, chatModel, chatProvider, chatPrompt, allowedGoogleDomains });
       if (body.agentPassword) await setAgentPassword(body.agentPassword);
       else if (body.logoutAgents) await revokeAgentSessions();
       return res.status(200).json({ ok: true, ...(await fullStatus()) });
