@@ -27,6 +27,7 @@ async function embedWithRetry(key, inputs) {
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  const requestStarted = Date.now();
   try {
     const access = await authenticateRequest(req);
     if (!access) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
@@ -55,9 +56,11 @@ export default async function handler(req, res) {
       });
 
       const vectors = new Array(flat.length);
+      let embeddingBatches = 0;
       for (let i = 0; i < flat.length; i += EMBED_BATCH) {
         const vecs = await embedWithRetry(openaiKey, flat.slice(i, i + EMBED_BATCH).map((f) => f.content));
         for (let j = 0; j < vecs.length; j++) vectors[i + j] = vecs[j];
+        embeddingBatches++;
       }
 
       const ids = todo.map((a) => a.intercom_id);
@@ -81,7 +84,12 @@ export default async function handler(req, res) {
       const { count } = await sb.from('articles').select('*', { count: 'exact', head: true }).eq('needs_index', true);
       return res.status(200).json({
         ok: true, phase: 'indexing', processed: todo.length, remaining: count || 0,
-        done: (count || 0) === 0, sampleTitles: todo.slice(0, 3).map((a) => a.title || '(untitled)')
+        done: (count || 0) === 0,
+        sampleTitles: todo.slice(0, 5).map((a) => a.title || '(untitled)'),
+        chunkCount: rows.length,
+        embeddingBatches,
+        savedRows: rows.length,
+        durationMs: Date.now() - requestStarted
       });
     }
 
@@ -135,7 +143,12 @@ export default async function handler(req, res) {
       remaining: flagged.length,
       deleted,
       totalPublished: articles.length,
-      done: flagged.length === 0
+      done: flagged.length === 0,
+      scanned: articles.length,
+      changedFound: flagged.length,
+      storedBefore: storedCount,
+      deletionGuard: safeToDelete ? 'passed' : 'activated',
+      durationMs: Date.now() - requestStarted
     });
   } catch (e) {
     return res.status(500).json({ error: e.message });
