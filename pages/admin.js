@@ -45,6 +45,10 @@ export default function Admin() {
   const [disputeFilter, setDisputeFilter] = useState('');
   const [snippets, setSnippets] = useState([]);
   const [activity, setActivity] = useState(null);
+  const [activityEmail, setActivityEmail] = useState('');
+  const [activityFrom, setActivityFrom] = useState('');
+  const [activityTo, setActivityTo] = useState('');
+  const [allowedGoogleDomains, setAllowedGoogleDomains] = useState('');
 
   useEffect(() => {
     const savedSession = localStorage.getItem('appSession') || '';
@@ -88,6 +92,7 @@ export default function Admin() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not load settings.');
       setStatus(data); setProvider(data.chatProvider || 'openai'); setModel(data.chatModel || 'gpt-4.1-mini'); setPrompt(data.chatPrompt || '');
+      setAllowedGoogleDomains(data.allowedGoogleDomains || '');
     } catch (e) { setError(e.message); }
   }
 
@@ -174,6 +179,19 @@ export default function Admin() {
 
   async function loadActivity() {
     try {
+      const query = new URLSearchParams();
+      if (activityEmail.trim()) query.set('email', activityEmail.trim());
+      if (activityFrom) query.set('from', activityFrom);
+      if (activityTo) query.set('to', activityTo);
+      const response = await fetch(`/api/activity?${query}`, { headers: headers() });
+      const data = await response.json(); if (!response.ok) throw new Error(data.error);
+      setActivity(data);
+    } catch (e) { setError(e.message); }
+  }
+
+  async function clearActivityFilters() {
+    setActivityEmail(''); setActivityFrom(''); setActivityTo('');
+    try {
       const response = await fetch('/api/activity', { headers: headers() });
       const data = await response.json(); if (!response.ok) throw new Error(data.error);
       setActivity(data);
@@ -210,6 +228,7 @@ export default function Admin() {
         {notice && <div className="notice success">✓ {notice}</div>}{error && <div className="notice danger">{error}</div>}
 
         {tab === 'access' && <div className="settings-stack">
+          <section className="settings-card"><div className="settings-head"><div><h2>Google sign-in</h2><p>Only Google accounts from these company domains can enter the Agent workspace.</p></div><span className={`state-pill ${status?.googleAuthConfigured ? 'ready' : ''}`}>{status?.googleAuthConfigured ? 'App configured' : 'Vercel setup needed'}</span></div><label>Allowed email domains</label><div className="field-action"><input value={allowedGoogleDomains} onChange={(e) => setAllowedGoogleDomains(e.target.value)} placeholder="fundednext.com, example.com" /><button className="btn btn-primary" disabled={saving} onClick={() => settingsSave({ allowedGoogleDomains }, 'Google access domains saved.')}>Save domains</button></div><p className="field-help">Separate multiple domains with commas.</p></section>
           <section className="settings-card"><div className="settings-head"><div><h2>Agent login</h2><p>Agents can use the assistant but cannot access Admin controls.</p></div><span className={`state-pill ${status?.agentPasswordSet ? 'ready' : ''}`}>{status?.agentPasswordSet ? 'Active' : 'Not configured'}</span></div><label>New agent password</label><div className="field-action"><input type="password" value={agentPassword} onChange={(e) => setAgentPassword(e.target.value)} placeholder="At least 10 characters" /><button className="btn btn-primary" disabled={saving} onClick={async () => { if (agentPassword.length < 10) return setError('Use at least 10 characters.'); if (await settingsSave({ agentPassword }, 'Agent password updated. Existing agent sessions ended.')) setAgentPassword(''); }}>Save password</button></div></section>
           <section className="settings-card danger-card"><div className="settings-head"><div><h2>End all agent sessions</h2><p>Agents can sign back in with the current Agent password.</p></div></div><button className="btn btn-danger" disabled={saving} onClick={() => window.confirm('Log out every Agent?') && settingsSave({ logoutAgents: true }, 'All Agent sessions ended.')}>Log out all Agents</button></section>
         </div>}
@@ -231,7 +250,7 @@ export default function Admin() {
 
         {tab === 'snippets' && <div className="settings-stack"><section className="settings-card"><div className="settings-head"><div><h2>Corrective snippets</h2><p>Approved instructions are automatically applied when their trigger words match a future question.</p></div><span className="state-pill ready">{snippets.filter((item) => item.active).length} active</span></div><div className="snippet-list">{snippets.map((snippet) => <article key={snippet.id} className={!snippet.active ? 'inactive' : ''}><div className="snippet-head"><div><span>#{snippet.id}</span><h3>{snippet.title}</h3></div><label className="toggle"><input type="checkbox" checked={snippet.active} onChange={(e) => updateSnippet(snippet, { active: e.target.checked })} /><i /></label></div><label>Triggers</label><p className="trigger-text">{snippet.trigger_terms}</p><label>Instruction</label><textarea defaultValue={snippet.instruction} onBlur={(e) => e.target.value !== snippet.instruction && updateSnippet(snippet, { instruction: e.target.value })} /><div className="snippet-foot"><small>Created {formatDate(snippet.created_at)}</small><button className="mini-action danger-text" onClick={() => deleteSnippet(snippet.id)}>Delete</button></div></article>)}{!snippets.length && <div className="empty-admin">Approved disputes will appear here after you generate their snippets.</div>}</div></section></div>}
 
-        {tab === 'activity' && <div className="settings-stack">{activity && <><div className="activity-kpis">{[['Queries', activity.summary.queries], ['Sessions', activity.summary.sessions], ['Input tokens', activity.summary.inputTokens.toLocaleString()], ['Output tokens', activity.summary.outputTokens.toLocaleString()], ['Est. Groq cost', `$${activity.summary.estimatedCost.toFixed(4)}`], ['Failures', activity.summary.failures]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><div className="notice info">{activity.identityNote}</div><section className="settings-card"><div className="settings-head"><div><h2>Recent activity</h2><p>Newest 500 events. Named users will become available with Google authentication.</p></div></div><div className="activity-table"><div><b>Time</b><b>Session</b><b>Event</b><b>Provider</b><b>Tokens</b><b>Status</b></div>{activity.logs.map((log) => <div key={log.id}><span>{formatDate(log.created_at)}</span><span>{log.actor_role} · {String(log.session_id || '—').slice(-6)}</span><span>{log.event_type}</span><span>{log.provider || '—'}</span><span>{Number(log.input_tokens || 0) + Number(log.output_tokens || 0)}</span><span className={log.success ? 'good' : 'bad'}>{log.success ? 'Success' : 'Failed'}</span></div>)}</div></section></>}</div>}
+        {tab === 'activity' && <div className="settings-stack"><section className="settings-card activity-filters"><div className="settings-head"><div><h2>Filter activity</h2><p>Dates are interpreted in GMT+6.</p></div></div><div className="filter-grid"><div><label>User email</label><input type="search" value={activityEmail} onChange={(e) => setActivityEmail(e.target.value)} placeholder="Search an email address" /></div><div><label>From</label><input type="date" value={activityFrom} onChange={(e) => setActivityFrom(e.target.value)} /></div><div><label>To</label><input type="date" value={activityTo} onChange={(e) => setActivityTo(e.target.value)} /></div><button className="btn btn-primary" onClick={loadActivity}>Apply filters</button><button className="btn btn-secondary" onClick={() => { setActivityEmail(''); setActivityFrom(''); setActivityTo(''); }}>Clear</button></div></section>{activity && <><div className="activity-kpis">{[['Users', activity.summary.users], ['Queries', activity.summary.queries], ['Question words', activity.summary.questionWords.toLocaleString()], ['Input tokens', activity.summary.inputTokens.toLocaleString()], ['Output tokens', activity.summary.outputTokens.toLocaleString()], ['Estimated cost', `$${activity.summary.estimatedCost.toFixed(4)}`]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><section className="settings-card"><div className="settings-head"><div><h2>Activity results</h2><p>{activity.logs.length} events match the current filters.</p></div></div><div className="activity-table detailed"><div><b>Time</b><b>Google user</b><b>Email</b><b>Event</b><b>Words</b><b>Input</b><b>Output</b><b>Model</b><b>Status</b></div>{activity.logs.map((log) => <div key={log.id}><span>{formatDate(log.created_at)}</span><span>{log.user_name || (log.actor_role === 'admin' ? 'Master Admin' : 'Legacy Agent')}</span><span title={log.user_email || ''}>{log.user_email || '—'}</span><span>{log.event_type}</span><span>{log.question_word_count || 0}</span><span>{log.input_tokens || 0}</span><span>{log.output_tokens || 0}</span><span title={log.model || ''}>{log.provider || '—'}{log.model ? ` · ${log.model}` : ''}</span><span className={log.success ? 'good' : 'bad'}>{log.success ? 'Success' : 'Failed'}</span></div>)}</div></section></>}</div>}
 
         {tab === 'keys' && <div className="settings-stack"><section className="settings-card"><div className="settings-head"><div><h2>Encrypted API keys</h2><p>Keys are encrypted before storage and never displayed again.</p></div></div>{[['Intercom API key',intercom,setIntercom,status?.intercomSet],['OpenAI API key',openai,setOpenai,status?.openaiSet],['Groq API key',groq,setGroq,status?.groqSet]].map(([label,value,setter,isSet]) => <div className="vault-field" key={label}><div><label>{label}</label><span className={`state-pill ${isSet ? 'ready' : ''}`}>{isSet ? 'Connected' : 'Not set'}</span></div><input type="password" value={value} onChange={(e) => setter(e.target.value)} placeholder="Paste to set or replace" /></div>)}<button className="btn btn-primary" disabled={saving} onClick={async () => { const body = {}; if (intercom.trim()) body.intercomToken = intercom.trim(); if (openai.trim()) body.openaiKey = openai.trim(); if (groq.trim()) body.groqKey = groq.trim(); if (await settingsSave(body, 'API keys saved securely.')) { setIntercom(''); setOpenai(''); setGroq(''); } }}>Save API keys</button></section></div>}
       </section>
