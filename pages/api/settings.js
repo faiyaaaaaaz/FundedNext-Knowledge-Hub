@@ -1,7 +1,12 @@
 import {
   authenticateRequest, saveKeys, keysStatus, getAgentAccessStatus,
-  setAgentPassword, revokeAgentSessions
+  setAgentPassword, revokeAgentSessions, supabaseAdmin
 } from '../../lib/server';
+
+async function fullStatus() {
+  const { count } = await supabaseAdmin().from('disputes').select('*', { count: 'exact', head: true }).eq('status', 'pending');
+  return { ...(await keysStatus()), ...(await getAgentAccessStatus()), pendingDisputes: count || 0 };
+}
 
 export default async function handler(req, res) {
   try {
@@ -10,7 +15,7 @@ export default async function handler(req, res) {
     if (access.role !== 'admin') return res.status(403).json({ error: 'Admin access is required.' });
 
     if (req.method === 'GET') {
-      return res.status(200).json({ ...(await keysStatus()), ...(await getAgentAccessStatus()) });
+      return res.status(200).json(await fullStatus());
     }
 
     if (req.method === 'POST') {
@@ -19,7 +24,7 @@ export default async function handler(req, res) {
       await saveKeys({ intercomToken, openaiKey, groqKey, chatModel, chatProvider, chatPrompt });
       if (body.agentPassword) await setAgentPassword(body.agentPassword);
       else if (body.logoutAgents) await revokeAgentSessions();
-      return res.status(200).json({ ok: true, ...(await keysStatus()), ...(await getAgentAccessStatus()) });
+      return res.status(200).json({ ok: true, ...(await fullStatus()) });
     }
 
     return res.status(405).json({ error: 'Method not allowed' });
