@@ -109,6 +109,10 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 13px; fon
 .composer textarea { min-height: 42px; max-height: 130px; padding: 9px 2px; resize: none; border: 0; background: transparent; box-shadow: none; }
 .composer textarea:focus { box-shadow: none; }.composer button { width: 42px; height: 42px; flex: 0 0 auto; border: 0; border-radius: 11px; background: var(--purple); color: white; cursor: pointer; font-size: 20px; }.composer button:disabled { opacity: .35; cursor: default; }
 .composer-note { margin-top: 7px; color: var(--muted); font-size: 10px; text-align: center; }
+.composer-foot { max-width: 830px; margin: 0 auto; position: relative; }
+.developer-credit { position: absolute; right: 0; top: 7px; display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 9px; letter-spacing: .01em; }
+.developer-credit i { width: 5px; height: 5px; border-radius: 50%; background: var(--purple); box-shadow: 0 0 0 3px var(--purple-soft); }
+.developer-credit span { color: var(--purple); font-weight: 650; }
 
 .admin-shell { min-height: 100vh; display: grid; grid-template-columns: 245px minmax(0, 1fr); }
 .admin-sidebar { position: sticky; top: 0; height: 100vh; padding: 25px 18px; display: flex; flex-direction: column; border-right: 1px solid var(--line); background: var(--surface); }
@@ -188,6 +192,8 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 13px; fon
   .bot-avatar { width: 32px; height: 32px; }
   .assistant-bubble { padding: 18px 17px; }
   .answer { font-size: 15px; line-height: 1.82; }
+  .composer-foot { padding-bottom: 16px; }
+  .developer-credit { top: 25px; left: 0; right: 0; justify-content: center; }
 }
 
 /* Quality workspace */
