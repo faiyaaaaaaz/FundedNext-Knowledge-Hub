@@ -24,6 +24,8 @@ const CORE_GUARDRAILS =
   '- Write only a customer-ready reply. Never mention excerpts, source numbers, context, retrieval, database, or knowledge base.\n' +
   '- Never transfer a rule from one Account type to another.\n' +
   '- Never guess or generalize with typically, generally, usually, or likely.\n' +
+  '- Use plain text only. Do not use Markdown, bold text, italics, headings, asterisks, underscores, or decorative symbols.\n' +
+  '- Keep paragraphs short and separated by one blank line. Use simple numbered steps only when a sequence is genuinely needed.\n' +
   `- If direct evidence is insufficient, reply exactly: "${SAFE_UNCONFIRMED}"\n` +
   '- Factual numbers, dates, percentages, time periods, and conditions must be directly supported by the selected FAQ evidence.';
 
@@ -50,6 +52,12 @@ function cleanAnswer(raw) {
     .replace(/\b(?:Excerpt|Source)\s*\d+\b/gi, '')
     .replace(/[\[{(]?\d+†L\d+(?:\s*[-–]\s*L?\d+)?[\]})]?/g, '')
     .replace(/【\d+†L\d+(?:\s*[-–]\s*L?\d+)?】/g, '')
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/__([^_\n]+)__/g, '$1')
+    .replace(/\*([^*\n]+)\*/g, '$1')
+    .replace(/_([^_\n]+)_/g, '$1')
+    .replace(/^\s*#{1,6}\s+/gm, '')
+    .replace(/[*_]/g, '')
     .replace(/[ \t]+([,.;:!?])/g, '$1')
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
@@ -228,7 +236,7 @@ export default async function handler(req, res) {
     const evidenceCap = scope ? (scopedCount >= 3 ? 96 : scopedCount === 2 ? 90 : 80) : (sources.length >= 2 ? 92 : 82);
     const confidence = Math.min(modelConfidence, evidenceCap);
     const confidenceLabel = confidence >= 85 ? 'High confidence' : confidence >= 65 ? 'Review suggested' : 'Needs verification';
-    let answer = applyBrandingReplacements(cleanAnswer(raw), brandRules);
+    let answer = cleanAnswer(applyBrandingReplacements(cleanAnswer(raw), brandRules));
     if (confidence < 45) answer = SAFE_UNCONFIRMED;
 
     const usage = completion.usage || {};
