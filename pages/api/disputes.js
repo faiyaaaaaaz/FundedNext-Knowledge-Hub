@@ -28,6 +28,8 @@ export default async function handler(req, res) {
       const { data, error } = await sb.from('disputes').insert({
         actor_role: access.role,
         session_id: access.sessionId,
+        user_name: access.name || null,
+        user_email: access.email || null,
         question: String(body.question).trim(),
         answer: String(body.answer).trim(),
         dispute_reason: reason,
