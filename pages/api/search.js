@@ -46,12 +46,18 @@ function hasOtherScope(text, target) {
 
 function cleanAnswer(raw) {
   let answer = String(raw || '')
+    // Normalize every exotic Unicode space (narrow/thin/no-break etc.) to a
+    // plain space. Models often emit these around times and units ("6:00 AM",
+    // "GMT+3"), which render cramped and paste badly when copied.
+    .replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u2060\u3000\uFEFF]/g, ' ')
     .replace(/^\s*(?:\*\*)?SOURCES(?:\*\*)?\s*:.*$/gim, '')
     .replace(/^\s*(?:\*\*)?CONFIDENCE(?:\*\*)?\s*:.*$/gim, '')
     .replace(/\s*\((?:Excerpt|Source)\s*\d+\)/gi, '')
     .replace(/\b(?:Excerpt|Source)\s*\d+\b/gi, '')
     .replace(/[\[{(]?\d+†L\d+(?:\s*[-–]\s*L?\d+)?[\]})]?/g, '')
-    .replace(/【\d+†L\d+(?:\s*[-–]\s*L?\d+)?】/g, '')
+    .replace(/【[^】]*】/g, '')
+    // Remove inline bracketed citation markers like [3], [8], [3, 8], [3-5].
+    .replace(/\s*\[\s*\d+(?:\s*[,–-]\s*\d+)*\s*\]/g, '')
     .replace(/\*\*([^*\n]+)\*\*/g, '$1')
     .replace(/__([^_\n]+)__/g, '$1')
     .replace(/\*([^*\n]+)\*/g, '$1')
