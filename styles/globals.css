@@ -495,13 +495,13 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .date-trigger .cal-ico { color: var(--violet); font-size: 15px; }
 .date-trigger .caret { margin-left: 2px; color: var(--muted); font-size: 10px; transition: transform .2s; }
 .date-trigger.open .caret { transform: rotate(180deg); }
-.date-pop { position: absolute; z-index: 60; top: calc(100% + 8px); left: 0; display: flex; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-xl); overflow: visible; animation: popIn .18s cubic-bezier(.2,.8,.2,1) both; }
-.date-presets { width: 190px; padding: 8px; display: grid; gap: 2px; border-right: 1px solid var(--line); }
+.date-pop { position: absolute; z-index: 60; top: calc(100% + 8px); left: auto; right: 0; display: flex; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-xl); overflow: visible; animation: popIn .18s cubic-bezier(.2,.8,.2,1) both; }
+.date-presets { width: 190px; padding: 8px; display: grid; gap: 2px; }
 .date-preset { display: flex; align-items: center; gap: 9px; padding: 9px 11px; border: 0; border-radius: 9px; background: transparent; color: var(--ink); cursor: pointer; font-size: 13px; text-align: left; transition: background .14s, color .14s; }
 .date-preset:hover, .date-preset.active { background: var(--violet-soft); color: var(--violet-ink); }
 .date-preset .ck { margin-left: auto; color: var(--violet); font-size: 12px; }
 .date-preset.custom { color: var(--violet-ink); font-weight: 600; }
-.date-cal { position: absolute; left: calc(100% - 1px); top: -1px; width: min(560px, 78vw); padding: 16px 18px; border: 1px solid var(--line-strong); border-radius: 0 16px 16px 16px; background: var(--surface); box-shadow: var(--shadow-xl); animation: fade .16s ease both; }
+.date-cal { position: absolute; right: calc(100% - 1px); left: auto; top: -1px; width: min(560px, 78vw); padding: 16px 18px; border: 1px solid var(--line-strong); border-radius: 16px 0 0 16px; background: var(--surface); box-shadow: var(--shadow-xl); animation: fade .16s ease both; }
 .date-cal .range-head { display: flex; gap: 40px; padding-bottom: 12px; margin-bottom: 8px; border-bottom: 1px solid var(--line); }
 .date-cal .range-head div { display: flex; flex-direction: column; gap: 3px; }
 .date-cal .range-head label { margin: 0; font: 700 9px/1 var(--display); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
