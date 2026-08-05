@@ -2,20 +2,56 @@ import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { getSupabaseBrowser } from '../lib/supabaseBrowser';
 
-const THINKING_STEPS = ['Understanding your question', 'Searching the most relevant FAQs', 'Checking Account-specific rules', 'Applying Brand Language', 'Verifying sources and confidence', 'Preparing a client-ready answer'];
+const THINKING_STEPS = [
+  'Reading your question',
+  'Searching the verified FAQ library',
+  'Matching the exact Account and product rules',
+  'Applying FundedNext brand language',
+  'Scoring the source confidence',
+  'Writing a client-ready reply'
+];
+
+/* Theme-aware FN mark — letters inherit the ink colour, triangle stays violet. */
+function Logo({ className = '' }) {
+  return (
+    <svg className={`fn-logo ${className}`} viewBox="12 15 41 32" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path className="fn-letters" d="M15 19h13v5.4h-7.4v4.1H27v5.3h-6.4V45H15z" />
+      <path className="fn-letters" d="M31 19h5.1l9 12.4V19h5.6v26h-5.1l-9-12.3V45H31z" />
+      <path className="fn-tri" d="M41.4 19H50.7v9.3z" />
+    </svg>
+  );
+}
+
+function GoogleG() {
+  return (
+    <svg className="google-mark" viewBox="0 0 48 48" aria-hidden="true">
+      <path fill="#4285F4" d="M45.12 24.5c0-1.56-.14-3.06-.4-4.5H24v8.51h11.84c-.51 2.75-2.06 5.08-4.39 6.64v5.52h7.11c4.16-3.83 6.56-9.47 6.56-16.17z" />
+      <path fill="#34A853" d="M24 46c5.94 0 10.92-1.97 14.56-5.33l-7.11-5.52c-1.97 1.32-4.49 2.1-7.45 2.1-5.73 0-10.58-3.87-12.31-9.07H4.34v5.7C7.96 41.07 15.4 46 24 46z" />
+      <path fill="#FBBC05" d="M11.69 28.18C11.25 26.86 11 25.45 11 24s.25-2.86.69-4.18v-5.7H4.34C2.85 17.09 2 20.45 2 24s.85 6.91 2.34 9.88l7.35-5.7z" />
+      <path fill="#EA4335" d="M24 10.75c3.23 0 6.13 1.11 8.41 3.29l6.31-6.31C34.91 4.18 29.93 2 24 2 15.4 2 7.96 6.93 4.34 14.12l7.35 5.7c1.73-5.2 6.58-9.07 12.31-9.07z" />
+    </svg>
+  );
+}
 
 function Brand() {
-  return <div className="brand"><img src="/favicon.svg" alt="" /><div><b>FundedNext</b><span>Support Assistant</span></div></div>;
+  return <div className="brand"><span className="brand-mark"><Logo /></span><div><b>FundedNext</b><span>Support Assistant</span></div></div>;
+}
+
+/* Normalise exotic Unicode spaces to plain spaces so pasted text is clean. */
+function normalizeSpaces(text) {
+  return String(text || '').replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u2060\u3000\uFEFF]/g, ' ');
 }
 
 function plainText(text) {
-  return String(text || '')
+  return normalizeSpaces(text)
     .replace(/\*\*([^*\n]+)\*\*/g, '$1')
     .replace(/__([^_\n]+)__/g, '$1')
     .replace(/\*([^*\n]+)\*/g, '$1')
     .replace(/_([^_\n]+)_/g, '$1')
     .replace(/^\s*#{1,6}\s+/gm, '')
+    .replace(/\s*\[\s*\d+(?:\s*[,–-]\s*\d+)*\s*\]/g, '')
     .replace(/[*_]/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
     .trim();
 }
 
@@ -29,7 +65,7 @@ function Answer({ text }) {
     blocks.push(<Tag key={`list-${blocks.length}`}>{list.map((item, index) => <li key={index}>{plainText(item)}</li>)}</Tag>);
     list = []; listType = '';
   };
-  String(text).split('\n').forEach((raw) => {
+  normalizeSpaces(text).split('\n').forEach((raw) => {
     const line = raw.trim();
     if (!line) return flush();
     const bullet = line.match(/^[-*•]\s+(.*)/);
@@ -77,7 +113,7 @@ export default function Home() {
   const [stats, setStats] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
-  const [syncState, setSyncState] = useState({ headline: 'Published Intercom articles', details: [] });
+  const [syncState, setSyncState] = useState({ headline: 'Knowledge base', details: [] });
   const [elapsed, setElapsed] = useState(0);
   const [disputeIndex, setDisputeIndex] = useState(null);
   const [disputeReason, setDisputeReason] = useState('');
@@ -114,6 +150,7 @@ export default function Home() {
     if (!token) return;
     try {
       const response = await fetch('/api/stats', { headers: { 'x-app-session': token } });
+      if (response.status === 401) return logout();
       if (response.ok) setStats(await response.json());
     } catch {}
   }
@@ -152,7 +189,7 @@ export default function Home() {
 
   async function googleLogin() {
     const client = getSupabaseBrowser();
-    if (!client) return setLoginError('Google sign-in is not configured yet. Please ask an Admin to finish setup.');
+    if (!client) return setLoginError('Google sign-in is not configured yet. Ask an Admin to finish setup.');
     setLoginError('');
     const { error } = await client.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.origin } });
     if (error) setLoginError(error.message);
@@ -223,12 +260,12 @@ export default function Home() {
     setSyncing(true); setSyncOpen(true); cancelRef.current = false; setElapsed(0);
     const started = Date.now();
     let processed = 0, chunks = 0, batches = 0, failures = 0;
-    setSyncState({ headline: 'Starting knowledge update…', details: ['Connecting to the update queue'] });
+    setSyncState({ headline: 'Preparing knowledge sync', details: ['Connecting securely to Intercom', 'Loading your stored knowledge base'] });
     timerRef.current = setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
     try {
       for (;;) {
         if (cancelRef.current) {
-          setSyncState((current) => ({ ...current, headline: 'Update paused safely', details: [...current.details, 'Completed progress has been saved'] }));
+          setSyncState((current) => ({ headline: 'Sync paused — progress saved', details: [...current.details, 'You can resume any time with Check for updates'] }));
           break;
         }
         const controller = new AbortController(); abortRef.current = controller;
@@ -241,15 +278,31 @@ export default function Home() {
           if (!response.ok) throw new Error(data.error || `Server ${response.status}`);
           failures = 0; processed += data.processed || 0; chunks += data.chunkCount || 0; batches += data.embeddingBatches || 0;
           const detail = data.phase === 'detecting'
-            ? [`Scanned ${data.scanned || 0} published articles`, `Found ${data.changedFound || 0} new or changed articles`, `Deletion safety check: ${data.deletionGuard || 'complete'}`]
-            : [`Processed ${processed} articles`, `Created ${chunks} searchable sections`, `Completed ${batches} embedding batches`, ...(data.sampleTitles?.length ? [`Current batch: ${data.sampleTitles.join(' · ')}`] : [])];
-          setSyncState({ headline: data.done ? 'Knowledge is fully up to date' : data.phase === 'detecting' ? 'Comparing Intercom with stored knowledge' : `${data.remaining} articles remaining`, details: detail });
+            ? [
+                `Scanned ${data.scanned || 0} published articles in Intercom`,
+                `${data.changedFound || 0} new or updated since the last sync`,
+                'Safety check passed — nothing will be wrongly removed'
+              ]
+            : [
+                `${processed} article${processed === 1 ? '' : 's'} indexed`,
+                `${chunks} searchable section${chunks === 1 ? '' : 's'} created`,
+                `${batches} embedding batch${batches === 1 ? '' : 'es'} completed`,
+                ...(data.sampleTitles?.length ? [`Now processing: ${data.sampleTitles.join(' · ')}`] : [])
+              ];
+          setSyncState({
+            headline: data.done
+              ? 'Knowledge base is fully up to date'
+              : data.phase === 'detecting'
+                ? 'Comparing Intercom with your knowledge base'
+                : `Indexing — ${data.remaining} article${data.remaining === 1 ? '' : 's'} remaining`,
+            details: detail
+          });
           if (data.done) break;
         } catch {
           clearTimeout(timeout); if (cancelRef.current) continue;
           failures++;
-          if (failures > 8) { setSyncState({ headline: 'Update paused after connection problems', details: ['Your completed progress is safe', 'Press Check for updates to resume'] }); break; }
-          setSyncState((current) => ({ headline: `Reconnecting automatically · attempt ${failures}/8`, details: current.details }));
+          if (failures > 8) { setSyncState({ headline: 'Sync paused after repeated connection issues', details: ['Your completed progress is safe', 'Press Check for updates to resume where it stopped'] }); break; }
+          setSyncState((current) => ({ headline: `Reconnecting automatically · attempt ${failures} of 8`, details: current.details }));
           await new Promise((resolve) => setTimeout(resolve, 2500));
         }
       }
@@ -260,27 +313,27 @@ export default function Home() {
 
   if (!session) return (
     <main className="login-page"><section className="login-panel"><div className="login-glow" /><Brand />
-      <div className="login-copy"><span className="status-chip">Internal knowledge workspace</span><h1>Answers your team can trust.</h1><p>Find clear, source-backed support answers for FundedNext clients.</p></div>
-      <div className="login-form"><button className="google-button" onClick={googleLogin} disabled={loggingIn}><span className="google-mark">G</span>{loggingIn ? 'Finishing sign-in…' : 'Continue with Google'}</button><div className="login-divider"><span>Admin access</span></div><label htmlFor="password">Master password</label><input id="password" type="password" value={password} placeholder="Enter the Admin password" onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && login()} /><button className="btn btn-primary" onClick={login} disabled={loggingIn}>{loggingIn ? 'Signing in…' : 'Continue securely'} <span>→</span></button>{loginError && <div className="inline-error">{loginError}</div>}</div>
+      <div className="login-copy"><span className="status-chip">Internal knowledge workspace</span><h1>Answers your team can trust.</h1><p>Clear, source-backed support answers for every FundedNext client conversation.</p></div>
+      <div className="login-form"><button className="google-button" onClick={googleLogin} disabled={loggingIn}><GoogleG />{loggingIn ? 'Finishing sign-in…' : 'Continue with Google'}</button><div className="login-divider"><span>Admin access</span></div><label htmlFor="password">Master password</label><input id="password" type="password" value={password} placeholder="Enter the Admin password" onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && login()} /><button className="btn btn-primary" onClick={login} disabled={loggingIn}>{loggingIn ? 'Signing in…' : 'Continue securely'} <span>→</span></button>{loginError && <div className="inline-error">{loginError}</div>}</div>
       <div className="login-foot">For authorized FundedNext team members only</div>
     </section></main>
   );
 
   return (
     <main className="app-shell">
-      <header className="app-header"><Brand /><div className="header-actions">{identity.name && <div className="user-identity"><b>{identity.name}</b><small>{identity.email}</small></div>}{!identity.name && <span className="role-badge">{role}</span>}<button className="icon-btn" onClick={toggleTheme} title="Change theme">{theme === 'dark' ? '☀' : '◐'}</button>{role === 'admin' && <Link className="btn btn-secondary btn-small" href="/admin">Admin console</Link>}<button className="icon-btn" onClick={logout} title="Sign out">↪</button></div></header>
+      <header className="app-header"><Brand /><div className="header-actions">{identity.name && <div className="user-identity"><b>{identity.name}</b><small>{identity.email}</small></div>}{!identity.name && <span className="role-badge">{role}</span>}<button className="icon-btn" onClick={toggleTheme} title="Change theme" aria-label="Change theme">{theme === 'dark' ? '☀' : '☾'}</button>{role === 'admin' && <Link className="btn btn-secondary btn-small" href="/admin">Admin console</Link>}<button className="icon-btn" onClick={logout} title="Sign out" aria-label="Sign out">⏻</button></div></header>
 
-      {role === 'admin' && <div className={`sync-console ${syncOpen ? 'expanded' : ''}`}><div className="sync-summary"><div><span className={`live-dot ${syncing ? 'working' : ''}`} /><b>{syncState.headline}</b><span>{syncing ? `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')} elapsed` : 'Ready for questions'}</span></div><div className="row"><button className="text-button neutral" onClick={() => setSyncOpen(!syncOpen)}>{syncOpen ? 'Hide details' : 'View details'}</button><button className="btn btn-secondary btn-small" onClick={checkUpdates} disabled={syncing}>{syncing ? 'Updating…' : 'Check for updates'}</button>{syncing && <button className="text-button" onClick={() => { cancelRef.current = true; abortRef.current?.abort(); }}>Cancel</button>}</div></div>{syncOpen && <div className="sync-details">{syncState.details.map((detail, index) => <div key={index}><span>{index + 1}</span>{detail}</div>)}</div>}</div>}
+      {role === 'admin' && <div className={`sync-console ${syncOpen ? 'expanded' : ''}`}><div className="sync-summary"><div className="sync-headline"><span className={`live-dot ${syncing ? 'working' : ''}`} /><div><b>{syncState.headline}</b><small>{syncing ? `Syncing · ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')} elapsed` : 'Knowledge base ready'}</small></div></div><div className="row"><button className="text-button neutral" onClick={() => setSyncOpen(!syncOpen)}>{syncOpen ? 'Hide details' : 'View details'}</button><button className="btn btn-secondary btn-small" onClick={checkUpdates} disabled={syncing}>{syncing ? 'Syncing…' : 'Check for updates'}</button>{syncing && <button className="text-button" onClick={() => { cancelRef.current = true; abortRef.current?.abort(); }}>Cancel</button>}</div></div>{syncOpen && <div className="sync-details">{syncState.details.map((detail, index) => <div key={index} className={`sync-step ${syncing ? 'pending' : ''}`}><span className="tick">{syncing ? index + 1 : '✓'}</span><span className="detail">{detail}</span></div>)}</div>}</div>}
 
       <div className="workspace-grid">
         <section className="assistant-card">
           <div className="chat-thread" ref={threadRef}>
-            {!messages.length && <div className="welcome-state"><div className="assistant-orb"><img src="/favicon.svg" alt="" /></div><span className="status-chip">Source-backed assistance</span><h1>How can I help today?</h1><p>Ask about a policy, Account, Performance Reward, trading rule, or platform.</p><div className="suggestion-grid">{['How does trailing drawdown work?', 'Explain Performance Reward eligibility', 'What causes an Account breach?'].map((question) => <button key={question} onClick={() => send(question)}>{question}<span>↗</span></button>)}</div></div>}
+            {!messages.length && <div className="welcome-state"><div className="assistant-orb"><Logo /></div><span className="status-chip">Source-backed assistance</span><h1>How can I help today?</h1><p>Ask about a policy, Account, Performance Reward, trading rule, or platform.</p><div className="suggestion-grid">{['How does trailing drawdown work?', 'Explain Performance Reward eligibility', 'What causes an Account breach?'].map((question) => <button key={question} onClick={() => send(question)}>{question}<span>↗</span></button>)}</div></div>}
             {messages.map((message, index) => message.role === 'user'
               ? <div className="message user-message" key={index}><div className="message-label">You</div><div className="user-bubble">{message.content}</div></div>
-              : <div className="message assistant-message" key={index}><div className="bot-avatar"><img src="/favicon.svg" alt="" /></div><div className={`assistant-bubble${message.error ? ' error-bubble' : ''}`}><div className="answer-head"><span>FundedNext Assistant</span><div>{Number.isFinite(message.confidence) && <span className={`confidence-pill ${confidenceTone(message.confidence)}`}><i style={{ '--score': `${message.confidence * 3.6}deg` }} />{message.confidence}% · {message.confidenceLabel}</span>}<small>{message.fallback ? 'OpenAI backup' : message.provider === 'groq' ? 'Groq' : 'OpenAI'}</small></div></div><Answer text={message.content} /><div className="answer-actions"><button onClick={() => copyAnswer(index, message.content)}>{copied === index ? '✓ Copied' : '⧉ Copy answer'}</button><button className={message.disputed ? 'disputed' : ''} disabled={message.disputed || message.error} onClick={() => { setDisputeIndex(index); setDisputeReason(''); setDisputeError(''); }}>{message.disputed ? '✓ Answer disputed' : '⚑ Dispute answer'}</button></div>{message.sources?.length > 0 && <div className="sources"><button className="sources-toggle" onClick={() => setOpenSources((current) => ({ ...current, [index]: !current[index] }))}><span>◆</span>{message.sources.length} verified source{message.sources.length > 1 ? 's' : ''}<b>{openSources[index] ? '−' : '+'}</b></button>{openSources[index] && <div className="sources-list">{message.sources.map((source, sourceIndex) => <a key={sourceIndex} href={source.url} target="_blank" rel="noreferrer"><span>{source.title}</span><small>Open article ↗</small></a>)}</div>}</div>}</div></div>
+              : <div className="message assistant-message" key={index}><div className="bot-avatar"><Logo /></div><div className={`assistant-bubble${message.error ? ' error-bubble' : ''}`}><div className="answer-head"><span>FundedNext Assistant</span><div>{Number.isFinite(message.confidence) && <span className={`confidence-pill ${confidenceTone(message.confidence)}`}><i style={{ '--score': `${message.confidence * 3.6}deg` }} />{message.confidence}% · {message.confidenceLabel}</span>}<small>{message.fallback ? 'OpenAI backup' : message.provider === 'groq' ? 'Groq' : 'OpenAI'}</small></div></div><Answer text={message.content} /><div className="answer-actions"><button onClick={() => copyAnswer(index, message.content)}>{copied === index ? '✓ Copied' : '⧉ Copy answer'}</button><button className={message.disputed ? 'disputed' : ''} disabled={message.disputed || message.error} onClick={() => { setDisputeIndex(index); setDisputeReason(''); setDisputeError(''); }}>{message.disputed ? '✓ Answer disputed' : '⚑ Dispute answer'}</button></div>{message.sources?.length > 0 && <div className="sources"><button className="sources-toggle" onClick={() => setOpenSources((current) => ({ ...current, [index]: !current[index] }))}><span>◆</span>{message.sources.length} verified source{message.sources.length > 1 ? 's' : ''}<b>{openSources[index] ? '−' : '+'}</b></button>{openSources[index] && <div className="sources-list">{message.sources.map((source, sourceIndex) => <a key={sourceIndex} href={source.url} target="_blank" rel="noreferrer"><span>{source.title}</span><small>Open article ↗</small></a>)}</div>}</div>}</div></div>
             )}
-            {loading && <div className="message assistant-message"><div className="bot-avatar thinking-avatar"><img src="/favicon.svg" alt="" /></div><div className="assistant-bubble thinking-card"><div className="thinking-visual"><i /><i /><i /><span>✦</span></div><div className="thinking-copy"><b>Working on your answer</b><p>{THINKING_STEPS[thinkingStep]}</p><div className="thinking-progress">{THINKING_STEPS.map((step, index) => <i key={step} className={index <= thinkingStep ? 'active' : ''} />)}</div></div></div></div>}
+            {loading && <div className="message assistant-message"><div className="bot-avatar thinking-avatar"><Logo /></div><div className="assistant-bubble thinking-card"><div className="thinking-head"><span className="thinking-orb" /><b>Finding the verified answer</b><span className="thinking-count">{thinkingStep + 1}/{THINKING_STEPS.length}</span></div><div className="thinking-label"><span key={thinkingStep}>{THINKING_STEPS[thinkingStep]}</span></div><div className="thinking-skeleton"><i /><i /><i /></div><div className="thinking-progress">{THINKING_STEPS.map((step, i) => <i key={step} className={i < thinkingStep ? 'active' : i === thinkingStep ? 'active current' : ''} />)}</div></div></div>}
           </div>
           <div className="composer-wrap"><div className="composer"><textarea value={input} placeholder="Ask a support question…" onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } }} /><button onClick={() => send()} disabled={!input.trim() || loading} aria-label="Send">↑</button></div><div className="composer-foot"><div className="composer-note">Review the confidence and verified source before sending the answer.</div><div className="developer-credit"><i />Developed by <span>Faiyaz Ahmed</span></div></div></div>
         </section>
