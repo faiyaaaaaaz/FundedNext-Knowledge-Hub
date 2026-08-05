@@ -1,12 +1,23 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import Link from 'next/link';
 
 const OPENAI_MODELS = ['gpt-5.6-luna', 'gpt-5.6', 'gpt-5.5', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4o'];
 const GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.6-27b'];
 const EMPTY_TERM = { category: 'Account Type', rule_type: 'exact', match_term: '', required_term: '', notes: '', active: true };
+const ACTIVITY_PAGE_SIZE = 12;
 
-function Brand() {
-  return <div className="brand"><img src="/favicon.svg" alt="" /><div><b>FundedNext</b><span>Admin Console</span></div></div>;
+function Logo({ className = '' }) {
+  return (
+    <svg className={`fn-logo ${className}`} viewBox="12 15 41 32" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path className="fn-letters" d="M15 19h13v5.4h-7.4v4.1H27v5.3h-6.4V45H15z" />
+      <path className="fn-letters" d="M31 19h5.1l9 12.4V19h5.6v26h-5.1l-9-12.3V45H31z" />
+      <path className="fn-tri" d="M41.4 19H50.7v9.3z" />
+    </svg>
+  );
+}
+
+function Brand({ label = 'Admin Console' }) {
+  return <div className="brand"><span className="brand-mark"><Logo /></span><div><b>FundedNext</b><span>{label}</span></div></div>;
 }
 
 function formatDate(value) {
@@ -15,6 +26,163 @@ function formatDate(value) {
     timeZone: 'Asia/Dhaka', day: '2-digit', month: 'short', year: 'numeric',
     hour: '2-digit', minute: '2-digit', hour12: true
   }).format(new Date(value)) + ' GMT+6';
+}
+
+function initials(name, email) {
+  const base = String(name || email || '?').trim();
+  const parts = base.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return base.slice(0, 2).toUpperCase();
+}
+
+/* ---------- date helpers (GMT+6) ---------- */
+function pad(n) { return String(n).padStart(2, '0'); }
+function isoOf(y, m0, d) { return `${y}-${pad(m0 + 1)}-${pad(d)}`; }
+function dhakaTodayIso() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+}
+function shiftIso(iso, days) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + days));
+  return isoOf(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate());
+}
+function fmtMD(iso) { const [y, m, d] = iso.split('-').map(Number); return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(new Date(Date.UTC(y, m - 1, d))); }
+function fmtMDY(iso) { const [y, m, d] = iso.split('-').map(Number); return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).format(new Date(Date.UTC(y, m - 1, d))); }
+function rangeLabel(from, to) {
+  if (!from && !to) return 'All time';
+  if (from && !to) return `From ${fmtMDY(from)}`;
+  if (!from && to) return `Until ${fmtMDY(to)}`;
+  if (from === to) return fmtMDY(from);
+  const sameYear = from.slice(0, 4) === to.slice(0, 4);
+  return `${sameYear ? fmtMD(from) : fmtMDY(from)} – ${fmtMDY(to)}`;
+}
+function monthName(y, m0) { return new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' }).format(new Date(Date.UTC(y, m0, 1))); }
+
+function MonthGrid({ year, month, from, to, hoverIso, onPick, onHover, maxIso }) {
+  const startDow = new Date(Date.UTC(year, month, 1)).getUTCDay();
+  const days = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  const cells = [];
+  for (let i = 0; i < startDow; i++) cells.push(null);
+  for (let d = 1; d <= days; d++) cells.push(d);
+  const end = to || (from && hoverIso && hoverIso > from ? hoverIso : '');
+  return (
+    <div className="cal-grid">
+      {['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map((d) => <div key={d} className="cal-dow">{d}</div>)}
+      {cells.map((d, i) => {
+        if (!d) return <div key={i} />;
+        const iso = isoOf(year, month, d);
+        const disabled = maxIso && iso > maxIso;
+        const isStart = from && iso === from;
+        const isEnd = end && iso === end;
+        const inRange = from && end && iso > from && iso < end;
+        const single = from && !end && isStart;
+        const cls = ['cal-day'];
+        if (disabled) cls.push('disabled');
+        if (inRange) cls.push('in-range');
+        if (isStart || isEnd) { cls.push('edge'); if (single) cls.push('single'); else if (isStart) cls.push('start'); else cls.push('end'); }
+        return <button key={i} type="button" disabled={disabled} className={cls.join(' ')} onMouseEnter={() => onHover(iso)} onClick={() => onPick(iso)}>{d}</button>;
+      })}
+    </div>
+  );
+}
+
+function DateRangeFilter({ from, to, onApply }) {
+  const [open, setOpen] = useState(false);
+  const [showCustom, setShowCustom] = useState(false);
+  const [tmpFrom, setTmpFrom] = useState(from || '');
+  const [tmpTo, setTmpTo] = useState(to || '');
+  const [hoverIso, setHoverIso] = useState('');
+  const today = dhakaTodayIso();
+  const initialView = (to || from || today);
+  const [viewY, setViewY] = useState(Number(initialView.slice(0, 4)));
+  const [viewM, setViewM] = useState(Number(initialView.slice(5, 7)) - 1);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function onDoc(e) { if (ref.current && !ref.current.contains(e.target)) { setOpen(false); setShowCustom(false); } }
+    if (open) document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  const presets = [
+    ['Today', [today, today]],
+    ['Yesterday', [shiftIso(today, -1), shiftIso(today, -1)]],
+    ['Past 7 days', [shiftIso(today, -6), today]],
+    ['Past 30 days', [shiftIso(today, -29), today]],
+    ['This month', [`${today.slice(0, 7)}-01`, today]],
+    ['Past 3 months', [shiftIso(today, -90), today]],
+    ['Past 12 months', [shiftIso(today, -365), today]],
+    ['Year to date', [`${today.slice(0, 4)}-01-01`, today]],
+    ['All time', ['', '']]
+  ];
+  const activeKey = presets.find(([, [f, t]]) => f === (from || '') && t === (to || ''))?.[0] || (from || to ? 'Custom' : 'All time');
+
+  function applyPreset(range) { onApply(range[0], range[1]); setOpen(false); setShowCustom(false); }
+  function pick(iso) {
+    if (!tmpFrom || (tmpFrom && tmpTo)) { setTmpFrom(iso); setTmpTo(''); }
+    else if (iso < tmpFrom) { setTmpFrom(iso); setTmpTo(''); }
+    else setTmpTo(iso);
+  }
+  function applyCustom() {
+    if (!tmpFrom) return;
+    onApply(tmpFrom, tmpTo || tmpFrom);
+    setOpen(false); setShowCustom(false);
+  }
+  function openCustom() {
+    setTmpFrom(from || ''); setTmpTo(to || ''); setHoverIso('');
+    const base = to || from || today;
+    setViewY(Number(base.slice(0, 4))); setViewM(Number(base.slice(5, 7)) - 1);
+    setShowCustom(true);
+  }
+  function stepMonth(delta) {
+    const dt = new Date(Date.UTC(viewY, viewM + delta, 1));
+    setViewY(dt.getUTCFullYear()); setViewM(dt.getUTCMonth());
+  }
+  const rightDt = new Date(Date.UTC(viewY, viewM + 1, 1));
+
+  return (
+    <div className="date-filter" ref={ref}>
+      <button type="button" className={`date-trigger ${open ? 'open' : ''}`} onClick={() => { setOpen((v) => !v); setShowCustom(false); }}>
+        <span className="cal-ico">🗓</span>{rangeLabel(from, to)}<span className="caret">▾</span>
+      </button>
+      {open && (
+        <div className="date-pop">
+          <div className="date-presets">
+            {presets.map(([label, range]) => (
+              <button key={label} type="button" className={`date-preset ${activeKey === label ? 'active' : ''}`} onMouseEnter={() => setShowCustom(false)} onClick={() => applyPreset(range)}>
+                {label}{activeKey === label && <span className="ck">✓</span>}
+              </button>
+            ))}
+            <button type="button" className={`date-preset custom ${activeKey === 'Custom' ? 'active' : ''}`} onMouseEnter={openCustom} onClick={openCustom}>
+              Custom range{(activeKey === 'Custom' || showCustom) && <span className="ck">✓</span>}
+            </button>
+          </div>
+          {showCustom && (
+            <div className="date-cal">
+              <div className="range-head">
+                <div><label>From</label><b className={tmpFrom ? '' : 'empty'}>{tmpFrom ? fmtMDY(tmpFrom) : 'Select date'}</b></div>
+                <div><label>To</label><b className={tmpTo ? '' : 'empty'}>{tmpTo ? fmtMDY(tmpTo) : 'Select date'}</b></div>
+              </div>
+              <div className="cal-wrap">
+                <div>
+                  <div className="cal-nav"><button type="button" onClick={() => stepMonth(-1)}>‹</button><b>{monthName(viewY, viewM)}</b><span /></div>
+                  <MonthGrid year={viewY} month={viewM} from={tmpFrom} to={tmpTo} hoverIso={hoverIso} onPick={pick} onHover={setHoverIso} maxIso={today} />
+                </div>
+                <div>
+                  <div className="cal-nav"><span /><b>{monthName(rightDt.getUTCFullYear(), rightDt.getUTCMonth())}</b><button type="button" onClick={() => stepMonth(1)}>›</button></div>
+                  <MonthGrid year={rightDt.getUTCFullYear()} month={rightDt.getUTCMonth()} from={tmpFrom} to={tmpTo} hoverIso={hoverIso} onPick={pick} onHover={setHoverIso} maxIso={today} />
+                </div>
+              </div>
+              <div className="date-foot">
+                <button type="button" className="btn btn-secondary btn-small" onClick={() => { setOpen(false); setShowCustom(false); }}>Cancel</button>
+                <button type="button" className="btn btn-primary btn-small" disabled={!tmpFrom} onClick={applyCustom}>Apply range</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function Admin() {
@@ -47,6 +215,7 @@ export default function Admin() {
   const [activityEmail, setActivityEmail] = useState('');
   const [activityFrom, setActivityFrom] = useState('');
   const [activityTo, setActivityTo] = useState('');
+  const [activityPage, setActivityPage] = useState(1);
   const [allowedGoogleDomains, setAllowedGoogleDomains] = useState('');
 
   useEffect(() => {
@@ -73,6 +242,11 @@ export default function Admin() {
 
   function clearMessages() { setNotice(''); setError(''); }
 
+  function handleAuthLoss(response) {
+    if (response.status === 401) { logout(); return true; }
+    return false;
+  }
+
   async function login() {
     setLoginError('');
     try {
@@ -88,6 +262,7 @@ export default function Admin() {
   async function loadSettings(token = session) {
     try {
       const response = await fetch('/api/settings', { headers: headers(false, token) });
+      if (handleAuthLoss(response)) return;
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not load settings.');
       setStatus(data); setProvider(data.chatProvider || 'openai'); setModel(data.chatModel || 'gpt-4.1-mini'); setPrompt(data.chatPrompt || '');
@@ -99,6 +274,7 @@ export default function Admin() {
     setSaving(true); clearMessages();
     try {
       const response = await fetch('/api/settings', { method: 'POST', headers: headers(true), body: JSON.stringify(body) });
+      if (handleAuthLoss(response)) return false;
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not save changes.');
       setStatus(data); setNotice(success); return true;
@@ -108,6 +284,7 @@ export default function Admin() {
   async function loadTerms() {
     try {
       const response = await fetch('/api/branding', { headers: headers() });
+      if (handleAuthLoss(response)) return;
       const data = await response.json(); if (!response.ok) throw new Error(data.error);
       setTerms(data.terms || []);
     } catch (e) { setError(e.message); }
@@ -133,6 +310,7 @@ export default function Admin() {
     try {
       const query = disputeFilter ? `?status=${disputeFilter}` : '';
       const response = await fetch(`/api/disputes${query}`, { headers: headers() });
+      if (handleAuthLoss(response)) return;
       const data = await response.json(); if (!response.ok) throw new Error(data.error);
       setDisputes(data.disputes || []);
       if (!disputeFilter) setStatus((current) => ({ ...(current || {}), pendingDisputes: (data.disputes || []).filter((item) => item.status === 'pending').length }));
@@ -158,6 +336,7 @@ export default function Admin() {
   async function loadSnippets() {
     try {
       const response = await fetch('/api/snippets', { headers: headers() });
+      if (handleAuthLoss(response)) return;
       const data = await response.json(); if (!response.ok) throw new Error(data.error);
       setSnippets(data.snippets || []);
     } catch (e) { setError(e.message); }
@@ -176,30 +355,41 @@ export default function Admin() {
     setNotice('Snippet deleted.'); loadSnippets();
   }
 
-  async function loadActivity() {
+  async function loadActivity(opts = {}) {
+    const email = opts.email ?? activityEmail;
+    const from = opts.from ?? activityFrom;
+    const to = opts.to ?? activityTo;
     try {
       const query = new URLSearchParams();
-      if (activityEmail.trim()) query.set('email', activityEmail.trim());
-      if (activityFrom) query.set('from', activityFrom);
-      if (activityTo) query.set('to', activityTo);
+      if (String(email).trim()) query.set('email', String(email).trim());
+      if (from) query.set('from', from);
+      if (to) query.set('to', to);
       const response = await fetch(`/api/activity?${query}`, { headers: headers() });
+      if (handleAuthLoss(response)) return;
       const data = await response.json(); if (!response.ok) throw new Error(data.error);
-      setActivity(data);
+      setActivity(data); setActivityPage(1);
     } catch (e) { setError(e.message); }
   }
 
-  async function clearActivityFilters() {
+  function applyDateRange(from, to) {
+    setActivityFrom(from); setActivityTo(to);
+    loadActivity({ from, to });
+  }
+
+  function clearActivityFilters() {
     setActivityEmail(''); setActivityFrom(''); setActivityTo('');
-    try {
-      const response = await fetch('/api/activity', { headers: headers() });
-      const data = await response.json(); if (!response.ok) throw new Error(data.error);
-      setActivity(data);
-    } catch (e) { setError(e.message); }
+    loadActivity({ email: '', from: '', to: '' });
   }
 
   function logout() {
     localStorage.removeItem('appSession'); localStorage.removeItem('appRole'); localStorage.removeItem('appPw');
     setSession(''); setRole(''); setStatus(null);
+  }
+
+  async function signEveryoneOut() {
+    if (!window.confirm('Sign out every user? Everyone — agents and admins — will need to sign in with Google again. Your own session will end too.')) return;
+    const ok = await settingsSave({ logoutAgents: true }, 'Everyone has been signed out. Redirecting you to sign in…');
+    if (ok) setTimeout(logout, 1200);
   }
 
   function toggleTheme() {
@@ -219,18 +409,31 @@ export default function Admin() {
   const models = provider === 'groq' ? GROQ_MODELS : OPENAI_MODELS;
   const filteredTerms = terms.filter((term) => `${term.category} ${term.match_term || ''} ${term.required_term} ${term.notes || ''}`.toLowerCase().includes(termSearch.toLowerCase()));
 
+  const activityLogs = activity?.logs || [];
+  const totalPages = Math.max(1, Math.ceil(activityLogs.length / ACTIVITY_PAGE_SIZE));
+  const pageStart = (activityPage - 1) * ACTIVITY_PAGE_SIZE;
+  const pageLogs = activityLogs.slice(pageStart, pageStart + ACTIVITY_PAGE_SIZE);
+  const pageNumbers = (() => {
+    const out = []; const span = 2;
+    for (let p = 1; p <= totalPages; p++) {
+      if (p === 1 || p === totalPages || (p >= activityPage - span && p <= activityPage + span)) out.push(p);
+      else if (out[out.length - 1] !== '…') out.push('…');
+    }
+    return out;
+  })();
+
   return (
     <main className="admin-shell">
       <aside className="admin-sidebar"><Brand /><nav>{navigation.map(([id, icon, label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => { setTab(id); clearMessages(); }}><span>{icon}</span>{label}{id === 'disputes' && status?.pendingDisputes > 0 && <em>{status.pendingDisputes}</em>}</button>)}</nav><div className="sidebar-foot"><Link href="/">← Back to assistant</Link><button onClick={logout}>Sign out</button></div></aside>
       <section className="admin-main">
-        <header className="admin-top"><div><span className="eyebrow">Workspace settings</span><h1>{titles[tab]}</h1></div><button className="icon-btn" onClick={toggleTheme}>{theme === 'dark' ? '☀' : '◐'}</button></header>
+        <header className="admin-top"><div><span className="eyebrow">Workspace settings</span><h1>{titles[tab]}</h1></div><button className="icon-btn" onClick={toggleTheme} aria-label="Change theme">{theme === 'dark' ? '☀' : '☾'}</button></header>
         {notice && <div className="notice success">✓ {notice}</div>}{error && <div className="notice danger">{error}</div>}
 
         {tab === 'access' && <div className="settings-stack">
           <section className="settings-card"><div className="settings-head"><div><h2>Google sign-in</h2><p>Only Google accounts from these company domains can enter the Agent workspace.</p></div><span className={`state-pill ${status?.googleAuthConfigured ? 'ready' : ''}`}>{status?.googleAuthConfigured ? 'App configured' : 'Vercel setup needed'}</span></div><label>Allowed email domains</label><div className="field-action"><input value={allowedGoogleDomains} onChange={(e) => setAllowedGoogleDomains(e.target.value)} placeholder="fundednext.com, example.com" /><button className="btn btn-primary" disabled={saving} onClick={() => settingsSave({ allowedGoogleDomains }, 'Google access domains saved.')}>Save domains</button></div><p className="field-help">Separate multiple domains with commas.</p></section>
           <section className="settings-card"><div className="settings-head"><div><h2>Agent access</h2><p>Agents can sign in only with an approved Google account. Shared Agent passwords are permanently disabled.</p></div><span className="state-pill ready">Google only</span></div><div className="permission-table"><div><span>Sign-in method</span><b>Agent</b><b>Admin</b></div><div><span>Approved Google account</span><b>Yes</b><b>Yes</b></div><div><span>Master password</span><b>No</b><b>Yes</b></div></div></section>
           <section className="settings-card"><div className="settings-head"><div><h2>Permanent Master Admin</h2><p>{status?.masterGoogleEmail || 'faiyaz@nextventures.io'} always receives full Admin access through Google sign-in.</p></div><span className={`state-pill ${status?.masterGoogleRegistered ? 'ready' : ''}`}>{status?.masterGoogleRegistered ? 'Registered' : 'First sign-in required'}</span></div><p className="field-help">The security lock becomes active after this Google account completes its first successful sign-in.</p></section>
-          <section className="settings-card danger-card"><div className="settings-head"><div><h2>End all Agent sessions</h2><p>Every Agent will be required to authenticate with Google again.</p></div></div><button className="btn btn-danger" disabled={saving} onClick={() => window.confirm('Log out every Agent?') && settingsSave({ logoutAgents: true }, 'All Agent sessions ended.')}>Log out all Agents</button></section>
+          <section className="settings-card danger-card"><div className="settings-head"><div><h2>Sign everyone out</h2><p>Ends every active session across the workspace. All users — agents and admins — will have to sign in with Google again. Your own session will end too.</p></div></div><button className="btn btn-danger" disabled={saving} onClick={signEveryoneOut}>Sign everyone out</button></section>
         </div>}
 
         {tab === 'ai' && <div className="settings-stack">
@@ -244,13 +447,13 @@ export default function Admin() {
         </div>}
 
         {tab === 'disputes' && <div className="dispute-layout">
-          <section className="settings-card"><div className="settings-head"><div><h2>Disputed answers</h2><p>Review Agent feedback before creating corrective instructions.</p></div><select className="compact-select" value={disputeFilter} onChange={(e) => setDisputeFilter(e.target.value)}><option value="">All statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="snippet_generated">Snippet generated</option></select></div><div className="dispute-list">{disputes.map((item) => <button key={item.id} className={selectedDispute?.id === item.id ? 'selected' : ''} onClick={() => { setSelectedDispute(item); setReviewReason(''); }}><span className={`status-dot ${item.status}`} /><div><b>{item.question}</b><small>{formatDate(item.created_at)} · {item.confidence ?? '—'}% confidence</small></div><em>{item.status.replace('_', ' ')}</em></button>)}{!disputes.length && <div className="empty-admin">No disputes in this view.</div>}</div></section>
-          <section className="settings-card review-pane">{selectedDispute ? <><div className="settings-head"><div><span className={`review-status ${selectedDispute.status}`}>{selectedDispute.status.replace('_', ' ')}</span><h2>Dispute #{selectedDispute.id}</h2></div></div><label>Question</label><div className="review-block">{selectedDispute.question}</div><label>AI answer</label><div className="review-block answer-copy">{selectedDispute.answer}</div><label>Agent’s reason</label><div className="review-block dispute-reason">{selectedDispute.dispute_reason}</div>{selectedDispute.sources?.length > 0 && <><label>Sources shown to Agent</label><div className="review-links">{selectedDispute.sources.map((source, index) => <a href={source.url} target="_blank" rel="noreferrer" key={index}>{source.title} ↗</a>)}</div></>}{selectedDispute.status === 'pending' && <><label>Your review reason</label><textarea value={reviewReason} onChange={(e) => setReviewReason(e.target.value)} placeholder="Why are you approving or rejecting this dispute?" /><div className="row"><button className="btn btn-primary" disabled={saving} onClick={() => disputeAction('approve')}>Approve dispute</button><button className="btn btn-secondary" disabled={saving} onClick={() => disputeAction('reject')}>Reject</button></div></>}{selectedDispute.status === 'approved' && <><label>Admin approval reason</label><div className="review-block">{selectedDispute.approval_reason}</div><button className="btn btn-primary" disabled={saving} onClick={() => disputeAction('generate')}>{saving ? 'Checking FAQs and generating…' : 'Generate corrective snippet'}</button></>}{selectedDispute.status === 'snippet_generated' && <><label>Generated instruction</label><div className="review-block snippet-result">{selectedDispute.generated_snippet}</div><button className="btn btn-secondary" onClick={() => setTab('snippets')}>Open Snippets</button></>}</> : <div className="empty-admin tall">Select a dispute to review its full context.</div>}</section>
+          <section className="settings-card"><div className="settings-head"><div><h2>Disputed answers</h2><p>Review Agent feedback before creating corrective instructions.</p></div><select className="compact-select" value={disputeFilter} onChange={(e) => setDisputeFilter(e.target.value)}><option value="">All statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="snippet_generated">Snippet generated</option></select></div><div className="dispute-list">{disputes.map((item) => <button key={item.id} className={selectedDispute?.id === item.id ? 'selected' : ''} onClick={() => { setSelectedDispute(item); setReviewReason(''); }}><span className={`status-dot ${item.status}`} /><div><b>{item.question}</b><div className="dispute-submitter"><span className="dispute-avatar">{initials(item.user_name, item.user_email)}</span><span>{item.user_name || item.user_email || (item.actor_role === 'admin' ? 'Master Admin' : 'Teammate')}</span></div><small className="meta-line">{formatDate(item.created_at)} · {item.confidence ?? '—'}% confidence</small></div><em>{item.status.replace('_', ' ')}</em></button>)}{!disputes.length && <div className="empty-admin">No disputes in this view.</div>}</div></section>
+          <section className="settings-card review-pane">{selectedDispute ? <><div className="settings-head"><div><span className={`review-status ${selectedDispute.status}`}>{selectedDispute.status.replace('_', ' ')}</span><h2>Dispute #{selectedDispute.id}</h2></div></div><div className="review-meta"><span className="dispute-avatar">{initials(selectedDispute.user_name, selectedDispute.user_email)}</span><div className="who"><b>{selectedDispute.user_name || selectedDispute.user_email || (selectedDispute.actor_role === 'admin' ? 'Master Admin' : 'Teammate')}</b>{selectedDispute.user_email && <small>{selectedDispute.user_email}</small>}</div><div className="when">Submitted<b>{formatDate(selectedDispute.created_at)}</b></div></div><label>Question</label><div className="review-block">{selectedDispute.question}</div><label>AI answer</label><div className="review-block answer-copy">{selectedDispute.answer}</div><label>Agent’s reason</label><div className="review-block dispute-reason">{selectedDispute.dispute_reason}</div>{selectedDispute.sources?.length > 0 && <><label>Sources shown to Agent</label><div className="review-links">{selectedDispute.sources.map((source, index) => <a href={source.url} target="_blank" rel="noreferrer" key={index}>{source.title} ↗</a>)}</div></>}{selectedDispute.status === 'pending' && <><label>Your review reason</label><textarea value={reviewReason} onChange={(e) => setReviewReason(e.target.value)} placeholder="Why are you approving or rejecting this dispute?" /><div className="row"><button className="btn btn-primary" disabled={saving} onClick={() => disputeAction('approve')}>Approve dispute</button><button className="btn btn-secondary" disabled={saving} onClick={() => disputeAction('reject')}>Reject</button></div></>}{selectedDispute.status === 'approved' && <><label>Admin approval reason</label><div className="review-block">{selectedDispute.approval_reason}</div><button className="btn btn-primary" disabled={saving} onClick={() => disputeAction('generate')}>{saving ? 'Checking FAQs and generating…' : 'Generate corrective snippet'}</button></>}{selectedDispute.status === 'snippet_generated' && <><label>Generated instruction</label><div className="review-block snippet-result">{selectedDispute.generated_snippet}</div><button className="btn btn-secondary" onClick={() => setTab('snippets')}>Open Snippets</button></>}</> : <div className="empty-admin tall">Select a dispute to review its full context.</div>}</section>
         </div>}
 
         {tab === 'snippets' && <div className="settings-stack"><section className="settings-card"><div className="settings-head"><div><h2>Corrective snippets</h2><p>Approved instructions are automatically applied when their trigger words match a future question.</p></div><span className="state-pill ready">{snippets.filter((item) => item.active).length} active</span></div><div className="snippet-list">{snippets.map((snippet) => <article key={snippet.id} className={!snippet.active ? 'inactive' : ''}><div className="snippet-head"><div><span>#{snippet.id}</span><h3>{snippet.title}</h3></div><label className="toggle"><input type="checkbox" checked={snippet.active} onChange={(e) => updateSnippet(snippet, { active: e.target.checked })} /><i /></label></div><label>Triggers</label><p className="trigger-text">{snippet.trigger_terms}</p><label>Instruction</label><textarea defaultValue={snippet.instruction} onBlur={(e) => e.target.value !== snippet.instruction && updateSnippet(snippet, { instruction: e.target.value })} /><div className="snippet-foot"><small>Created {formatDate(snippet.created_at)}</small><button className="mini-action danger-text" onClick={() => deleteSnippet(snippet.id)}>Delete</button></div></article>)}{!snippets.length && <div className="empty-admin">Approved disputes will appear here after you generate their snippets.</div>}</div></section></div>}
 
-        {tab === 'activity' && <div className="settings-stack"><section className="settings-card activity-filters"><div className="settings-head"><div><h2>Filter activity</h2><p>Dates are interpreted in GMT+6.</p></div></div><div className="filter-grid"><div><label>User email</label><input type="search" value={activityEmail} onChange={(e) => setActivityEmail(e.target.value)} placeholder="Search an email address" /></div><div><label>From</label><input type="date" value={activityFrom} onChange={(e) => setActivityFrom(e.target.value)} /></div><div><label>To</label><input type="date" value={activityTo} onChange={(e) => setActivityTo(e.target.value)} /></div><button className="btn btn-primary" onClick={loadActivity}>Apply filters</button><button className="btn btn-secondary" onClick={() => { setActivityEmail(''); setActivityFrom(''); setActivityTo(''); }}>Clear</button></div></section>{activity && <><div className="activity-kpis">{[['Users', activity.summary.users], ['Queries', activity.summary.queries], ['Question words', activity.summary.questionWords.toLocaleString()], ['Input tokens', activity.summary.inputTokens.toLocaleString()], ['Output tokens', activity.summary.outputTokens.toLocaleString()], ['Estimated cost', `$${activity.summary.estimatedCost.toFixed(4)}`]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><section className="settings-card"><div className="settings-head"><div><h2>Activity results</h2><p>{activity.logs.length} events match the current filters.</p></div></div><div className="activity-table detailed"><div><b>Time</b><b>Google user</b><b>Email</b><b>Event</b><b>Words</b><b>Input</b><b>Output</b><b>Model</b><b>Status</b></div>{activity.logs.map((log) => <div key={log.id}><span>{formatDate(log.created_at)}</span><span>{log.user_name || (log.actor_role === 'admin' ? 'Master Admin' : 'Legacy Agent')}</span><span title={log.user_email || ''}>{log.user_email || '—'}</span><span>{log.event_type}</span><span>{log.question_word_count || 0}</span><span>{log.input_tokens || 0}</span><span>{log.output_tokens || 0}</span><span title={log.model || ''}>{log.provider || '—'}{log.model ? ` · ${log.model}` : ''}</span><span className={log.success ? 'good' : 'bad'}>{log.success ? 'Success' : 'Failed'}</span></div>)}</div></section></>}</div>}
+        {tab === 'activity' && <div className="settings-stack"><section className="settings-card activity-filters"><div className="settings-head"><div><h2>Filter activity</h2><p>Dates are interpreted in GMT+6.</p></div><DateRangeFilter from={activityFrom} to={activityTo} onApply={applyDateRange} /></div><div className="field-action"><input type="search" value={activityEmail} onChange={(e) => setActivityEmail(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && loadActivity()} placeholder="Search a teammate’s email address" /><div className="row"><button className="btn btn-primary" onClick={() => loadActivity()}>Search</button><button className="btn btn-secondary" onClick={clearActivityFilters}>Clear</button></div></div></section>{activity && <><div className="activity-kpis">{[['Users', activity.summary.users], ['Queries', activity.summary.queries], ['Question words', activity.summary.questionWords.toLocaleString()], ['Input tokens', activity.summary.inputTokens.toLocaleString()], ['Output tokens', activity.summary.outputTokens.toLocaleString()], ['Estimated cost', `$${activity.summary.estimatedCost.toFixed(4)}`]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><section className="settings-card"><div className="settings-head"><div><h2>Activity results</h2><p className="activity-count">{activityLogs.length} event{activityLogs.length === 1 ? '' : 's'} match the current filters.</p></div></div><div className="activity-table detailed"><div><b>Time</b><b>Google user</b><b>Email</b><b>Event</b><b>Words</b><b>Input</b><b>Output</b><b>Model</b><b>Status</b></div>{pageLogs.map((log) => <div key={log.id}><span>{formatDate(log.created_at)}</span><span>{log.user_name || (log.actor_role === 'admin' ? 'Master Admin' : 'Legacy Agent')}</span><span title={log.user_email || ''}>{log.user_email || '—'}</span><span>{log.event_type}</span><span>{log.question_word_count || 0}</span><span>{log.input_tokens || 0}</span><span>{log.output_tokens || 0}</span><span title={log.model || ''}>{log.provider || '—'}{log.model ? ` · ${log.model}` : ''}</span><span className={log.success ? 'good' : 'bad'}>{log.success ? 'Success' : 'Failed'}</span></div>)}{!pageLogs.length && <div className="empty-admin">No activity for this filter.</div>}</div>{totalPages > 1 && <div className="pager"><button disabled={activityPage === 1} onClick={() => setActivityPage((p) => Math.max(1, p - 1))}>‹ Prev</button>{pageNumbers.map((p, i) => p === '…' ? <span key={`e${i}`} className="pager-info">…</span> : <button key={p} className={p === activityPage ? 'current' : ''} onClick={() => setActivityPage(p)}>{p}</button>)}<button disabled={activityPage === totalPages} onClick={() => setActivityPage((p) => Math.min(totalPages, p + 1))}>Next ›</button></div>}</section></>}</div>}
 
         {tab === 'keys' && <div className="settings-stack"><section className="settings-card"><div className="settings-head"><div><h2>Encrypted API keys</h2><p>Keys are encrypted before storage and never displayed again.</p></div></div>{[['Intercom API key',intercom,setIntercom,status?.intercomSet],['OpenAI API key',openai,setOpenai,status?.openaiSet],['Groq API key',groq,setGroq,status?.groqSet]].map(([label,value,setter,isSet]) => <div className="vault-field" key={label}><div><label>{label}</label><span className={`state-pill ${isSet ? 'ready' : ''}`}>{isSet ? 'Connected' : 'Not set'}</span></div><input type="password" value={value} onChange={(e) => setter(e.target.value)} placeholder="Paste to set or replace" /></div>)}<button className="btn btn-primary" disabled={saving} onClick={async () => { const body = {}; if (intercom.trim()) body.intercomToken = intercom.trim(); if (openai.trim()) body.openaiKey = openai.trim(); if (groq.trim()) body.groqKey = groq.trim(); if (await settingsSave(body, 'API keys saved securely.')) { setIntercom(''); setOpenai(''); setGroq(''); } }}>Save API keys</button></section></div>}
       </section>
