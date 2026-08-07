@@ -176,7 +176,7 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .login-divider::before, .login-divider::after { content: ''; height: 1px; flex: 1; background: var(--line); }
 
 /* ================= APP SHELL ================= */
-.app-shell { width: min(1440px, 100%); height: 100vh; margin: 0 auto; padding: 18px 30px 20px; display: flex; flex-direction: column; }
+.app-shell { width: min(1440px, 100%); height: 100vh; height: 100dvh; margin: 0 auto; padding: 18px 30px 20px; display: flex; flex-direction: column; }
 .app-header { flex: 0 0 auto; min-height: 60px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .header-actions { display: flex; align-items: center; gap: 9px; }
 .role-badge { padding: 6px 11px; border-radius: 99px; color: var(--violet-ink); background: var(--violet-soft); font: 800 10px/1 var(--display); letter-spacing: .12em; text-transform: uppercase; }
@@ -548,11 +548,53 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 @keyframes sweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
 @keyframes drift { to { transform: translate(-24px, 20px); } }
 
+/* ================= AUTOMATIC SYNC ================= */
+.live-dot.tiny { width: 6px; height: 6px; box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 20%, transparent); }
+.sync-ago { display: inline-flex; align-items: center; gap: 6px; margin-top: 5px; color: var(--muted); font-size: 10.5px; font-weight: 550; }
+.toggle.big { transform: scale(1.15); transform-origin: right center; }
+.autosync-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-top: 4px; }
+.field-block { display: flex; flex-direction: column; gap: 7px; }
+.field-block label { margin: 0; font: 700 9.5px/1 var(--display); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.autosync-state { display: inline-flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 11px; background: var(--surface-2); border: 1px solid var(--line); font-size: 13px; font-weight: 600; }
+.autosync-state.off .live-dot { background: var(--faint); box-shadow: none; }
+.autosync-when { padding: 10px 12px; border-radius: 11px; background: var(--surface-2); border: 1px solid var(--line); font-size: 13px; font-weight: 600; color: var(--ink); }
+.autosync-actions { margin-top: 16px; display: flex; gap: 10px; flex-wrap: wrap; }
+.sync-log-list { display: grid; gap: 8px; }
+.sync-log { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); transition: border-color .16s; }
+.sync-log:hover { border-color: var(--line-strong); }
+.sync-log.failed { border-color: color-mix(in srgb, var(--danger) 35%, var(--line)); }
+.sync-log-row { width: 100%; display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: 14px; padding: 13px 15px; border: 0; background: transparent; color: var(--ink); cursor: pointer; text-align: left; }
+.sync-badge { padding: 4px 10px; border-radius: 99px; font: 700 10px/1 var(--display); letter-spacing: .03em; text-transform: uppercase; background: var(--violet-soft); color: var(--violet-ink); white-space: nowrap; }
+.sync-badge.success { background: var(--success-soft, color-mix(in srgb, var(--success) 15%, transparent)); color: var(--success); }
+.sync-badge.failed { background: var(--danger-soft); color: var(--danger); }
+.sync-badge.partial { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+.sync-badge.skipped { background: var(--surface-2); color: var(--muted); }
+.sync-log-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.sync-log-main b { font-size: 13px; font-weight: 650; }
+.sync-log-main small { color: var(--muted); font-size: 11px; }
+.sync-log-quick { color: var(--ink-2); font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sync-chevron { color: var(--faint); font-size: 11px; }
+.sync-log-detail { padding: 6px 15px 16px; border-top: 1px solid var(--line); background: var(--surface-2); animation: fade .16s ease both; }
+.sync-detail-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px 22px; padding: 12px 0; }
+.sync-detail-grid > div { display: flex; flex-direction: column; gap: 2px; }
+.sync-detail-grid span { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; font-weight: 700; }
+.sync-detail-grid b { font-size: 13.5px; font-variant-numeric: tabular-nums; }
+.sync-error { margin-top: 8px; padding: 11px 13px; border-radius: 10px; background: var(--danger-soft); border: 1px solid color-mix(in srgb, var(--danger) 22%, transparent); }
+.sync-error span { display: block; color: var(--danger); font: 700 10px/1 var(--display); letter-spacing: .05em; text-transform: uppercase; margin-bottom: 4px; }
+.sync-error p { margin: 0; color: var(--ink-2); font-size: 12.5px; line-height: 1.5; word-break: break-word; }
+.sync-samples { margin-top: 10px; }
+.sync-samples > span { display: block; color: var(--muted); font: 700 10px/1 var(--display); letter-spacing: .05em; text-transform: uppercase; margin-bottom: 6px; }
+.sync-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.sync-chips em { padding: 4px 9px; border-radius: 7px; background: var(--surface); border: 1px solid var(--line); font-style: normal; font-size: 11.5px; color: var(--ink-2); }
+
 /* ================= RESPONSIVE ================= */
+/* ---- Tablets & large phones: let the page scroll instead of pinning ---- */
 @media (max-width: 1100px) {
-  .app-shell { padding-inline: 20px; }
-  .workspace-grid { grid-template-columns: minmax(0,1fr); }
-  .insights-rail { display: grid; grid-template-columns: repeat(4,1fr); gap: 9px; overflow: visible; }
+  .app-shell { height: auto; min-height: 100dvh; padding-inline: 20px; }
+  .workspace-grid { display: flex; flex-direction: column; }
+  .assistant-card { flex: none; min-height: 62dvh; }
+  .chat-thread { flex: none; overflow: visible; }
+  .insights-rail { flex: none; display: grid; grid-template-columns: repeat(4,1fr); gap: 9px; overflow: visible; }
   .insights-rail > * { margin: 0; }
   .rail-head, .rail-tip { display: none; }
   .metric-grid { display: contents; }
@@ -562,47 +604,94 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
   .rule-list, .dispute-list { max-height: none; }
   .date-cal { width: min(520px, 88vw); }
 }
+
+/* ---- Phones ---- */
 @media (max-width: 760px) {
-  .app-shell { padding: 10px; }
-  .app-header { padding: 4px 3px 8px; }
+  .app-shell { padding: 10px 12px 0; }
+  .app-header { padding: 4px 2px 8px; gap: 10px; }
+  .header-actions { gap: 7px; }
   .header-actions .role-badge, .header-actions .btn-secondary { display: none; }
   .user-identity { display: none; }
-  .chat-thread { padding: 26px 15px; }
-  .welcome-state { margin-top: 42px; }
+  .brand-title { font-size: 15px; }
+
+  .assistant-card { min-height: 66dvh; border-radius: 18px; }
+  .chat-thread { padding: 22px 15px; }
+  .welcome-state { margin-top: 34px; }
+  .welcome-state h1 { font-size: clamp(24px, 7vw, 32px); }
   .suggestion-grid { grid-template-columns: 1fr; }
-  .suggestion-grid button { min-height: 56px; }
-  .user-bubble { max-width: 90%; }
-  .assistant-message { grid-template-columns: 34px minmax(0,1fr); gap: 11px; }
-  .bot-avatar { width: 34px; height: 34px; }
-  .assistant-bubble { padding: 18px 18px; }
+  .suggestion-grid button { min-height: 54px; }
+  .user-bubble { max-width: 92%; }
+  .assistant-message { grid-template-columns: 32px minmax(0,1fr); gap: 10px; }
+  .bot-avatar { width: 32px; height: 32px; }
+  .assistant-bubble { padding: 16px 16px; }
   .answer { font-size: 15px; }
-  .composer-wrap { padding: 12px 12px; }
-  .composer-foot { padding-bottom: 22px; }
-  .developer-credit { top: auto; bottom: -18px; left: 0; right: 0; justify-content: center; }
-  .insights-rail { grid-template-columns: repeat(2,1fr); border-radius: 16px; }
-  .metric-card.update-time { grid-column: span 2; }
-  .sync-summary { align-items: flex-start; flex-direction: column; }
-  .answer-head { flex-direction: column; align-items: flex-start; }
-  .activity-kpis { grid-template-columns: repeat(2,1fr); }
+  .answer-head { flex-direction: column; align-items: flex-start; gap: 8px; }
+
+  /* Composer flows at the bottom of the card, clear of the home indicator */
+  .composer-wrap { padding: 12px 12px calc(12px + env(safe-area-inset-bottom)); }
+  .composer-foot { padding-bottom: 4px; }
+  .developer-credit { position: static; margin-top: 8px; justify-content: center; }
+
+  .insights-rail { grid-template-columns: repeat(2,1fr); border-radius: 16px; margin-top: 12px; margin-bottom: 14px; }
+  .metric-card.update-time, .metric-card.primary, .metric-card.model-card { grid-column: span 2; }
+
+  .sync-console { margin: 10px 0; }
+  .sync-summary { align-items: stretch; flex-direction: column; gap: 12px; }
+  .sync-summary .row { justify-content: space-between; }
+
+  /* Admin: sidebar becomes a sticky, scrollable top tab bar with labels kept */
   .admin-shell { display: block; }
-  .admin-sidebar { position: static; width: 100%; height: auto; padding: 13px; flex-direction: row; align-items: center; gap: 10px; overflow-x: auto; }
+  .admin-sidebar { position: sticky; top: 0; z-index: 40; width: 100%; height: auto; padding: 9px 10px; flex-direction: row; align-items: center; gap: 8px; border-right: 0; border-bottom: 1px solid var(--line); overflow: visible; backdrop-filter: blur(8px); background: color-mix(in srgb, var(--surface) 88%, transparent); }
+  .admin-sidebar .brand { flex: 0 0 auto; }
   .admin-sidebar .brand span, .sidebar-foot { display: none; }
-  .admin-sidebar nav { margin: 0 0 0 auto; display: flex; }
-  .admin-sidebar nav button { white-space: nowrap; padding: 9px; }
-  .admin-sidebar nav button em { display: none; }
-  .admin-main { padding: 24px 13px 60px; }
+  .admin-sidebar nav { margin: 0; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+  .admin-sidebar nav::-webkit-scrollbar { display: none; }
+  .admin-sidebar nav button { white-space: nowrap; padding: 9px 12px; font-size: 12.5px; border-radius: 10px; }
+  .admin-sidebar nav button.active { box-shadow: none; }
+  .admin-sidebar nav button span { width: auto; margin-right: 2px; }
+  .admin-sidebar nav button em { position: absolute; top: 3px; right: 4px; margin: 0; min-width: 15px; height: 15px; font-size: 8px; }
+  .admin-main { padding: 20px 13px 60px; }
+  .admin-top h1 { font-size: 22px; }
+  .settings-card { padding: 18px 16px; }
+  .settings-head { flex-direction: column; align-items: flex-start; gap: 10px; }
+
   .field-action { grid-template-columns: 1fr; }
   .provider-grid { grid-template-columns: 1fr; }
+  .permission-table > div { grid-template-columns: 1.4fr 1fr 1fr; font-size: 11px; }
+
+  /* Activity: wide table → stacked, labelled cards */
+  .activity-kpis { grid-template-columns: repeat(2,1fr); }
+  .activity-table.detailed { overflow: visible; }
+  .activity-table.detailed > div:first-child { display: none; }
+  .activity-table.detailed > div { min-width: 0; display: block; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; margin-bottom: 8px; }
+  .activity-table.detailed > div:last-child { margin-bottom: 0; }
+  .activity-table.detailed span { display: flex; justify-content: space-between; gap: 14px; padding: 5px 0; white-space: normal; overflow: visible; }
+  .activity-table.detailed span + span { border-top: 1px solid color-mix(in srgb, var(--line) 55%, transparent); }
+  .activity-table.detailed span::before { content: attr(data-label); flex: 0 0 auto; color: var(--muted); font: 700 10px/1.4 var(--display); letter-spacing: .04em; text-transform: uppercase; }
+  .activity-table.detailed span { text-align: right; word-break: break-word; }
+
+  /* Auto-sync section reflow */
+  .autosync-grid { grid-template-columns: 1fr; }
+  .sync-detail-grid { grid-template-columns: 1fr 1fr; gap: 10px 16px; }
+  .sync-log-row { grid-template-columns: auto 1fr auto; gap: 10px; padding: 12px; }
+  .sync-log-quick { display: none; }
+
+  /* Date filter stacks (calendar under presets) */
   .date-pop { flex-direction: column; }
-  .date-presets { width: 100%; border-right: 0; border-bottom: 1px solid var(--line); }
-  .date-cal { position: static; width: 100%; border: 0; border-radius: 0; box-shadow: none; padding: 14px 8px 4px; }
+  .date-presets { width: 100%; border-bottom: 1px solid var(--line); }
+  .date-cal { position: static; right: auto; width: 100%; border: 0; border-radius: 0; box-shadow: none; padding: 14px 8px 4px; }
   .cal-wrap { grid-template-columns: 1fr; gap: 16px; }
 }
+
+/* ---- Small phones ---- */
 @media (max-width: 480px) {
-  .login-panel { padding: 30px 24px; }
-  .login-copy h1 { font-size: 30px; }
-  .admin-sidebar nav button { font-size: 0; }
-  .admin-sidebar nav button span { font-size: 17px; }
+  .login-panel { padding: 30px 22px; }
+  .login-copy h1 { font-size: 28px; }
+  .insights-rail { grid-template-columns: 1fr 1fr; }
+  .sync-detail-grid { grid-template-columns: 1fr; }
+  .autosync-actions { flex-direction: column; }
+  .autosync-actions .btn { width: 100%; }
+  .admin-sidebar nav button span { display: inline; }
 }
 
 @media (prefers-reduced-motion: reduce) {
