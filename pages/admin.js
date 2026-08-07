@@ -28,6 +28,18 @@ function formatDate(value) {
   }).format(new Date(value)) + ' GMT+6';
 }
 
+function formatDuration(ms) {
+  if (ms == null) return '—';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${s % 60}s`;
+}
+
+function syncStatusLabel(status) {
+  return { success: 'Success', partial: 'In progress', failed: 'Failed', skipped: 'Skipped' }[status] || status;
+}
+
 function initials(name, email) {
   const base = String(name || email || '?').trim();
   const parts = base.split(/\s+/).filter(Boolean);
@@ -217,6 +229,10 @@ export default function Admin() {
   const [activityTo, setActivityTo] = useState('');
   const [activityPage, setActivityPage] = useState(1);
   const [allowedGoogleDomains, setAllowedGoogleDomains] = useState('');
+  const [smartRetrieval, setSmartRetrieval] = useState(true);
+  const [autoSync, setAutoSync] = useState(null);
+  const [runningSync, setRunningSync] = useState(false);
+  const [expandedSync, setExpandedSync] = useState(null);
 
   useEffect(() => {
     const savedSession = localStorage.getItem('appSession') || '';
@@ -234,6 +250,7 @@ export default function Admin() {
     if (tab === 'disputes') loadDisputes();
     if (tab === 'snippets') loadSnippets();
     if (tab === 'activity') loadActivity();
+    if (tab === 'autosync') loadAutoSync();
   }, [tab, session, role, disputeFilter]);
 
   function headers(json = false, token = session) {
@@ -267,7 +284,45 @@ export default function Admin() {
       if (!response.ok) throw new Error(data.error || 'Could not load settings.');
       setStatus(data); setProvider(data.chatProvider || 'openai'); setModel(data.chatModel || 'gpt-4.1-mini'); setPrompt(data.chatPrompt || '');
       setAllowedGoogleDomains(data.allowedGoogleDomains || '');
+      setSmartRetrieval(data.smartRetrieval !== false);
     } catch (e) { setError(e.message); }
+  }
+
+  async function loadAutoSync() {
+    try {
+      const response = await fetch('/api/autosync', { headers: headers() });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not load auto-sync.');
+      setAutoSync(data);
+    } catch (e) { setError(e.message); }
+  }
+
+  async function saveAutoSync(updates, success) {
+    clearMessages();
+    try {
+      const response = await fetch('/api/autosync', { method: 'POST', headers: headers(true), body: JSON.stringify(updates) });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not save auto-sync.');
+      setAutoSync((current) => ({ ...(current || {}), ...data }));
+      if (success) setNotice(success);
+    } catch (e) { setError(e.message); }
+  }
+
+  async function runAutoSyncNow() {
+    setRunningSync(true); clearMessages();
+    try {
+      const response = await fetch('/api/cron-sync', { method: 'POST', headers: headers(true) });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Auto-sync could not run.');
+      if (data.ran === false) setNotice(data.reason || 'Nothing to sync right now.');
+      else if (data.status === 'failed') setError('Sync failed: ' + (data.error || 'unknown error'));
+      else if (data.status === 'partial') setNotice(`Sync in progress — indexed ${data.articlesIndexed || 0} so far. It will finish automatically.`);
+      else setNotice(`Sync complete. ${data.articlesChanged || 0} changed, ${data.articlesIndexed || 0} re-indexed.`);
+      await loadAutoSync();
+    } catch (e) { setError(e.message); } finally { setRunningSync(false); }
   }
 
   async function settingsSave(body, success) {
@@ -403,7 +458,8 @@ export default function Admin() {
 
   const navigation = [
     ['access', '⌁', 'Team access'], ['ai', '✦', 'AI & model'], ['branding', 'Aa', 'Brand Language'],
-    ['disputes', '⚑', 'Disputes'], ['snippets', '⌘', 'Snippets'], ['activity', '◫', 'Activity logs'], ['keys', '◇', 'API vault']
+    ['disputes', '⚑', 'Disputes'], ['snippets', '⌘', 'Snippets'], ['activity', '◫', 'Activity logs'],
+    ['autosync', '↻', 'Automatic sync'], ['keys', '◇', 'API vault']
   ];
   const titles = Object.fromEntries(navigation.map(([id,, title]) => [id, title]));
   const models = provider === 'groq' ? GROQ_MODELS : OPENAI_MODELS;
@@ -438,7 +494,8 @@ export default function Admin() {
 
         {tab === 'ai' && <div className="settings-stack">
           <section className="settings-card"><div className="settings-head"><div><h2>Answer provider</h2><p>OpenAI finds relevant FAQs. This controls which model writes the answer.</p></div></div><div className="provider-grid"><button className={provider === 'groq' ? 'selected' : ''} onClick={() => { setProvider('groq'); setModel(GROQ_MODELS[0]); }}><b>Groq</b><span>Fast, cost-efficient answers</span></button><button className={provider === 'openai' ? 'selected' : ''} onClick={() => { setProvider('openai'); setModel(OPENAI_MODELS[0]); }}><b>OpenAI</b><span>Direct OpenAI answers</span></button></div><label>Model</label><select value={models.includes(model) ? model : '__custom__'} onChange={(e) => setModel(e.target.value)}>{models.map((item) => <option key={item}>{item}</option>)}<option value="__custom__">Custom model…</option></select>{model === '__custom__' && <input value={customModel} onChange={(e) => setCustomModel(e.target.value)} placeholder="Exact model ID" />}</section>
-          <section className="settings-card"><div className="settings-head"><div><h2>Assistant instructions</h2><p>Brand Language and approved snippets are enforced separately.</p></div></div><textarea className="prompt-area" value={prompt} onChange={(e) => setPrompt(e.target.value)} /><button className="btn btn-primary" disabled={saving} onClick={() => { const chosen = model === '__custom__' ? customModel.trim() : model; if (!chosen) return setError('Enter a model ID.'); settingsSave({ chatProvider: provider, chatModel: chosen, chatPrompt: prompt }, 'AI settings saved.'); }}>Save AI settings</button></section>
+          <section className="settings-card"><div className="settings-head"><div><h2>Smart query understanding</h2><p>Helps vague, misspelled, or ambiguous questions find the right FAQ. When a question could mean two things (for example a payout cycle versus the 24-hour Brand Promise), the assistant retrieves evidence for each meaning and answers them separately.</p></div><label className="toggle"><input type="checkbox" checked={smartRetrieval} onChange={(e) => { setSmartRetrieval(e.target.checked); settingsSave({ smartRetrieval: e.target.checked }, e.target.checked ? 'Smart query understanding turned on.' : 'Smart query understanding turned off.'); }} /><i /></label></div><p className="field-help">Adds one quick model call per question to interpret it. Concept matching for FundedNext terms stays on either way.</p></section>
+          <section className="settings-card"><div className="settings-head"><div><h2>Assistant instructions</h2><p>Brand Language and approved snippets are enforced separately.</p></div></div><textarea className="prompt-area" value={prompt} onChange={(e) => setPrompt(e.target.value)} /><button className="btn btn-primary" disabled={saving} onClick={() => { const chosen = model === '__custom__' ? customModel.trim() : model; if (!chosen) return setError('Enter a model ID.'); settingsSave({ chatProvider: provider, chatModel: chosen, chatPrompt: prompt, smartRetrieval }, 'AI settings saved.'); }}>Save AI settings</button></section>
         </div>}
 
         {tab === 'branding' && <div className="admin-split">
@@ -453,7 +510,47 @@ export default function Admin() {
 
         {tab === 'snippets' && <div className="settings-stack"><section className="settings-card"><div className="settings-head"><div><h2>Corrective snippets</h2><p>Approved instructions are automatically applied when their trigger words match a future question.</p></div><span className="state-pill ready">{snippets.filter((item) => item.active).length} active</span></div><div className="snippet-list">{snippets.map((snippet) => <article key={snippet.id} className={!snippet.active ? 'inactive' : ''}><div className="snippet-head"><div><span>#{snippet.id}</span><h3>{snippet.title}</h3></div><label className="toggle"><input type="checkbox" checked={snippet.active} onChange={(e) => updateSnippet(snippet, { active: e.target.checked })} /><i /></label></div><label>Triggers</label><p className="trigger-text">{snippet.trigger_terms}</p><label>Instruction</label><textarea defaultValue={snippet.instruction} onBlur={(e) => e.target.value !== snippet.instruction && updateSnippet(snippet, { instruction: e.target.value })} /><div className="snippet-foot"><small>Created {formatDate(snippet.created_at)}</small><button className="mini-action danger-text" onClick={() => deleteSnippet(snippet.id)}>Delete</button></div></article>)}{!snippets.length && <div className="empty-admin">Approved disputes will appear here after you generate their snippets.</div>}</div></section></div>}
 
-        {tab === 'activity' && <div className="settings-stack"><section className="settings-card activity-filters"><div className="settings-head"><div><h2>Filter activity</h2><p>Dates are interpreted in GMT+6.</p></div><DateRangeFilter from={activityFrom} to={activityTo} onApply={applyDateRange} /></div><div className="field-action"><input type="search" value={activityEmail} onChange={(e) => setActivityEmail(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && loadActivity()} placeholder="Search a teammate’s email address" /><div className="row"><button className="btn btn-primary" onClick={() => loadActivity()}>Search</button><button className="btn btn-secondary" onClick={clearActivityFilters}>Clear</button></div></div></section>{activity && <><div className="activity-kpis">{[['Users', activity.summary.users], ['Queries', activity.summary.queries], ['Question words', activity.summary.questionWords.toLocaleString()], ['Input tokens', activity.summary.inputTokens.toLocaleString()], ['Output tokens', activity.summary.outputTokens.toLocaleString()], ['Estimated cost', `$${activity.summary.estimatedCost.toFixed(4)}`]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><section className="settings-card"><div className="settings-head"><div><h2>Activity results</h2><p className="activity-count">{activityLogs.length} event{activityLogs.length === 1 ? '' : 's'} match the current filters.</p></div></div><div className="activity-table detailed"><div><b>Time</b><b>Google user</b><b>Email</b><b>Event</b><b>Words</b><b>Input</b><b>Output</b><b>Model</b><b>Status</b></div>{pageLogs.map((log) => <div key={log.id}><span>{formatDate(log.created_at)}</span><span>{log.user_name || (log.actor_role === 'admin' ? 'Master Admin' : 'Legacy Agent')}</span><span title={log.user_email || ''}>{log.user_email || '—'}</span><span>{log.event_type}</span><span>{log.question_word_count || 0}</span><span>{log.input_tokens || 0}</span><span>{log.output_tokens || 0}</span><span title={log.model || ''}>{log.provider || '—'}{log.model ? ` · ${log.model}` : ''}</span><span className={log.success ? 'good' : 'bad'}>{log.success ? 'Success' : 'Failed'}</span></div>)}{!pageLogs.length && <div className="empty-admin">No activity for this filter.</div>}</div>{totalPages > 1 && <div className="pager"><button disabled={activityPage === 1} onClick={() => setActivityPage((p) => Math.max(1, p - 1))}>‹ Prev</button>{pageNumbers.map((p, i) => p === '…' ? <span key={`e${i}`} className="pager-info">…</span> : <button key={p} className={p === activityPage ? 'current' : ''} onClick={() => setActivityPage(p)}>{p}</button>)}<button disabled={activityPage === totalPages} onClick={() => setActivityPage((p) => Math.min(totalPages, p + 1))}>Next ›</button></div>}</section></>}</div>}
+        {tab === 'activity' && <div className="settings-stack"><section className="settings-card activity-filters"><div className="settings-head"><div><h2>Filter activity</h2><p>Dates are interpreted in GMT+6.</p></div><DateRangeFilter from={activityFrom} to={activityTo} onApply={applyDateRange} /></div><div className="field-action"><input type="search" value={activityEmail} onChange={(e) => setActivityEmail(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && loadActivity()} placeholder="Search a teammate’s email address" /><div className="row"><button className="btn btn-primary" onClick={() => loadActivity()}>Search</button><button className="btn btn-secondary" onClick={clearActivityFilters}>Clear</button></div></div></section>{activity && <><div className="activity-kpis">{[['Users', activity.summary.users], ['Queries', activity.summary.queries], ['Question words', activity.summary.questionWords.toLocaleString()], ['Input tokens', activity.summary.inputTokens.toLocaleString()], ['Output tokens', activity.summary.outputTokens.toLocaleString()], ['Estimated cost', `$${activity.summary.estimatedCost.toFixed(4)}`]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><section className="settings-card"><div className="settings-head"><div><h2>Activity results</h2><p className="activity-count">{activityLogs.length} event{activityLogs.length === 1 ? '' : 's'} match the current filters.</p></div></div><div className="activity-table detailed"><div><b>Time</b><b>Google user</b><b>Email</b><b>Event</b><b>Words</b><b>Input</b><b>Output</b><b>Model</b><b>Status</b></div>{pageLogs.map((log) => <div key={log.id}><span data-label="Time">{formatDate(log.created_at)}</span><span data-label="User">{log.user_name || (log.actor_role === 'admin' ? 'Master Admin' : 'Legacy Agent')}</span><span data-label="Email" title={log.user_email || ''}>{log.user_email || '—'}</span><span data-label="Event">{log.event_type}</span><span data-label="Words">{log.question_word_count || 0}</span><span data-label="Input">{log.input_tokens || 0}</span><span data-label="Output">{log.output_tokens || 0}</span><span data-label="Model" title={log.model || ''}>{log.provider || '—'}{log.model ? ` · ${log.model}` : ''}</span><span data-label="Status" className={log.success ? 'good' : 'bad'}>{log.success ? 'Success' : 'Failed'}</span></div>)}{!pageLogs.length && <div className="empty-admin">No activity for this filter.</div>}</div>{totalPages > 1 && <div className="pager"><button disabled={activityPage === 1} onClick={() => setActivityPage((p) => Math.max(1, p - 1))}>‹ Prev</button>{pageNumbers.map((p, i) => p === '…' ? <span key={`e${i}`} className="pager-info">…</span> : <button key={p} className={p === activityPage ? 'current' : ''} onClick={() => setActivityPage(p)}>{p}</button>)}<button disabled={activityPage === totalPages} onClick={() => setActivityPage((p) => Math.min(totalPages, p + 1))}>Next ›</button></div>}</section></>}</div>}
+
+        {tab === 'autosync' && <div className="settings-stack">
+          <section className="settings-card"><div className="settings-head"><div><h2>Automatic FAQ sync</h2><p>Keep the knowledge base current on its own. When on, the app checks Intercom for new or changed articles on the schedule you choose and re-indexes what changed.</p></div><label className="toggle big"><input type="checkbox" checked={!!autoSync?.enabled} onChange={(e) => saveAutoSync({ enabled: e.target.checked }, e.target.checked ? 'Automatic sync turned on.' : 'Automatic sync turned off.')} /><i /></label></div>
+            <div className="autosync-grid">
+              <div className="field-block"><label>Run every</label><select value={autoSync?.intervalHours || 6} disabled={!autoSync?.enabled} onChange={(e) => saveAutoSync({ intervalHours: Number(e.target.value) }, 'Sync schedule updated.')}>{(autoSync?.intervalOptions || [2, 3, 4, 6, 8, 12, 24]).map((h) => <option key={h} value={h}>{h === 24 ? 'Every 24 hours (daily)' : `Every ${h} hours`}</option>)}</select></div>
+              <div className="field-block"><label>Status</label><div className={`autosync-state ${autoSync?.enabled ? 'on' : 'off'}`}><span className="live-dot" />{autoSync?.enabled ? `On · every ${autoSync?.intervalHours || 6}h` : 'Off'}</div></div>
+              <div className="field-block"><label>Last successful sync</label><b className="autosync-when">{autoSync?.lastAutoSyncAt ? formatDate(autoSync.lastAutoSyncAt) : 'Never run yet'}</b></div>
+              <div className="field-block"><label>Waiting to index</label><b className="autosync-when">{autoSync?.queued ? `${autoSync.queued} article${autoSync.queued === 1 ? '' : 's'}` : 'Nothing queued'}</b></div>
+            </div>
+            <div className="autosync-actions"><button className="btn btn-primary" disabled={runningSync} onClick={runAutoSyncNow}>{runningSync ? 'Syncing…' : 'Run sync now'}</button><button className="btn btn-secondary" disabled={runningSync} onClick={loadAutoSync}>Refresh</button></div>
+            <p className="field-help">“Run sync now” works even when automatic sync is off. A long sync continues in the background and finishes across the next few automatic runs.</p>
+          </section>
+
+          <section className="settings-card"><div className="settings-head"><div><h2>Sync history</h2><p>Every automatic and manual run, newest first. Open a row for full details.</p></div>{autoSync?.logs?.length ? <span className="state-pill ready">{autoSync.logs.length} recorded</span> : null}</div>
+            <div className="sync-log-list">{(autoSync?.logs || []).map((log) => <div key={log.id} className={`sync-log ${log.status}`}>
+              <button className="sync-log-row" onClick={() => setExpandedSync(expandedSync === log.id ? null : log.id)}>
+                <span className={`sync-badge ${log.status}`}>{syncStatusLabel(log.status)}</span>
+                <span className="sync-log-main"><b>{log.trigger === 'manual' ? 'Manual run' : 'Automatic run'}</b><small>{formatDate(log.started_at)}</small></span>
+                <span className="sync-log-quick">{log.status === 'failed' ? 'See reason' : `${log.articles_changed || 0} changed · ${log.articles_indexed || 0} indexed`}</span>
+                <span className="sync-chevron">{expandedSync === log.id ? '▴' : '▾'}</span>
+              </button>
+              {expandedSync === log.id && <div className="sync-log-detail">
+                <div className="sync-detail-grid">
+                  <div><span>Started</span><b>{formatDate(log.started_at)}</b></div>
+                  <div><span>Finished</span><b>{log.finished_at ? formatDate(log.finished_at) : '—'}</b></div>
+                  <div><span>Duration</span><b>{formatDuration(log.duration_ms)}</b></div>
+                  <div><span>Trigger</span><b>{log.trigger === 'manual' ? 'Manual' : 'Automatic'}</b></div>
+                  <div><span>Articles scanned</span><b>{log.articles_scanned ?? 0}</b></div>
+                  <div><span>Changed / new</span><b>{log.articles_changed ?? 0}</b></div>
+                  <div><span>Re-indexed</span><b>{log.articles_indexed ?? 0}</b></div>
+                  <div><span>Removed</span><b>{log.articles_deleted ?? 0}</b></div>
+                  <div><span>Searchable pieces written</span><b>{log.chunks_written ?? 0}</b></div>
+                  <div><span>Processing passes</span><b>{log.steps ?? 0}</b></div>
+                </div>
+                {log.error && <div className="sync-error"><span>Failure reason</span><p>{log.error}</p></div>}
+                {Array.isArray(log.sample_titles) && log.sample_titles.length > 0 && <div className="sync-samples"><span>Updated articles included</span><div className="sync-chips">{log.sample_titles.map((title, i) => <em key={i}>{title}</em>)}</div></div>}
+              </div>}
+            </div>)}{!autoSync?.logs?.length && <div className="empty-admin">No sync runs recorded yet. Press “Run sync now” or wait for the first automatic run.</div>}</div>
+          </section>
+        </div>}
 
         {tab === 'keys' && <div className="settings-stack"><section className="settings-card"><div className="settings-head"><div><h2>Encrypted API keys</h2><p>Keys are encrypted before storage and never displayed again.</p></div></div>{[['Intercom API key',intercom,setIntercom,status?.intercomSet],['OpenAI API key',openai,setOpenai,status?.openaiSet],['Groq API key',groq,setGroq,status?.groqSet]].map(([label,value,setter,isSet]) => <div className="vault-field" key={label}><div><label>{label}</label><span className={`state-pill ${isSet ? 'ready' : ''}`}>{isSet ? 'Connected' : 'Not set'}</span></div><input type="password" value={value} onChange={(e) => setter(e.target.value)} placeholder="Paste to set or replace" /></div>)}<button className="btn btn-primary" disabled={saving} onClick={async () => { const body = {}; if (intercom.trim()) body.intercomToken = intercom.trim(); if (openai.trim()) body.openaiKey = openai.trim(); if (groq.trim()) body.groqKey = groq.trim(); if (await settingsSave(body, 'API keys saved securely.')) { setIntercom(''); setOpenai(''); setGroq(''); } }}>Save API keys</button></section></div>}
       </section>
