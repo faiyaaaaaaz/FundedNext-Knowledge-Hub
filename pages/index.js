@@ -55,7 +55,7 @@ function plainText(text) {
     .trim();
 }
 
-function Answer({ text }) {
+function renderBlocks(text) {
   const blocks = [];
   let list = [];
   let listType = '';
@@ -79,7 +79,54 @@ function Answer({ text }) {
     blocks.push(<p key={`p-${blocks.length}`}>{plainText(line)}</p>);
   });
   flush();
-  return <div className="answer">{blocks}</div>;
+  return blocks;
+}
+
+function Answer({ text }) {
+  return <div className="answer">{renderBlocks(text)}</div>;
+}
+
+// Small numbered citation chips shown at the end of a paragraph. The visible
+// number is drawn with CSS (content: attr(data-n)) and everything here is
+// user-select:none, so citations are NEVER included when text is copied or
+// manually selected. Hover or tap reveals the source; click opens the article.
+function SourceCites({ refs, sources }) {
+  return (
+    <span className="seg-cites" aria-hidden={false}>
+      {refs.map((n) => {
+        const source = sources?.[n - 1];
+        if (!source) return null;
+        return (
+          <a key={n} className="seg-cite" data-n={n} href={source.url} target="_blank" rel="noreferrer"
+            aria-label={`Source ${n}: ${source.title}`}>
+            <span className="seg-cite-pop" aria-hidden="true">
+              <b>Source {n}</b><span>{source.title}</span><em>Open article ↗</em>
+            </span>
+          </a>
+        );
+      })}
+    </span>
+  );
+}
+
+function AttributedAnswer({ segments, sources }) {
+  return (
+    <div className="answer">
+      {segments.map((seg, i) => {
+        const blocks = renderBlocks(seg.text);
+        if (seg.refs?.length && blocks.length) {
+          const last = blocks[blocks.length - 1];
+          const cites = <SourceCites key="cites" refs={seg.refs} sources={sources} />;
+          if (last.type === 'p') {
+            blocks[blocks.length - 1] = <p key={last.key}>{last.props.children}{cites}</p>;
+          } else {
+            blocks.push(<p key={`cites-${i}`} className="cites-row">{cites}</p>);
+          }
+        }
+        return <div className="answer-seg" key={i}>{blocks}</div>;
+      })}
+    </div>
+  );
 }
 
 function formatDhaka(value) {
@@ -234,7 +281,8 @@ export default function Home() {
       if (!response.ok) throw new Error(data.error || 'The assistant could not answer.');
       setMessages((current) => [...current, {
         role: 'assistant', question: value, questionId, content: data.answer,
-        sources: data.sources || [], provider: data.answerProvider, fallback: data.usedFallback,
+        sources: data.sources || [], segments: data.segments || null,
+        provider: data.answerProvider, fallback: data.usedFallback,
         confidence: data.confidence, confidenceLabel: data.confidenceLabel, disputed: false
       }]);
     } catch (error) {
@@ -344,7 +392,7 @@ export default function Home() {
             {!messages.length && <div className="welcome-state"><div className="assistant-orb"><Logo /></div><span className="status-chip">Source-backed assistance</span><h1>How can I help today?</h1><p>Ask about a policy, Account, Performance Reward, trading rule, or platform.</p><div className="suggestion-grid">{['How does trailing drawdown work?', 'Explain Performance Reward eligibility', 'What causes an Account breach?'].map((question) => <button key={question} onClick={() => send(question)}>{question}<span>↗</span></button>)}</div></div>}
             {messages.map((message, index) => message.role === 'user'
               ? <div className="message user-message" key={index}><div className="message-label">You</div><div className="user-bubble">{message.content}</div></div>
-              : <div className="message assistant-message" key={index}><div className="bot-avatar"><Logo /></div><div className={`assistant-bubble${message.error ? ' error-bubble' : ''}`}><div className="answer-head"><span>FundedNext Assistant</span><div>{Number.isFinite(message.confidence) && <span className={`confidence-pill ${confidenceTone(message.confidence)}`}><i style={{ '--score': `${message.confidence * 3.6}deg` }} />{message.confidence}% · {message.confidenceLabel}</span>}<small>{message.fallback ? 'OpenAI backup' : message.provider === 'groq' ? 'Groq' : 'OpenAI'}</small></div></div><Answer text={message.content} /><div className="answer-actions"><button onClick={() => copyAnswer(index, message.content)}>{copied === index ? '✓ Copied' : '⧉ Copy answer'}</button><button className={message.disputed ? 'disputed' : ''} disabled={message.disputed || message.error} onClick={() => { setDisputeIndex(index); setDisputeReason(''); setDisputeError(''); }}>{message.disputed ? '✓ Answer disputed' : '⚑ Dispute answer'}</button></div>{message.sources?.length > 0 && <div className="sources"><button className="sources-toggle" onClick={() => setOpenSources((current) => ({ ...current, [index]: !current[index] }))}><span>◆</span>{message.sources.length} verified source{message.sources.length > 1 ? 's' : ''}<b>{openSources[index] ? '−' : '+'}</b></button>{openSources[index] && <div className="sources-list">{message.sources.map((source, sourceIndex) => <a key={sourceIndex} href={source.url} target="_blank" rel="noreferrer"><span>{source.title}</span><small>Open article ↗</small></a>)}</div>}</div>}</div></div>
+              : <div className="message assistant-message" key={index}><div className="bot-avatar"><Logo /></div><div className={`assistant-bubble${message.error ? ' error-bubble' : ''}`}><div className="answer-head"><span>FundedNext Assistant</span><div>{Number.isFinite(message.confidence) && <span className={`confidence-pill ${confidenceTone(message.confidence)}`}><i style={{ '--score': `${message.confidence * 3.6}deg` }} />{message.confidence}% · {message.confidenceLabel}</span>}<small>{message.fallback ? 'OpenAI backup' : message.provider === 'groq' ? 'Groq' : 'OpenAI'}</small></div></div>{message.segments?.length ? <AttributedAnswer segments={message.segments} sources={message.sources} /> : <Answer text={message.content} />}<div className="answer-actions"><button onClick={() => copyAnswer(index, message.content)}>{copied === index ? '✓ Copied' : '⧉ Copy answer'}</button><button className={message.disputed ? 'disputed' : ''} disabled={message.disputed || message.error} onClick={() => { setDisputeIndex(index); setDisputeReason(''); setDisputeError(''); }}>{message.disputed ? '✓ Answer disputed' : '⚑ Dispute answer'}</button></div>{message.sources?.length > 0 && <div className="sources"><button className="sources-toggle" onClick={() => setOpenSources((current) => ({ ...current, [index]: !current[index] }))}><span>◆</span>{message.sources.length} verified source{message.sources.length > 1 ? 's' : ''}<b>{openSources[index] ? '−' : '+'}</b></button>{openSources[index] && <div className="sources-list">{message.sources.map((source, sourceIndex) => <a key={sourceIndex} href={source.url} target="_blank" rel="noreferrer"><span className="src-num">{sourceIndex + 1}</span><span className="src-title">{source.title}</span><small>Open article ↗</small></a>)}</div>}</div>}</div></div>
             )}
             {loading && <div className="message assistant-message"><div className="bot-avatar thinking-avatar"><Logo /></div><div className="assistant-bubble thinking-card"><div className="thinking-head"><span className="thinking-orb" /><b>Finding the verified answer</b><span className="thinking-count">{thinkingStep + 1}/{THINKING_STEPS.length}</span></div><div className="thinking-label"><span key={thinkingStep}>{THINKING_STEPS[thinkingStep]}</span></div><div className="thinking-skeleton"><i /><i /><i /></div><div className="thinking-progress">{THINKING_STEPS.map((step, i) => <i key={step} className={i < thinkingStep ? 'active' : i === thinkingStep ? 'active current' : ''} />)}</div></div></div>}
           </div>
