@@ -1,7 +1,8 @@
 import {
   authenticateRequest, getKeys, getPrompt, supabaseAdmin, openaiEmbed,
   openaiChatDetailed, getBrandingRules, brandingInstructions,
-  applyBrandingReplacements, getRelevantSnippets, logActivity
+  applyBrandingReplacements, getRelevantSnippets, logActivity,
+  expandConcepts, clarifyQuery, correctTypos
 } from '../../lib/server';
 
 const STOP = new Set([
@@ -101,15 +102,38 @@ export default async function handler(req, res) {
     const question = String(req.body?.question || '').trim();
     if (!question) return res.status(400).json({ error: 'Please type a question.' });
 
-    const { openaiKey, groqKey, chatModel, chatProvider } = await getKeys();
+    const { openaiKey, groqKey, chatModel, chatProvider, smartRetrieval } = await getKeys();
     if (!openaiKey) return res.status(400).json({ error: 'No OpenAI key is saved yet.' });
     if (chatProvider === 'groq' && !groqKey) return res.status(400).json({ error: 'Groq is selected, but no Groq key is saved.' });
 
     const sb = supabaseAdmin();
-    const terms = keywords(question);
     const scope = detectScope(question);
-    let keywordMatches = [];
 
+    // ---- Query understanding -------------------------------------------------
+    // 1) deterministic concept expansion grounded in FundedNext terminology
+    const concepts = expandConcepts(question);
+    // 2) optional LLM rewrite for messy/vague input (non-fatal, may be null)
+    let clarity = null;
+    if (smartRetrieval) {
+      clarity = await clarifyQuery({
+        question, provider: chatProvider, model: chatModel, openaiKey, groqKey
+      });
+    }
+    const clearQuestion = (clarity?.clear && clarity.clear.length > 3) ? clarity.clear : question;
+
+    // A question is ambiguous when the model flags it, or when it touches two
+    // genuinely different meaning-groups (e.g. payout timing vs processing speed).
+    const meaningGroups = new Set(concepts.groups);
+    const distinctMeanings = ['payout_timing', 'processing_speed', 'cycle', 'withdraw_method']
+      .filter((g) => meaningGroups.has(g));
+    const isAmbiguous = !!clarity?.ambiguous || distinctMeanings.length >= 2;
+    const interpretations = clarity?.interpretations?.length
+      ? clarity.interpretations
+      : (isAmbiguous ? distinctMeanings.map((g) => g.replace(/_/g, ' ')) : []);
+
+    // ---- Keyword recall (typo-corrected) ------------------------------------
+    const terms = keywords(correctTypos(question) + ' ' + clearQuestion);
+    let keywordMatches = [];
     if (terms.length) {
       const expression = terms.map((term) => `content.ilike.%${term}%`).join(',');
       const { data } = await sb.from('chunks')
@@ -118,19 +142,32 @@ export default async function handler(req, res) {
       keywordMatches = data || [];
     }
 
-    const [queryVector] = await openaiEmbed(openaiKey, [question]);
-    const vectorResult = await sb.rpc('match_chunks', {
-      query_embedding: queryVector,
-      match_threshold: 0.15,
-      match_count: 12
-    });
-    if (vectorResult.error) throw new Error('Search failed: ' + vectorResult.error.message);
+    // ---- Multi-vector semantic recall ---------------------------------------
+    // Embed the original + clarified question + each interpretation phrase, then
+    // union their vector matches so every plausible meaning contributes evidence.
+    const embedTexts = [...new Set([
+      question, clearQuestion,
+      ...(clarity?.queries || []),
+      ...concepts.expansions
+    ].map((t) => String(t || '').trim()).filter(Boolean))].slice(0, 6);
 
+    const vectors = await openaiEmbed(openaiKey, embedTexts);
     const combined = new Map();
     for (const item of keywordMatches) combined.set(String(item.id), item);
-    for (const item of vectorResult.data || []) {
-      const key = String(item.id);
-      combined.set(key, { ...(combined.get(key) || {}), ...item });
+
+    const perQueryCount = embedTexts.length > 3 ? 8 : 12;
+    for (const vector of vectors) {
+      const vres = await sb.rpc('match_chunks', {
+        query_embedding: vector, match_threshold: 0.14, match_count: perQueryCount
+      });
+      if (vres.error) throw new Error('Search failed: ' + vres.error.message);
+      for (const item of vres.data || []) {
+        const key = String(item.id);
+        const prev = combined.get(key) || {};
+        // keep the strongest similarity seen for this chunk across all queries
+        const similarity = Math.max(Number(prev.similarity || 0), Number(item.similarity || 0));
+        combined.set(key, { ...prev, ...item, similarity });
+      }
     }
 
     let candidates = [...combined.values()].map((item) => {
@@ -180,13 +217,23 @@ export default async function handler(req, res) {
     const scopeText = scope
       ? `\n\nACCOUNT SCOPE: The question is specifically about "${scope}". Do not use rules belonging to a different Account type.`
       : '';
-    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText +
+    // When a question could reasonably mean more than one thing, tell the model
+    // to resolve each supported meaning separately instead of guessing one.
+    const ambiguityText = isAmbiguous
+      ? `\n\nAMBIGUOUS QUESTION: This question could mean different things${interpretations.length ? ` (for example: ${interpretations.join('; ')})` : ''}. ` +
+        'If the FAQ evidence supports more than one of these meanings, briefly address each one under its own short labelled line so the agent can pick the relevant part. ' +
+        'Only cover a meaning that the evidence actually supports. Do not merge separate rules together.'
+      : '';
+    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + ambiguityText +
       '\n\nAfter the customer-ready answer, add two private final lines:\n' +
       'SOURCES: comma-separated evidence numbers actually used, or none\n' +
       'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim';
+    const askedText = clearQuestion && clearQuestion !== question
+      ? `Customer question: ${question}\n(Interpreted as: ${clearQuestion})`
+      : `Customer question: ${question}`;
     const messages = [
       { role: 'system', content: system },
-      { role: 'user', content: `Customer question: ${question}\n\nFAQ evidence:\n${context}` }
+      { role: 'user', content: `${askedText}\n\nFAQ evidence:\n${context}` }
     ];
 
     let completion;
@@ -264,12 +311,14 @@ export default async function handler(req, res) {
       metadata: {
         confidence, confidenceLabel, sourceCount: sources.length, scope,
         fallback: false, durationMs: Date.now() - started,
+        smart: !!clarity, ambiguous: isAmbiguous,
         questionPreview: question.slice(0, 180)
       }
     });
 
     return res.status(200).json({
-      answer, sources, answerProvider, usedFallback, confidence, confidenceLabel
+      answer, sources, answerProvider, usedFallback, confidence, confidenceLabel,
+      ambiguous: isAmbiguous, interpretations
     });
   } catch (error) {
     if (access) await logActivity({
