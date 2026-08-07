@@ -1,4 +1,4 @@
-# Knowledge Hub
+# Knowledge Hub:
 
 An internal support tool that turns your published Intercom articles into a
 searchable knowledge base and answers questions with the source article + URL.
