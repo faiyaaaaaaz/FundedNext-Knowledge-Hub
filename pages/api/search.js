@@ -53,6 +53,7 @@ function cleanAnswer(raw) {
     .replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u2060\u3000\uFEFF]/g, ' ')
     .replace(/^\s*(?:\*\*)?SOURCES(?:\*\*)?\s*:.*$/gim, '')
     .replace(/^\s*(?:\*\*)?CONFIDENCE(?:\*\*)?\s*:.*$/gim, '')
+    .replace(/^\s*(?:\*\*)?SEGMENTS?(?:\*\*)?\s*:.*$/gim, '')
     .replace(/\s*\((?:Excerpt|Source)\s*\d+\)/gi, '')
     .replace(/\b(?:Excerpt|Source)\s*\d+\b/gi, '')
     .replace(/[\[{(]?\d+†L\d+(?:\s*[-–]\s*L?\d+)?[\]})]?/g, '')
@@ -281,9 +282,10 @@ export default async function handler(req, res) {
         '\nRules for this: (a) Payout ELIGIBILITY / cycle timing depends on the Account model. If the customer did not name an Account, give the timing for each Account model the evidence supports, or clearly say it depends on the Account model and name which models differ — then, if helpful, ask which Account they have. (b) Keep the eligibility cycle and the 24-hour processing Brand Promise as separate points; never merge them into one number. (c) Only include a meaning the evidence actually supports. Use plain text labels like "Eligibility (depends on your account): ..." — no markdown symbols.'
       : '';
     const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + ambiguityText +
-      '\n\nAfter the customer-ready answer, add two private final lines:\n' +
+      '\n\nAfter the customer-ready answer, add three private final lines:\n' +
       'SOURCES: comma-separated evidence numbers actually used, or none\n' +
-      'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim';
+      'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim\n' +
+      'SEGMENTS: for each paragraph of your answer, in the same order and separated by semicolons, list the evidence numbers that support that paragraph. Example for three paragraphs: 2 ; 1,2 ; 1. Write a dash for a paragraph that has no supporting evidence.';
     const askedText = clearQuestion && clearQuestion !== question
       ? `Customer question: ${question}\n(Interpreted as: ${clearQuestion})`
       : `Customer question: ${question}`;
@@ -327,18 +329,29 @@ export default async function handler(req, res) {
       const item = matches[number - 1];
       if (item && !seen.has(item.article_id)) {
         seen.add(item.article_id);
-        sources.push({ title: item.article_title, url: item.article_url });
+        sources.push({ title: item.article_title, url: item.article_url, _aid: item.article_id });
       }
     }
     if (!sourceLine) {
       for (const item of matches) {
         if (!seen.has(item.article_id)) {
           seen.add(item.article_id);
-          sources.push({ title: item.article_title, url: item.article_url });
+          sources.push({ title: item.article_title, url: item.article_url, _aid: item.article_id });
         }
         if (sources.length === 3) break;
       }
     }
+
+    // Returns the 1-based position of an evidence item within `sources`, adding
+    // it to the list if a paragraph cites a source not already listed. This keeps
+    // the per-paragraph chip numbers aligned with the verified-sources list.
+    const refFor = (item) => {
+      if (!item) return null;
+      const existing = sources.findIndex((s) => s._aid === item.article_id);
+      if (existing >= 0) return existing + 1;
+      sources.push({ title: item.article_title, url: item.article_url, _aid: item.article_id });
+      return sources.length;
+    };
 
     const modelConfidence = Math.max(0, Math.min(100, Number(confidenceLine?.[1] || 70)));
     const scopedCount = matches.filter((item) => item._scoped).length;
@@ -347,6 +360,30 @@ export default async function handler(req, res) {
     const confidenceLabel = confidence >= 85 ? 'High confidence' : confidence >= 65 ? 'Review suggested' : 'Needs verification';
     let answer = cleanAnswer(applyBrandingReplacements(cleanAnswer(raw), brandRules));
     if (confidence < 45) answer = SAFE_UNCONFIRMED;
+
+    // Per-paragraph attribution: map each answer paragraph to the source(s) that
+    // support it, so the UI can show which FAQ backs which part. Fully optional —
+    // if the model's mapping doesn't line up with the paragraphs, we skip it.
+    let segments = null;
+    const segLine = raw.match(/(?:\*\*)?SEGMENTS?(?:\*\*)?\s*:\s*([^\n]*)/i);
+    if (segLine && answer !== SAFE_UNCONFIRMED) {
+      const paras = answer.split(/\n{2,}/).map((s) => s.trim()).filter(Boolean);
+      const groups = segLine[1].split(';').map((g) => (g.match(/\d+/g) || []).map(Number));
+      if (paras.length >= 1 && groups.length === paras.length) {
+        segments = paras.map((text, i) => {
+          const refs = [];
+          const usedRef = new Set();
+          for (const n of groups[i]) {
+            const idx = refFor(matches[n - 1]);
+            if (idx && !usedRef.has(idx)) { usedRef.add(idx); refs.push(idx); }
+          }
+          return { text, refs };
+        });
+        // Only worth sending if at least one paragraph actually has a citation.
+        if (!segments.some((s) => s.refs.length)) segments = null;
+      }
+    }
+    sources = sources.map(({ _aid, ...rest }) => rest);
 
     const usage = completion.usage || {};
     const inputTokens = Number(usage.prompt_tokens || usage.input_tokens || 0);
@@ -373,7 +410,7 @@ export default async function handler(req, res) {
     });
 
     return res.status(200).json({
-      answer, sources, answerProvider, usedFallback, confidence, confidenceLabel,
+      answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel,
       ambiguous: isAmbiguous, interpretations
     });
   } catch (error) {
