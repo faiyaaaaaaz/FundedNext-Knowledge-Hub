@@ -25,4 +25,4 @@ app's Admin page after it's live.
 
 ## Notes
 - Answering model defaults to `gpt-5.6-luna`; change it any time in Admin.
-- Only changed/new articles are re-processed on each "Check for updates".
+- Only changed/new articles are re-processed on each "Check for updates"..
