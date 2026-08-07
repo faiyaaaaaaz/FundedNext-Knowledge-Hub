@@ -273,6 +273,24 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .sources-list a:hover { border-color: var(--violet-2); background: var(--surface); transform: translateX(2px); }
 .sources-list span { font-size: 12.5px; font-weight: 550; }
 .sources-list small { color: var(--violet); white-space: nowrap; font-weight: 600; }
+.src-num { flex: 0 0 auto; width: 20px; height: 20px; display: grid; place-items: center; border-radius: 6px; background: var(--violet-soft); color: var(--violet-ink); font: 700 11px/1 var(--display); }
+.src-title { flex: 1; }
+
+/* Per-paragraph source citations. The number is drawn with CSS content and the
+   whole chip + tooltip is user-select:none, so citations are never copied — not
+   by the Copy button, not by a manual drag-select. Hover/tap reveals the source. */
+.answer-seg:not(:last-child) { margin-bottom: 15px; }
+.seg-cites { display: inline-flex; gap: 3px; margin-left: 5px; user-select: none; -webkit-user-select: none; white-space: nowrap; }
+.cites-row { margin: 6px 0 0 !important; }
+.seg-cite { position: relative; display: inline-grid; place-items: center; min-width: 17px; height: 17px; padding: 0 5px; border-radius: 6px; background: var(--violet-soft); color: var(--violet-ink); text-decoration: none; font: 700 10px/1 var(--display); vertical-align: super; cursor: pointer; user-select: none; -webkit-user-select: none; transition: background .14s, transform .14s, box-shadow .14s; }
+.seg-cite::before { content: attr(data-n); }
+.seg-cite:hover, .seg-cite:focus-visible { background: var(--violet); color: #fff; transform: translateY(-1px); box-shadow: 0 6px 14px -6px color-mix(in srgb, var(--violet) 70%, transparent); outline: none; }
+.seg-cite-pop { position: absolute; left: 50%; bottom: calc(100% + 9px); z-index: 30; width: max-content; max-width: 250px; transform: translateX(-50%) translateY(4px); display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-xl); text-align: left; opacity: 0; visibility: hidden; pointer-events: none; user-select: none; -webkit-user-select: none; transition: opacity .16s ease, transform .16s ease, visibility .16s; }
+.seg-cite:hover .seg-cite-pop, .seg-cite:focus-visible .seg-cite-pop { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); }
+.seg-cite-pop::after { content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); border: 6px solid transparent; border-top-color: var(--surface); }
+.seg-cite-pop b { font: 700 9px/1 var(--display); letter-spacing: .08em; text-transform: uppercase; color: var(--violet); }
+.seg-cite-pop > span { font-family: var(--display); font-size: 12.5px; font-weight: 600; line-height: 1.35; color: var(--ink); white-space: normal; }
+.seg-cite-pop em { font-style: normal; font-size: 11px; font-weight: 600; color: var(--violet); }
 
 /* ---- Premium thinking state ---- */
 .thinking-avatar { animation: floaty 2.4s ease-in-out infinite; }
