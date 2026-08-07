@@ -121,15 +121,41 @@ export default async function handler(req, res) {
     }
     const clearQuestion = (clarity?.clear && clarity.clear.length > 3) ? clarity.clear : question;
 
-    // A question is ambiguous when the model flags it, or when it touches two
-    // genuinely different meaning-groups (e.g. payout timing vs processing speed).
+    // A question is ambiguous when the model flags it, when it touches two
+    // genuinely different meaning-groups, OR when it is a *bare* payout question
+    // ("when do I get paid") with no wording that pins down which aspect is meant.
     const meaningGroups = new Set(concepts.groups);
     const distinctMeanings = ['payout_timing', 'processing_speed', 'cycle', 'withdraw_method']
       .filter((g) => meaningGroups.has(g));
-    const isAmbiguous = !!clarity?.ambiguous || distinctMeanings.length >= 2;
+
+    const probe = (correctTypos(question) + ' ' + clearQuestion).toLowerCase();
+    const hasProcessingQualifier = /(how long|how fast|how quickly|processing|processed|receive|received|arrive|arrival|transfer time|24 ?hour|24-hour|brand promise|compensat|initiat)/.test(probe);
+    const hasCycleQualifier = /(cycle|how often|frequency|first payout|eligib|request a payout|when can i (?:request|withdraw)|trading days|next payout)/.test(probe);
+    const hasMethodQualifier = /(method|usdt|usdc|crypto|bank|rise ?works|network|erc20|trc20|wallet|minimum|maximum|\bfee)/.test(probe);
+    const payoutish = meaningGroups.has('payout_timing') || /\b(get paid|getting paid|paid|payout|withdraw)\b/.test(probe);
+    // The classic ambiguous case: a payout question that names no specific aspect.
+    const payoutUmbrella = payoutish && !hasProcessingQualifier && !hasCycleQualifier && !hasMethodQualifier;
+
+    const isAmbiguous = !!clarity?.ambiguous || distinctMeanings.length >= 2 || payoutUmbrella;
+
+    const DEFAULT_PAYOUT_INTERPRETATIONS = [
+      'Payout eligibility and timing — this depends on the Account model / trading cycle',
+      'How long processing takes after a payout request — the 24-hour Brand Promise',
+      'How long funds take to arrive by withdrawal method'
+    ];
     const interpretations = clarity?.interpretations?.length
       ? clarity.interpretations
-      : (isAmbiguous ? distinctMeanings.map((g) => g.replace(/_/g, ' ')) : []);
+      : (payoutUmbrella ? DEFAULT_PAYOUT_INTERPRETATIONS
+        : (isAmbiguous ? distinctMeanings.map((g) => g.replace(/_/g, ' ')) : []));
+
+    // For a bare payout question, force retrieval to cover every meaning so the
+    // eligibility/cycle evidence is present, not just the dominant 24-hour one.
+    const umbrellaExpansions = payoutUmbrella ? [
+      'payout eligibility trading cycle by account model Stellar 1-Step 2-Step Lite',
+      'when a trader becomes eligible to request the first payout profit split schedule',
+      'payout processing time 24 hour Brand Promise compensation',
+      'withdrawal processing time by method crypto USDT bank'
+    ] : [];
 
     // ---- Keyword recall (typo-corrected) ------------------------------------
     const terms = keywords(correctTypos(question) + ' ' + clearQuestion);
@@ -148,14 +174,15 @@ export default async function handler(req, res) {
     const embedTexts = [...new Set([
       question, clearQuestion,
       ...(clarity?.queries || []),
+      ...umbrellaExpansions,
       ...concepts.expansions
-    ].map((t) => String(t || '').trim()).filter(Boolean))].slice(0, 6);
+    ].map((t) => String(t || '').trim()).filter(Boolean))].slice(0, 8);
 
     const vectors = await openaiEmbed(openaiKey, embedTexts);
     const combined = new Map();
     for (const item of keywordMatches) combined.set(String(item.id), item);
 
-    const perQueryCount = embedTexts.length > 3 ? 8 : 12;
+    const perQueryCount = embedTexts.length > 4 ? 8 : 12;
     for (const vector of vectors) {
       const vres = await sb.rpc('match_chunks', {
         query_embedding: vector, match_threshold: 0.14, match_count: perQueryCount
@@ -197,7 +224,36 @@ export default async function handler(req, res) {
       }
     }
 
-    const matches = candidates.slice(0, 10);
+    // When the question is ambiguous, make sure the evidence sent to the model
+    // covers each meaning instead of being dominated by the single strongest
+    // topic. Reserve slots for eligibility/cycle, processing, and method chunks.
+    let matches;
+    if (isAmbiguous && candidates.length) {
+      const CYCLE_KW = ['cycle', 'first payout', 'eligible', 'eligibility', 'trading days', 'every 14', 'every 5', '14 days', '5 days', 'biweekly', 'bi-weekly', 'profit split', 'how often', 'minimum trading'];
+      const PROCESS_KW = ['24 hour', '24-hour', 'brand promise', 'processed', 'processing', 'compensation', 'initiated', 'within 24'];
+      const METHOD_KW = ['usdt', 'usdc', 'crypto', 'bank', 'riseworks', 'rise works', 'erc20', 'trc20', 'wallet'];
+      const blob = (it) => `${it.article_title || ''} ${it.content || ''}`.toLowerCase();
+      const seen = new Set();
+      const picked = [];
+      const take = (kw, n) => {
+        let c = 0;
+        for (const it of candidates) {
+          if (c >= n) break;
+          if (seen.has(it.id)) continue;
+          const t = blob(it);
+          if (kw.some((k) => t.includes(k))) { picked.push(it); seen.add(it.id); c++; }
+        }
+      };
+      take(CYCLE_KW, 4);
+      take(PROCESS_KW, 4);
+      take(METHOD_KW, 2);
+      for (const it of candidates) { if (picked.length >= 12) break; if (!seen.has(it.id)) { picked.push(it); seen.add(it.id); } }
+      // Present the reserved evidence in overall rank order for a clean prompt.
+      const order = new Map(candidates.map((it, i) => [it.id, i]));
+      matches = picked.sort((a, b) => order.get(a.id) - order.get(b.id)).slice(0, 12);
+    } else {
+      matches = candidates.slice(0, 10);
+    }
     if (!matches.length) {
       return res.status(200).json({
         answer: SAFE_UNCONFIRMED, sources: [], answerProvider: chatProvider,
@@ -220,9 +276,9 @@ export default async function handler(req, res) {
     // When a question could reasonably mean more than one thing, tell the model
     // to resolve each supported meaning separately instead of guessing one.
     const ambiguityText = isAmbiguous
-      ? `\n\nAMBIGUOUS QUESTION: This question could mean different things${interpretations.length ? ` (for example: ${interpretations.join('; ')})` : ''}. ` +
-        'If the FAQ evidence supports more than one of these meanings, briefly address each one under its own short labelled line so the agent can pick the relevant part. ' +
-        'Only cover a meaning that the evidence actually supports. Do not merge separate rules together.'
+      ? '\n\nThis question is general and can reasonably mean more than one thing. Address EACH meaning the FAQ evidence supports, each on its own short labelled line' +
+        (interpretations.length ? `. The likely meanings are:\n${interpretations.map((s) => `- ${s}`).join('\n')}` : '.') +
+        '\nRules for this: (a) Payout ELIGIBILITY / cycle timing depends on the Account model. If the customer did not name an Account, give the timing for each Account model the evidence supports, or clearly say it depends on the Account model and name which models differ — then, if helpful, ask which Account they have. (b) Keep the eligibility cycle and the 24-hour processing Brand Promise as separate points; never merge them into one number. (c) Only include a meaning the evidence actually supports. Use plain text labels like "Eligibility (depends on your account): ..." — no markdown symbols.'
       : '';
     const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + ambiguityText +
       '\n\nAfter the customer-ready answer, add two private final lines:\n' +
