@@ -2,7 +2,7 @@ import {
   authenticateRequest, getKeys, getPrompt, supabaseAdmin, openaiEmbed,
   openaiChatDetailed, getBrandingRules, brandingInstructions,
   applyBrandingReplacements, getRelevantSnippets, logActivity,
-  expandConcepts, clarifyQuery, correctTypos, tryCalculator
+  expandConcepts, clarifyQuery, correctTypos, runCalculators
 } from '../../lib/server';
 
 const STOP = new Set([
@@ -105,26 +105,33 @@ export default async function handler(req, res) {
 
     const { openaiKey, groqKey, chatModel, chatProvider, smartRetrieval } = await getKeys();
 
-    // Deterministic calculator first: if this is a real calculation the tool can
-    // do exactly (margin, max lot, PnL, pips, risk sizing), compute it here and
-    // return the exact figure with a Trade Calculator reference — no RAG, no
-    // model arithmetic. Falls through to the FAQ pipeline for everything else.
-    const calc = await tryCalculator({ question, provider: chatProvider, model: chatModel, openaiKey, groqKey });
-    if (calc?.handled) {
-      const label = calc.confidence >= 85 ? 'High confidence' : calc.confidence >= 65 ? 'Review suggested' : 'Needs verification';
+    // Run the deterministic calculator over the (possibly mixed) message.
+    // - Pure calculation(s) with no other question → answer exactly, here.
+    // - Mixed (calc + policy) → keep the exact results and merge them into the
+    //   FAQ answer below as authoritative evidence, so every part is answered.
+    const calc = await runCalculators({ question, provider: chatProvider, model: chatModel, openaiKey, groqKey });
+    const calcResults = calc?.results || [];
+    const okCalc = calcResults.filter((r) => r.ok);
+
+    if (calc && calc.pureCalc && calcResults.length) {
+      const sources = calcResults.map((r) => ({ title: r.title, url: '', kind: 'calculator' }));
+      const segments = [];
+      calcResults.forEach((r, i) => {
+        r.text.split(/\n{2,}/).map((t) => t.trim()).filter(Boolean).forEach((t) => segments.push({ text: t, refs: [i + 1] }));
+      });
+      const answer = calcResults.map((r) => r.text).join('\n\n');
+      const confidence = okCalc.length === calcResults.length ? 96 : 70;
+      const label = confidence >= 85 ? 'High confidence' : confidence >= 65 ? 'Review suggested' : 'Needs verification';
       await logActivity({
         actorRole: access.role, sessionId: access.sessionId, userName: access.name,
         userEmail: access.email, authProvider: access.authProvider,
         questionWordCount: wordCount(question), eventType: 'query', provider: 'calculator',
-        model: calc.calcType, success: true,
-        metadata: { confidence: calc.confidence, calc: calc.calcType, durationMs: Date.now() - started }
+        model: calcResults.map((r) => r.calcType).join('+'), success: true,
+        metadata: { confidence, calc: calcResults.map((r) => r.calcType).join('+'), durationMs: Date.now() - started }
       });
       return res.status(200).json({
-        answer: calc.answer,
-        sources: [{ title: calc.sourceTitle, url: '', kind: 'calculator' }],
-        segments: calc.segments || null,
-        answerProvider: chatProvider, usedFallback: false,
-        confidence: calc.confidence, confidenceLabel: label, usedCalculator: true
+        answer, sources, segments, answerProvider: chatProvider, usedFallback: false,
+        confidence, confidenceLabel: label, usedCalculator: true
       });
     }
     if (!openaiKey) return res.status(400).json({ error: 'No OpenAI key is saved yet.' });
@@ -278,6 +285,15 @@ export default async function handler(req, res) {
     } else {
       matches = candidates.slice(0, 10);
     }
+    // Merge exact calculator results as top, authoritative evidence so the model
+    // reproduces the computed figures while still answering the FAQ parts.
+    if (calcResults.length) {
+      const calcEvidence = calcResults.map((r, i) => ({
+        id: `calc-${i}`, article_id: `calc:${r.calcType}`, article_title: r.title,
+        article_url: '', content: r.text, similarity: 1
+      }));
+      matches = [...calcEvidence, ...matches].slice(0, 14);
+    }
     if (!matches.length) {
       return res.status(200).json({
         answer: SAFE_UNCONFIRMED, sources: [], answerProvider: chatProvider,
@@ -308,9 +324,13 @@ export default async function handler(req, res) {
     // paste in) should be answered part-by-part, not refused as a whole.
     const questionMarks = (question.match(/\?/g) || []).length;
     const listedParts = (question.match(/(?:^|\n)\s*(?:\d+[.)]|[-*])\s/g) || []).length;
-    const multiPart = questionMarks >= 2 || listedParts >= 2;
+    const multiPart = questionMarks >= 2 || listedParts >= 2 || (calcResults.length > 0 && (calc?.other?.length > 0));
     const multiPartText = multiPart
       ? '\n\nThis question has several parts. Answer every part the evidence supports, each as its own clearly separated point. For any single part you cannot verify from the evidence, say only that that specific part needs checking — do not refuse or defer the entire answer because one part is unverified.'
+      : '';
+    // Exact computed results are provided as evidence — reproduce them verbatim.
+    const calcMergeText = calcResults.length
+      ? '\n\nParts of this question are calculations. The evidence items titled "Trade Calculator" are EXACT computed results — reproduce their formula and final figures verbatim for those parts and do NOT recompute them. Answer the remaining parts from the FAQ evidence. Cover every part.'
       : '';
     // If the question is about a calculation (max lot, margin, pip value, lot
     // size, risk), push the model to use the calculator formulas that are in the
@@ -318,7 +338,7 @@ export default async function handler(req, res) {
     const calcText = concepts.groups.includes('calculator')
       ? '\n\nThis is a calculation question. If the FAQ evidence includes a Trade Calculator formula, use it: state the formula, then plug in the numbers. If a required value is missing (for example the current price, or the account/instrument leverage), give the formula and ask for that value instead of assuming it. Do not merge a calculation with a separate account limit — present them as distinct points.'
       : '';
-    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + ambiguityText + multiPartText + calcText +
+    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + ambiguityText + multiPartText + calcText + calcMergeText +
       '\n\nAfter the customer-ready answer, add three private final lines:\n' +
       'SOURCES: comma-separated evidence numbers actually used, or none\n' +
       'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim\n' +
@@ -379,6 +399,16 @@ export default async function handler(req, res) {
       }
     }
 
+    // Guarantee the calculator reference is shown whenever a computation was
+    // merged in, even if the model forgets to list it.
+    for (let i = okCalc.length - 1; i >= 0; i--) {
+      const r = okCalc[i];
+      const aid = `calc:${r.calcType}`;
+      if (!sources.some((s) => s._aid === aid)) {
+        sources.unshift({ title: r.title, url: '', _aid: aid });
+      }
+    }
+
     // Returns the 1-based position of an evidence item within `sources`, adding
     // it to the list if a paragraph cites a source not already listed. This keeps
     // the per-paragraph chip numbers aligned with the verified-sources list.
@@ -393,10 +423,12 @@ export default async function handler(req, res) {
     const modelConfidence = Math.max(0, Math.min(100, Number(confidenceLine?.[1] || 70)));
     const scopedCount = matches.filter((item) => item._scoped).length;
     const evidenceCap = scope ? (scopedCount >= 3 ? 96 : scopedCount === 2 ? 90 : 80) : (sources.length >= 2 ? 92 : 82);
-    const confidence = Math.min(modelConfidence, evidenceCap);
+    let confidence = Math.min(modelConfidence, evidenceCap);
     const confidenceLabel = confidence >= 85 ? 'High confidence' : confidence >= 65 ? 'Review suggested' : 'Needs verification';
     let answer = cleanAnswer(applyBrandingReplacements(cleanAnswer(raw), brandRules));
-    if (confidence < 45) answer = SAFE_UNCONFIRMED;
+    // An exact computation must not be thrown away as "unconfirmed".
+    if (okCalc.length) confidence = Math.max(confidence, 74);
+    if (confidence < 45 && !okCalc.length) answer = SAFE_UNCONFIRMED;
 
     // Per-paragraph attribution: map each answer paragraph to the source(s) that
     // support it, so the UI can show which FAQ backs which part. Fully optional —
@@ -420,7 +452,7 @@ export default async function handler(req, res) {
         if (!segments.some((s) => s.refs.length)) segments = null;
       }
     }
-    sources = sources.map(({ _aid, ...rest }) => ({ ...rest, kind: /^kb:/.test(_aid || '') ? 'calculator' : 'faq' }));
+    sources = sources.map(({ _aid, ...rest }) => ({ ...rest, kind: /^(kb|calc):/.test(_aid || '') ? 'calculator' : 'faq' }));
     const usedCalculator = sources.some((s) => s.kind === 'calculator');
 
     const usage = completion.usage || {};
