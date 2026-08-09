@@ -58,6 +58,13 @@ function cleanAnswer(raw) {
     .replace(/\b(?:Excerpt|Source)\s*\d+\b/gi, '')
     .replace(/[\[{(]?\d+†L\d+(?:\s*[-–]\s*L?\d+)?[\]})]?/g, '')
     .replace(/【[^】]*】/g, '')
+    // Convert a "*" used as multiplication into × BEFORE emphasis handling, so
+    // "2,000 * 0.02" isn't mistaken for italics and eaten. Only asterisks flanked
+    // by spaces or sitting between digits qualify — markdown emphasis (*word*,
+    // **bold**) and line-start bullets ("* item") are never space-flanked, so
+    // they are left untouched.
+    .replace(/(\d)\s*\*\s*(?=\d)/g, '$1 × ')
+    .replace(/[ \t]\*[ \t]/g, ' × ')
     // Remove inline bracketed citation markers like [3], [8], [3, 8], [3-5].
     .replace(/\s*\[\s*\d+(?:\s*[,–-]\s*\d+)*\s*\]/g, '')
     .replace(/\*\*([^*\n]+)\*\*/g, '$1')
