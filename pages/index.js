@@ -44,6 +44,8 @@ function normalizeSpaces(text) {
 
 function plainText(text) {
   return normalizeSpaces(text)
+    .replace(/(\d)\s*\*\s*(?=\d)/g, '$1 × ')
+    .replace(/[ \t]\*[ \t]/g, ' × ')
     .replace(/\*\*([^*\n]+)\*\*/g, '$1')
     .replace(/__([^_\n]+)__/g, '$1')
     .replace(/\*([^*\n]+)\*/g, '$1')
