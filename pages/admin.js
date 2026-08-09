@@ -237,6 +237,11 @@ export default function Admin() {
   const [knowledgeBusy, setKnowledgeBusy] = useState(false);
   const [openDoc, setOpenDoc] = useState(null);
   const [docDraft, setDocDraft] = useState(null);
+  const [calc, setCalc] = useState(null);
+  const [calcSearch, setCalcSearch] = useState('');
+  const [openInst, setOpenInst] = useState(null);
+  const [instDraft, setInstDraft] = useState(null);
+  const [newLev, setNewLev] = useState({ stepKey: '', marketType: 'Currency', phase: 'any', leverage: '' });
 
   useEffect(() => {
     const savedSession = localStorage.getItem('appSession') || '';
@@ -256,6 +261,7 @@ export default function Admin() {
     if (tab === 'activity') loadActivity();
     if (tab === 'autosync') loadAutoSync();
     if (tab === 'knowledge') loadKnowledge();
+    if (tab === 'calcdata') loadCalc();
   }, [tab, session, role, disputeFilter]);
 
   function headers(json = false, token = session) {
@@ -376,6 +382,52 @@ export default function Admin() {
       setNotice(`Knowledge re-indexed — ${data.docs} document${data.docs === 1 ? '' : 's'}, ${data.chunks} searchable pieces now live in the chatbot.`);
       await loadKnowledge();
     } catch (e) { setError(e.message); } finally { setKnowledgeBusy(false); }
+  }
+
+  async function loadCalc() {
+    try {
+      const response = await fetch('/api/calcdata', { headers: headers() });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not load calculator data.');
+      setCalc(data);
+    } catch (e) { setError(e.message); }
+  }
+
+  async function saveInstrument(payload, success) {
+    clearMessages();
+    try {
+      const response = await fetch('/api/calcdata', { method: 'POST', headers: headers(true), body: JSON.stringify({ kind: 'instrument', ...payload }) });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not save.');
+      setCalc(data); setOpenInst(null); setInstDraft(null);
+      if (success) setNotice(success);
+    } catch (e) { setError(e.message); }
+  }
+
+  async function saveLeverage(payload, success) {
+    clearMessages();
+    try {
+      const response = await fetch('/api/calcdata', { method: 'POST', headers: headers(true), body: JSON.stringify({ kind: 'leverage', ...payload }) });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not save.');
+      setCalc(data);
+      if (success) setNotice(success);
+    } catch (e) { setError(e.message); }
+  }
+
+  async function removeLeverage(row) {
+    if (!window.confirm('Remove this leverage row? If it was a built-in default, the default value is restored.')) return;
+    clearMessages();
+    try {
+      const response = await fetch('/api/calcdata', { method: 'DELETE', headers: headers(true), body: JSON.stringify(row) });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not delete.');
+      setCalc(data); setNotice('Leverage row removed.');
+    } catch (e) { setError(e.message); }
   }
 
   async function settingsSave(body, success) {
@@ -511,7 +563,7 @@ export default function Admin() {
 
   const navigation = [
     ['access', '⌁', 'Team access'], ['ai', '✦', 'AI & model'], ['branding', 'Aa', 'Brand Language'],
-    ['disputes', '⚑', 'Disputes'], ['snippets', '⌘', 'Snippets'], ['knowledge', '▤', 'Knowledge'], ['activity', '◫', 'Activity logs'],
+    ['disputes', '⚑', 'Disputes'], ['snippets', '⌘', 'Snippets'], ['knowledge', '▤', 'Knowledge'], ['calcdata', '∑', 'Calculator data'], ['activity', '◫', 'Activity logs'],
     ['autosync', '↻', 'Automatic sync'], ['keys', '◇', 'API vault']
   ];
   const titles = Object.fromEntries(navigation.map(([id,, title]) => [id, title]));
@@ -598,6 +650,44 @@ export default function Admin() {
                 <div className="autosync-actions"><button className="btn btn-primary" onClick={() => saveDoc(docDraft, 'Document saved. Re-index to push changes live.')}>Save changes</button><button className="btn btn-danger" onClick={() => deleteDoc(doc.id)}>Delete</button></div>
               </div>}
             </div>)}{!knowledge?.docs?.length && <div className="empty-admin">No knowledge documents yet. Run the seed SQL, or use “Add document”.</div>}</div>
+          </section>
+        </div>}
+
+        {tab === 'calcdata' && <div className="settings-stack">
+          <section className="settings-card"><div className="settings-head"><div><h2>Instruments</h2><p>The exact values the trade calculator uses for each instrument. Edits are stored in Supabase and used immediately (built-in values are the fallback). Fix things like crypto sample prices here.</p></div></div>
+            <div className="field-block"><label>Search</label><input value={calcSearch} onChange={(e) => setCalcSearch(e.target.value)} placeholder="e.g. XAUUSD, BTC, EURJPY" /></div>
+            <div className="sync-log-list" style={{ marginTop: 12 }}>{(calc?.instruments || []).filter((i) => !calcSearch || i.symbol.includes(calcSearch.toUpperCase())).slice(0, 80).map((i) => <div key={i.symbol} className="sync-log">
+              <div className="sync-log-row" style={{ cursor: 'default' }}>
+                <span className="sync-badge success">{i.marketType}</span>
+                <button className="sync-log-main" style={{ border: 0, background: 'transparent', textAlign: 'left', cursor: 'pointer', padding: 0 }} onClick={() => { const opening = openInst !== i.symbol; setOpenInst(opening ? i.symbol : null); setInstDraft(opening ? { ...i } : null); }}><b>{i.symbol}</b><small>pip value ${i.pipValue} · pip size {i.pipSize} · contract {i.contractSize} · sample {i.samplePrice == null ? '—' : i.samplePrice}</small></button>
+                <span className="sync-chevron">{openInst === i.symbol ? '▴' : '▾'}</span>
+              </div>
+              {openInst === i.symbol && <div className="sync-log-detail"><div className="autosync-grid">
+                <div className="field-block"><label>Pip value ($/lot)</label><input value={instDraft?.pipValue ?? ''} onChange={(e) => setInstDraft((d) => ({ ...d, pipValue: e.target.value }))} /></div>
+                <div className="field-block"><label>Pip size</label><input value={instDraft?.pipSize ?? ''} onChange={(e) => setInstDraft((d) => ({ ...d, pipSize: e.target.value }))} /></div>
+                <div className="field-block"><label>Contract size</label><input value={instDraft?.contractSize ?? ''} onChange={(e) => setInstDraft((d) => ({ ...d, contractSize: e.target.value }))} /></div>
+                <div className="field-block"><label>Conversion factor</label><input value={instDraft?.conversionFactor ?? ''} onChange={(e) => setInstDraft((d) => ({ ...d, conversionFactor: e.target.value }))} /></div>
+                <div className="field-block"><label>Sample price (example entry)</label><input value={instDraft?.samplePrice ?? ''} onChange={(e) => setInstDraft((d) => ({ ...d, samplePrice: e.target.value }))} /></div>
+                <div className="field-block"><label>Market type</label><select value={instDraft?.marketType || 'Currency'} onChange={(e) => setInstDraft((d) => ({ ...d, marketType: e.target.value }))}>{['Currency', 'Commodity', 'Indice', 'Crypto'].map((m) => <option key={m} value={m}>{m}</option>)}</select></div>
+              </div><div className="autosync-actions"><button className="btn btn-primary" onClick={() => saveInstrument(instDraft, `${i.symbol} updated.`)}>Save {i.symbol}</button></div></div>}
+            </div>)}{calc && !calc.instruments.length && <div className="empty-admin">No instruments found. Run the calculator-data SQL to seed them.</div>}</div>
+          </section>
+
+          <section className="settings-card"><div className="settings-head"><div><h2>Account leverage</h2><p>Leverage per account type and market. Add a row here to define a new account (for example Stellar Instant) so the calculator can size margin and max lot for it.</p></div></div>
+            <div className="sync-log-list">{(calc?.leverage || []).map((r) => <div key={`${r.stepKey}-${r.marketType}-${r.phase}`} className="sync-log"><div className="sync-log-row" style={{ cursor: 'default' }}>
+              <span className="sync-badge success">{r.marketType}</span>
+              <span className="sync-log-main"><b>{r.stepKey} · {r.phase}</b><small>Leverage 1:{r.leverage}</small></span>
+              <input style={{ width: 84 }} defaultValue={r.leverage} onBlur={(e) => { const v = Number(e.target.value); if (v && v !== r.leverage) saveLeverage({ stepKey: r.stepKey, marketType: r.marketType, phase: r.phase, leverage: v }, 'Leverage updated.'); }} />
+              <button className="btn btn-secondary" style={{ padding: '6px 10px' }} onClick={() => removeLeverage({ stepKey: r.stepKey, marketType: r.marketType, phase: r.phase })}>Remove</button>
+            </div></div>)}{calc && !calc.leverage.length && <div className="empty-admin">No leverage rows. Run the calculator-data SQL to seed them.</div>}</div>
+            <div className="autosync-grid" style={{ marginTop: 14 }}>
+              <div className="field-block"><label>Account key</label><input value={newLev.stepKey} onChange={(e) => setNewLev((d) => ({ ...d, stepKey: e.target.value }))} placeholder="e.g. instant" /></div>
+              <div className="field-block"><label>Market</label><select value={newLev.marketType} onChange={(e) => setNewLev((d) => ({ ...d, marketType: e.target.value }))}>{['Currency', 'Commodity', 'Indice', 'Crypto'].map((m) => <option key={m} value={m}>{m}</option>)}</select></div>
+              <div className="field-block"><label>Phase</label><select value={newLev.phase} onChange={(e) => setNewLev((d) => ({ ...d, phase: e.target.value }))}>{['any', 'challenge', 'fundednext'].map((p) => <option key={p} value={p}>{p}</option>)}</select></div>
+              <div className="field-block"><label>Leverage (1:x)</label><input value={newLev.leverage} onChange={(e) => setNewLev((d) => ({ ...d, leverage: e.target.value }))} placeholder="e.g. 30" /></div>
+            </div>
+            <div className="autosync-actions"><button className="btn btn-primary" onClick={() => { if (!newLev.stepKey || !newLev.leverage) return setError('Enter an account key and leverage.'); saveLeverage(newLev, 'Leverage row added.'); setNewLev({ stepKey: '', marketType: 'Currency', phase: 'any', leverage: '' }); }}>Add leverage row</button></div>
+            <p className="field-help">The account key is matched from the customer's wording — use "instant" for Stellar Instant, "1-step", "2-step", "lite". Use phase "any" when Challenge and Funded share the same leverage.</p>
           </section>
         </div>}
 
