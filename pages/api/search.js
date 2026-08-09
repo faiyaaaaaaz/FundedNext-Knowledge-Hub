@@ -51,6 +51,15 @@ function cleanAnswer(raw) {
     // plain space. Models often emit these around times and units ("6:00 AM",
     // "GMT+3"), which render cramped and paste badly when copied.
     .replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u2060\u3000\uFEFF]/g, ' ')
+    // Convert/strip LaTeX math markup that some models emit (\frac, \text, \[ \]).
+    // Resolve inner commands (\text, \times…) first so \frac's braces are simple.
+    .replace(/\\(?:text|mathrm|mathbf|operatorname)\s*\{([^{}]*)\}/g, '$1')
+    .replace(/\\times/g, '×').replace(/\\cdot/g, '×').replace(/\\div/g, '÷')
+    .replace(/\\approx/g, '≈').replace(/\\leq?\b/g, '≤').replace(/\\geq?\b/g, '≥').replace(/\\pm/g, '±')
+    .replace(/\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, '($1) ÷ ($2)')
+    .replace(/\\left|\\right/g, '').replace(/\\[,;!]/g, ' ').replace(/\\(?:quad|qquad)/g, '  ')
+    .replace(/\\\[|\\\]|\\\(|\\\)/g, ' ').replace(/\\\\/g, ' ')
+    .replace(/\\[a-zA-Z]+/g, '').replace(/[{}]/g, '')
     .replace(/^\s*(?:\*\*)?SOURCES(?:\*\*)?\s*:.*$/gim, '')
     .replace(/^\s*(?:\*\*)?CONFIDENCE(?:\*\*)?\s*:.*$/gim, '')
     .replace(/^\s*(?:\*\*)?SEGMENTS?(?:\*\*)?\s*:.*$/gim, '')
@@ -339,13 +348,14 @@ export default async function handler(req, res) {
     const calcMergeText = calcResults.length
       ? '\n\nParts of this question are calculations. The evidence items titled "Trade Calculator" are EXACT computed results — reproduce their formula and final figures verbatim for those parts and do NOT recompute them. Answer the remaining parts from the FAQ evidence. Cover every part.'
       : '';
+    const formatText = '\n\nWrite all formulas and math in plain text using × ÷ + − = and parentheses. Never use LaTeX or markup such as \\frac, \\text, \\[, \\], or any backslash command.';
     // If the question is about a calculation (max lot, margin, pip value, lot
     // size, risk), push the model to use the calculator formulas that are in the
     // evidence and to ask for any missing number rather than assuming it.
     const calcText = concepts.groups.includes('calculator')
       ? '\n\nThis is a calculation question. If the FAQ evidence includes a Trade Calculator formula, use it: state the formula, then plug in the numbers. If a required value is missing (for example the current price, or the account/instrument leverage), give the formula and ask for that value instead of assuming it. Do not merge a calculation with a separate account limit — present them as distinct points.'
       : '';
-    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + ambiguityText + multiPartText + calcText + calcMergeText +
+    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + ambiguityText + multiPartText + calcText + calcMergeText + formatText +
       '\n\nAfter the customer-ready answer, add three private final lines:\n' +
       'SOURCES: comma-separated evidence numbers actually used, or none\n' +
       'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim\n' +
