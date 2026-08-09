@@ -2,7 +2,7 @@ import {
   authenticateRequest, getKeys, getPrompt, supabaseAdmin, openaiEmbed,
   openaiChatDetailed, getBrandingRules, brandingInstructions,
   applyBrandingReplacements, getRelevantSnippets, logActivity,
-  expandConcepts, clarifyQuery, correctTypos
+  expandConcepts, clarifyQuery, correctTypos, tryCalculator
 } from '../../lib/server';
 
 const STOP = new Set([
@@ -104,6 +104,29 @@ export default async function handler(req, res) {
     if (!question) return res.status(400).json({ error: 'Please type a question.' });
 
     const { openaiKey, groqKey, chatModel, chatProvider, smartRetrieval } = await getKeys();
+
+    // Deterministic calculator first: if this is a real calculation the tool can
+    // do exactly (margin, max lot, PnL, pips, risk sizing), compute it here and
+    // return the exact figure with a Trade Calculator reference — no RAG, no
+    // model arithmetic. Falls through to the FAQ pipeline for everything else.
+    const calc = await tryCalculator({ question, provider: chatProvider, model: chatModel, openaiKey, groqKey });
+    if (calc?.handled) {
+      const label = calc.confidence >= 85 ? 'High confidence' : calc.confidence >= 65 ? 'Review suggested' : 'Needs verification';
+      await logActivity({
+        actorRole: access.role, sessionId: access.sessionId, userName: access.name,
+        userEmail: access.email, authProvider: access.authProvider,
+        questionWordCount: wordCount(question), eventType: 'query', provider: 'calculator',
+        model: calc.calcType, success: true,
+        metadata: { confidence: calc.confidence, calc: calc.calcType, durationMs: Date.now() - started }
+      });
+      return res.status(200).json({
+        answer: calc.answer,
+        sources: [{ title: calc.sourceTitle, url: '', kind: 'calculator' }],
+        segments: calc.segments || null,
+        answerProvider: chatProvider, usedFallback: false,
+        confidence: calc.confidence, confidenceLabel: label, usedCalculator: true
+      });
+    }
     if (!openaiKey) return res.status(400).json({ error: 'No OpenAI key is saved yet.' });
     if (chatProvider === 'groq' && !groqKey) return res.status(400).json({ error: 'Groq is selected, but no Groq key is saved.' });
 
