@@ -289,7 +289,13 @@ export default async function handler(req, res) {
     const multiPartText = multiPart
       ? '\n\nThis question has several parts. Answer every part the evidence supports, each as its own clearly separated point. For any single part you cannot verify from the evidence, say only that that specific part needs checking — do not refuse or defer the entire answer because one part is unverified.'
       : '';
-    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + ambiguityText + multiPartText +
+    // If the question is about a calculation (max lot, margin, pip value, lot
+    // size, risk), push the model to use the calculator formulas that are in the
+    // evidence and to ask for any missing number rather than assuming it.
+    const calcText = concepts.groups.includes('calculator')
+      ? '\n\nThis is a calculation question. If the FAQ evidence includes a Trade Calculator formula, use it: state the formula, then plug in the numbers. If a required value is missing (for example the current price, or the account/instrument leverage), give the formula and ask for that value instead of assuming it. Do not merge a calculation with a separate account limit — present them as distinct points.'
+      : '';
+    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + ambiguityText + multiPartText + calcText +
       '\n\nAfter the customer-ready answer, add three private final lines:\n' +
       'SOURCES: comma-separated evidence numbers actually used, or none\n' +
       'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim\n' +
@@ -391,7 +397,8 @@ export default async function handler(req, res) {
         if (!segments.some((s) => s.refs.length)) segments = null;
       }
     }
-    sources = sources.map(({ _aid, ...rest }) => rest);
+    sources = sources.map(({ _aid, ...rest }) => ({ ...rest, kind: /^kb:/.test(_aid || '') ? 'calculator' : 'faq' }));
+    const usedCalculator = sources.some((s) => s.kind === 'calculator');
 
     const usage = completion.usage || {};
     const inputTokens = Number(usage.prompt_tokens || usage.input_tokens || 0);
@@ -419,7 +426,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel,
-      ambiguous: isAmbiguous, interpretations
+      ambiguous: isAmbiguous, interpretations, usedCalculator
     });
   } catch (error) {
     if (access) await logActivity({
