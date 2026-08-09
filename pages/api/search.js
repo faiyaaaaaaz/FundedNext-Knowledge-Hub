@@ -281,7 +281,15 @@ export default async function handler(req, res) {
         (interpretations.length ? `. The likely meanings are:\n${interpretations.map((s) => `- ${s}`).join('\n')}` : '.') +
         '\nRules for this: (a) Payout ELIGIBILITY / cycle timing depends on the Account model. If the customer did not name an Account, give the timing for each Account model the evidence supports, or clearly say it depends on the Account model and name which models differ — then, if helpful, ask which Account they have. (b) Keep the eligibility cycle and the 24-hour processing Brand Promise as separate points; never merge them into one number. (c) Only include a meaning the evidence actually supports. Use plain text labels like "Eligibility (depends on your account): ..." — no markdown symbols.'
       : '';
-    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + ambiguityText +
+    // Long, multi-part questions (like the payout + risk + rules bundles agents
+    // paste in) should be answered part-by-part, not refused as a whole.
+    const questionMarks = (question.match(/\?/g) || []).length;
+    const listedParts = (question.match(/(?:^|\n)\s*(?:\d+[.)]|[-*])\s/g) || []).length;
+    const multiPart = questionMarks >= 2 || listedParts >= 2;
+    const multiPartText = multiPart
+      ? '\n\nThis question has several parts. Answer every part the evidence supports, each as its own clearly separated point. For any single part you cannot verify from the evidence, say only that that specific part needs checking — do not refuse or defer the entire answer because one part is unverified.'
+      : '';
+    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + ambiguityText + multiPartText +
       '\n\nAfter the customer-ready answer, add three private final lines:\n' +
       'SOURCES: comma-separated evidence numbers actually used, or none\n' +
       'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim\n' +
