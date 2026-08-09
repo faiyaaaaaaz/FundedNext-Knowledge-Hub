@@ -233,6 +233,10 @@ export default function Admin() {
   const [autoSync, setAutoSync] = useState(null);
   const [runningSync, setRunningSync] = useState(false);
   const [expandedSync, setExpandedSync] = useState(null);
+  const [knowledge, setKnowledge] = useState(null);
+  const [knowledgeBusy, setKnowledgeBusy] = useState(false);
+  const [openDoc, setOpenDoc] = useState(null);
+  const [docDraft, setDocDraft] = useState(null);
 
   useEffect(() => {
     const savedSession = localStorage.getItem('appSession') || '';
@@ -251,6 +255,7 @@ export default function Admin() {
     if (tab === 'snippets') loadSnippets();
     if (tab === 'activity') loadActivity();
     if (tab === 'autosync') loadAutoSync();
+    if (tab === 'knowledge') loadKnowledge();
   }, [tab, session, role, disputeFilter]);
 
   function headers(json = false, token = session) {
@@ -323,6 +328,54 @@ export default function Admin() {
       else setNotice(`Sync complete. ${data.articlesChanged || 0} changed, ${data.articlesIndexed || 0} re-indexed.`);
       await loadAutoSync();
     } catch (e) { setError(e.message); } finally { setRunningSync(false); }
+  }
+
+  async function loadKnowledge() {
+    try {
+      const response = await fetch('/api/knowledge', { headers: headers() });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not load knowledge.');
+      setKnowledge(data);
+    } catch (e) { setError(e.message); }
+  }
+
+  async function saveDoc(payload, success) {
+    clearMessages();
+    try {
+      const response = await fetch('/api/knowledge', { method: 'POST', headers: headers(true), body: JSON.stringify(payload) });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not save the document.');
+      if (success) setNotice(success);
+      setOpenDoc(null); setDocDraft(null);
+      await loadKnowledge();
+    } catch (e) { setError(e.message); }
+  }
+
+  async function deleteDoc(id) {
+    if (!window.confirm('Delete this knowledge document? It will be removed from the chatbot on the next re-index.')) return;
+    clearMessages();
+    try {
+      const response = await fetch(`/api/knowledge?id=${id}`, { method: 'DELETE', headers: headers(true) });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not delete the document.');
+      setNotice('Document deleted. Re-index to update the chatbot.');
+      await loadKnowledge();
+    } catch (e) { setError(e.message); }
+  }
+
+  async function reindexKnowledgeNow() {
+    setKnowledgeBusy(true); clearMessages();
+    try {
+      const response = await fetch('/api/knowledge', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'reindex' }) });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Re-index failed.');
+      setNotice(`Knowledge re-indexed — ${data.docs} document${data.docs === 1 ? '' : 's'}, ${data.chunks} searchable pieces now live in the chatbot.`);
+      await loadKnowledge();
+    } catch (e) { setError(e.message); } finally { setKnowledgeBusy(false); }
   }
 
   async function settingsSave(body, success) {
@@ -458,7 +511,7 @@ export default function Admin() {
 
   const navigation = [
     ['access', '⌁', 'Team access'], ['ai', '✦', 'AI & model'], ['branding', 'Aa', 'Brand Language'],
-    ['disputes', '⚑', 'Disputes'], ['snippets', '⌘', 'Snippets'], ['activity', '◫', 'Activity logs'],
+    ['disputes', '⚑', 'Disputes'], ['snippets', '⌘', 'Snippets'], ['knowledge', '▤', 'Knowledge'], ['activity', '◫', 'Activity logs'],
     ['autosync', '↻', 'Automatic sync'], ['keys', '◇', 'API vault']
   ];
   const titles = Object.fromEntries(navigation.map(([id,, title]) => [id, title]));
@@ -511,6 +564,42 @@ export default function Admin() {
         {tab === 'snippets' && <div className="settings-stack"><section className="settings-card"><div className="settings-head"><div><h2>Corrective snippets</h2><p>Approved instructions are automatically applied when their trigger words match a future question.</p></div><span className="state-pill ready">{snippets.filter((item) => item.active).length} active</span></div><div className="snippet-list">{snippets.map((snippet) => <article key={snippet.id} className={!snippet.active ? 'inactive' : ''}><div className="snippet-head"><div><span>#{snippet.id}</span><h3>{snippet.title}</h3></div><label className="toggle"><input type="checkbox" checked={snippet.active} onChange={(e) => updateSnippet(snippet, { active: e.target.checked })} /><i /></label></div><label>Triggers</label><p className="trigger-text">{snippet.trigger_terms}</p><label>Instruction</label><textarea defaultValue={snippet.instruction} onBlur={(e) => e.target.value !== snippet.instruction && updateSnippet(snippet, { instruction: e.target.value })} /><div className="snippet-foot"><small>Created {formatDate(snippet.created_at)}</small><button className="mini-action danger-text" onClick={() => deleteSnippet(snippet.id)}>Delete</button></div></article>)}{!snippets.length && <div className="empty-admin">Approved disputes will appear here after you generate their snippets.</div>}</div></section></div>}
 
         {tab === 'activity' && <div className="settings-stack"><section className="settings-card activity-filters"><div className="settings-head"><div><h2>Filter activity</h2><p>Dates are interpreted in GMT+6.</p></div><DateRangeFilter from={activityFrom} to={activityTo} onApply={applyDateRange} /></div><div className="field-action"><input type="search" value={activityEmail} onChange={(e) => setActivityEmail(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && loadActivity()} placeholder="Search a teammate’s email address" /><div className="row"><button className="btn btn-primary" onClick={() => loadActivity()}>Search</button><button className="btn btn-secondary" onClick={clearActivityFilters}>Clear</button></div></div></section>{activity && <><div className="activity-kpis">{[['Users', activity.summary.users], ['Queries', activity.summary.queries], ['Question words', activity.summary.questionWords.toLocaleString()], ['Input tokens', activity.summary.inputTokens.toLocaleString()], ['Output tokens', activity.summary.outputTokens.toLocaleString()], ['Estimated cost', `$${activity.summary.estimatedCost.toFixed(4)}`]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><section className="settings-card"><div className="settings-head"><div><h2>Activity results</h2><p className="activity-count">{activityLogs.length} event{activityLogs.length === 1 ? '' : 's'} match the current filters.</p></div></div><div className="activity-table detailed"><div><b>Time</b><b>Google user</b><b>Email</b><b>Event</b><b>Words</b><b>Input</b><b>Output</b><b>Model</b><b>Status</b></div>{pageLogs.map((log) => <div key={log.id}><span data-label="Time">{formatDate(log.created_at)}</span><span data-label="User">{log.user_name || (log.actor_role === 'admin' ? 'Master Admin' : 'Legacy Agent')}</span><span data-label="Email" title={log.user_email || ''}>{log.user_email || '—'}</span><span data-label="Event">{log.event_type}</span><span data-label="Words">{log.question_word_count || 0}</span><span data-label="Input">{log.input_tokens || 0}</span><span data-label="Output">{log.output_tokens || 0}</span><span data-label="Model" title={log.model || ''}>{log.provider || '—'}{log.model ? ` · ${log.model}` : ''}</span><span data-label="Status" className={log.success ? 'good' : 'bad'}>{log.success ? 'Success' : 'Failed'}</span></div>)}{!pageLogs.length && <div className="empty-admin">No activity for this filter.</div>}</div>{totalPages > 1 && <div className="pager"><button disabled={activityPage === 1} onClick={() => setActivityPage((p) => Math.max(1, p - 1))}>‹ Prev</button>{pageNumbers.map((p, i) => p === '…' ? <span key={`e${i}`} className="pager-info">…</span> : <button key={p} className={p === activityPage ? 'current' : ''} onClick={() => setActivityPage(p)}>{p}</button>)}<button disabled={activityPage === totalPages} onClick={() => setActivityPage((p) => Math.min(totalPages, p + 1))}>Next ›</button></div>}</section></>}</div>}
+
+        {tab === 'knowledge' && <div className="settings-stack">
+          <section className="settings-card"><div className="settings-head"><div><h2>Chatbot knowledge</h2><p>Internal knowledge the chatbot can use alongside the Intercom FAQ — for example the trade calculator's formulas, instrument pip values, and account leverage. Turn documents on or off, edit them, then re-index to push changes into the chatbot.</p></div></div>
+            <div className="autosync-grid">
+              <div className="field-block"><label>Documents</label><b className="autosync-when">{knowledge?.docs?.length || 0} total · {knowledge?.docs?.filter((d) => d.enabled).length || 0} on</b></div>
+              <div className="field-block"><label>Live in chatbot</label><b className="autosync-when">{knowledge?.indexedChunks || 0} searchable pieces</b></div>
+              <div className="field-block"><label>Last re-index</label><b className="autosync-when">{knowledge?.indexedAt ? formatDate(knowledge.indexedAt) : 'Never'}</b></div>
+              <div className="field-block"><label>&nbsp;</label><div className="autosync-actions" style={{ marginTop: 0 }}><button className="btn btn-primary" disabled={knowledgeBusy} onClick={reindexKnowledgeNow}>{knowledgeBusy ? 'Re-indexing…' : 'Re-index into chatbot'}</button></div></div>
+            </div>
+            <p className="field-help">Re-indexing embeds every enabled document so the assistant can retrieve and cite it. Run it after adding or editing documents. It does not touch your Intercom FAQ.</p>
+            <div className="autosync-actions"><button className="btn btn-secondary" onClick={() => { setOpenDoc('new'); setDocDraft({ title: '', category: 'General', content: '', enabled: true }); }}>+ Add document</button></div>
+          </section>
+
+          {openDoc === 'new' && <section className="settings-card"><div className="settings-head"><div><h2>New document</h2></div></div>
+            <div className="field-block"><label>Title</label><input value={docDraft?.title || ''} onChange={(e) => setDocDraft((d) => ({ ...d, title: e.target.value }))} placeholder="e.g. Payout methods and limits" /></div>
+            <div className="field-block" style={{ marginTop: 12 }}><label>Category</label><input value={docDraft?.category || ''} onChange={(e) => setDocDraft((d) => ({ ...d, category: e.target.value }))} placeholder="e.g. Reference" /></div>
+            <div className="field-block" style={{ marginTop: 12 }}><label>Content</label><textarea className="prompt-area" value={docDraft?.content || ''} onChange={(e) => setDocDraft((d) => ({ ...d, content: e.target.value }))} placeholder="Write the knowledge in plain language." /></div>
+            <div className="autosync-actions"><button className="btn btn-primary" onClick={() => saveDoc(docDraft, 'Document added. Re-index to push it live.')}>Save document</button><button className="btn btn-secondary" onClick={() => { setOpenDoc(null); setDocDraft(null); }}>Cancel</button></div>
+          </section>}
+
+          <section className="settings-card"><div className="settings-head"><div><h2>Documents</h2><p>Click a document to view or edit it.</p></div></div>
+            <div className="sync-log-list">{(knowledge?.docs || []).map((doc) => <div key={doc.id} className={`sync-log ${doc.enabled ? '' : 'skipped'}`}>
+              <div className="sync-log-row" style={{ cursor: 'default' }}>
+                <span className={`sync-badge ${doc.enabled ? 'success' : 'skipped'}`}>{doc.category}</span>
+                <button className="sync-log-main" style={{ border: 0, background: 'transparent', textAlign: 'left', cursor: 'pointer', padding: 0 }} onClick={() => { const opening = openDoc !== doc.id; setOpenDoc(opening ? doc.id : null); setDocDraft(opening ? { id: doc.id, title: doc.title, category: doc.category, content: doc.content, enabled: doc.enabled } : null); }}><b>{doc.title}</b><small>{(doc.content || '').length} characters · updated {formatDate(doc.updated_at)}</small></button>
+                <label className="toggle" onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={!!doc.enabled} onChange={(e) => saveDoc({ id: doc.id, enabled: e.target.checked }, e.target.checked ? 'Document enabled. Re-index to apply.' : 'Document disabled. Re-index to apply.')} /><i /></label>
+              </div>
+              {openDoc === doc.id && <div className="sync-log-detail">
+                <div className="field-block"><label>Title</label><input value={docDraft?.title || ''} onChange={(e) => setDocDraft((d) => ({ ...d, title: e.target.value }))} /></div>
+                <div className="field-block" style={{ marginTop: 12 }}><label>Category</label><input value={docDraft?.category || ''} onChange={(e) => setDocDraft((d) => ({ ...d, category: e.target.value }))} /></div>
+                <div className="field-block" style={{ marginTop: 12 }}><label>Content</label><textarea className="prompt-area" value={docDraft?.content || ''} onChange={(e) => setDocDraft((d) => ({ ...d, content: e.target.value }))} /></div>
+                <div className="autosync-actions"><button className="btn btn-primary" onClick={() => saveDoc(docDraft, 'Document saved. Re-index to push changes live.')}>Save changes</button><button className="btn btn-danger" onClick={() => deleteDoc(doc.id)}>Delete</button></div>
+              </div>}
+            </div>)}{!knowledge?.docs?.length && <div className="empty-admin">No knowledge documents yet. Run the seed SQL, or use “Add document”.</div>}</div>
+          </section>
+        </div>}
 
         {tab === 'autosync' && <div className="settings-stack">
           <section className="settings-card"><div className="settings-head"><div><h2>Automatic FAQ sync</h2><p>Keep the knowledge base current on its own. When on, the app checks Intercom for new or changed articles on the schedule you choose and re-indexes what changed.</p></div><label className="toggle big"><input type="checkbox" checked={!!autoSync?.enabled} onChange={(e) => saveAutoSync({ enabled: e.target.checked }, e.target.checked ? 'Automatic sync turned on.' : 'Automatic sync turned off.')} /><i /></label></div>
