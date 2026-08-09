@@ -40,13 +40,17 @@ export default async function handler(req, res) {
 
     const last = cfg.lastAutoSyncAt ? Date.parse(cfg.lastAutoSyncAt) : 0;
     const elapsedHours = (Date.now() - last) / 3600000;
-    const intervalElapsed = !last || elapsedHours >= cfg.intervalHours;
+    // Grace margin: a scheduled cron that fires a little earlier than a full
+    // interval (e.g. a daily 9:00 AM tick when yesterday's run finished at 9:17)
+    // should still count, otherwise the schedule drifts to every other day.
+    const graceHours = Math.min(1, cfg.intervalHours * 0.1);
+    const intervalElapsed = !last || elapsedHours >= (cfg.intervalHours - graceHours);
 
     // Run if: an Admin asked directly, OR there is leftover work to finish,
     // OR auto-sync is enabled and enough time has passed for a new cycle.
     const shouldRun = manual || hasQueue || (cfg.enabled && intervalElapsed);
     if (!shouldRun) {
-      const remaining = Math.max(0, cfg.intervalHours - elapsedHours);
+      const remaining = Math.max(0, (cfg.intervalHours - graceHours) - elapsedHours);
       return res.status(200).json({
         ran: false,
         reason: cfg.enabled ? `Next automatic sync in about ${remaining.toFixed(1)}h.` : 'Automatic sync is turned off.',
