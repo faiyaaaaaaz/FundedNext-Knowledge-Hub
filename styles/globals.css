@@ -291,6 +291,14 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .seg-cite-pop b { font: 700 9px/1 var(--display); letter-spacing: .08em; text-transform: uppercase; color: var(--violet); }
 .seg-cite-pop > span { font-family: var(--display); font-size: 12.5px; font-weight: 600; line-height: 1.35; color: var(--ink); white-space: normal; }
 .seg-cite-pop em { font-style: normal; font-size: 11px; font-weight: 600; color: var(--violet); }
+/* Calculator-sourced citations look distinct so agents can see the tool was used */
+.calc-tag { margin-left: 8px; padding: 3px 8px; border-radius: 7px; background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); font: 700 10px/1 var(--display); letter-spacing: .02em; white-space: nowrap; user-select: none; -webkit-user-select: none; }
+.seg-cite.calc { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
+.seg-cite.calc:hover, .seg-cite.calc:focus-visible { background: var(--success); color: #fff; box-shadow: 0 6px 14px -6px color-mix(in srgb, var(--success) 70%, transparent); }
+.seg-cite.calc .seg-cite-pop b { color: var(--success); }
+.sources-list a.src-calc { border-color: color-mix(in srgb, var(--success) 34%, var(--line)); }
+.sources-list a.src-calc .src-num { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
+.sources-list a.src-calc small { color: var(--success); }
 
 /* ---- Premium thinking state ---- */
 .thinking-avatar { animation: floaty 2.4s ease-in-out infinite; }
