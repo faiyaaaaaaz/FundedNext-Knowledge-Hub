@@ -2,7 +2,8 @@ import {
   authenticateRequest, getKeys, getPrompt, supabaseAdmin, openaiEmbed,
   openaiChatDetailed, getBrandingRules, brandingInstructions,
   applyBrandingReplacements, getRelevantSnippets, logActivity,
-  expandConcepts, clarifyQuery, correctTypos, runCalculators
+  expandConcepts, clarifyQuery, correctTypos, runCalculators,
+  getGroqKeys, verifyGrounding, MASTER_GOOGLE_EMAIL
 } from '../../lib/server';
 
 const STOP = new Set([
@@ -121,11 +122,18 @@ export default async function handler(req, res) {
 
     const { openaiKey, groqKey, chatModel, chatProvider, smartRetrieval } = await getKeys();
 
+    // Groq key pool for rotation; a single primary key powers the small helper
+    // calls (query clarify, calculator extraction, grounding check).
+    const groqPool = chatProvider === 'groq' ? await getGroqKeys() : [];
+    const groqPrimary = groqKey || (groqPool[0] && groqPool[0].key) || null;
+    // Groq→GPT automatic fallback is allowed ONLY for the master admin / creator.
+    const canFallback = access.role === 'admin' || access.email === MASTER_GOOGLE_EMAIL;
+
     // Run the deterministic calculator over the (possibly mixed) message.
     // - Pure calculation(s) with no other question → answer exactly, here.
     // - Mixed (calc + policy) → keep the exact results and merge them into the
     //   FAQ answer below as authoritative evidence, so every part is answered.
-    const calc = await runCalculators({ question, provider: chatProvider, model: chatModel, openaiKey, groqKey });
+    const calc = await runCalculators({ question, provider: chatProvider, model: chatModel, openaiKey, groqKey: groqPrimary });
     const calcResults = calc?.results || [];
     const okCalc = calcResults.filter((r) => r.ok);
 
@@ -151,7 +159,7 @@ export default async function handler(req, res) {
       });
     }
     if (!openaiKey) return res.status(400).json({ error: 'No OpenAI key is saved yet.' });
-    if (chatProvider === 'groq' && !groqKey) return res.status(400).json({ error: 'Groq is selected, but no Groq key is saved.' });
+    if (chatProvider === 'groq' && !groqPool.length && !groqPrimary) return res.status(400).json({ error: 'Groq is selected, but no Groq key is saved. Add one in Admin → Groq keys.' });
 
     const sb = supabaseAdmin();
     const scope = detectScope(question);
@@ -163,7 +171,7 @@ export default async function handler(req, res) {
     let clarity = null;
     if (smartRetrieval) {
       clarity = await clarifyQuery({
-        question, provider: chatProvider, model: chatModel, openaiKey, groqKey
+        question, provider: chatProvider, model: chatModel, openaiKey, groqKey: groqPrimary
       });
     }
     const clearQuestion = (clarity?.clear && clarity.clear.length > 3) ? clarity.clear : question;
@@ -349,13 +357,14 @@ export default async function handler(req, res) {
       ? '\n\nParts of this question are calculations. The evidence items titled "Trade Calculator" are EXACT computed results — reproduce their formula and final figures verbatim for those parts and do NOT recompute them. Answer the remaining parts from the FAQ evidence. Cover every part.'
       : '';
     const formatText = '\n\nWrite all formulas and math in plain text using × ÷ + − = and parentheses. Never use LaTeX or markup such as \\frac, \\text, \\[, \\], or any backslash command.';
+    const groundingText = '\n\nCRITICAL GROUNDING: Answer ONLY from the FAQ evidence above. Do not use outside or prior knowledge about FundedNext, its accounts, or trading. If the evidence does not clearly and explicitly contain the answer, do NOT answer from memory — say you could not find it in the FAQ and set CONFIDENCE to 0. Never cite a source number unless that specific evidence explicitly states the claim you attribute to it.';
     // If the question is about a calculation (max lot, margin, pip value, lot
     // size, risk), push the model to use the calculator formulas that are in the
     // evidence and to ask for any missing number rather than assuming it.
     const calcText = concepts.groups.includes('calculator')
       ? '\n\nThis is a calculation question. If the FAQ evidence includes a Trade Calculator formula, use it: state the formula, then plug in the numbers. If a required value is missing (for example the current price, or the account/instrument leverage), give the formula and ask for that value instead of assuming it. Do not merge a calculation with a separate account limit — present them as distinct points.'
       : '';
-    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + ambiguityText + multiPartText + calcText + calcMergeText + formatText +
+    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + ambiguityText + multiPartText + calcText + calcMergeText + formatText + groundingText +
       '\n\nAfter the customer-ready answer, add three private final lines:\n' +
       'SOURCES: comma-separated evidence numbers actually used, or none\n' +
       'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim\n' +
@@ -370,24 +379,46 @@ export default async function handler(req, res) {
 
     let completion;
     let answerProvider = chatProvider;
-    const usedFallback = false;
+    let usedFallback = false;
+    const isLimit = (e) => /429|rate.?limit|too many requests|quota/i.test(String((e && e.message) || e));
+
     if (chatProvider === 'groq') {
-      try {
-        completion = await openaiChatDetailed(groqKey, chatModel, messages, 'https://api.groq.com/openai/v1');
-      } catch (groqError) {
-        const limited = /429|rate.?limit|too many requests/i.test(String(groqError.message || groqError));
-        await logActivity({
-          actorRole: access.role, sessionId: access.sessionId,
-          userName: access.name, userEmail: access.email, authProvider: access.authProvider,
-          questionWordCount: wordCount(question), eventType: 'query',
-          provider: 'groq', model: chatModel, success: false,
-          metadata: { reason: limited ? 'Groq rate limit reached' : 'Groq request failed', durationMs: Date.now() - started }
-        });
-        return res.status(limited ? 429 : 502).json({
-          error: limited
-            ? 'Groq has reached its current usage limit. Please wait and try again later, or ask an Admin to select a different answering provider.'
-            : 'Groq could not complete the answer. Please try again shortly, or ask an Admin to check the selected model.'
-        });
+      // Rotate over the key pool in a random order so concurrent users spread
+      // across keys; on a rate-limited/failed key, try the next one.
+      const pool = groqPool.length ? groqPool : (groqPrimary ? [{ key: groqPrimary }] : []);
+      const order = pool.map((_, i) => i).sort(() => Math.random() - 0.5);
+      let lastErr = null;
+      for (const idx of order) {
+        try {
+          completion = await openaiChatDetailed(pool[idx].key, chatModel, messages, 'https://api.groq.com/openai/v1');
+          answerProvider = 'groq';
+          break;
+        } catch (e) { lastErr = e; completion = null; }
+      }
+      if (!completion) {
+        // Every Groq key failed. Only the master admin / creator falls back to GPT.
+        if (canFallback && openaiKey) {
+          try {
+            completion = await openaiChatDetailed(openaiKey, chatModel, messages);
+            answerProvider = 'openai';
+            usedFallback = true;
+          } catch (e) { lastErr = e; }
+        }
+        if (!completion) {
+          const limited = isLimit(lastErr);
+          await logActivity({
+            actorRole: access.role, sessionId: access.sessionId,
+            userName: access.name, userEmail: access.email, authProvider: access.authProvider,
+            questionWordCount: wordCount(question), eventType: 'query',
+            provider: 'groq', model: chatModel, success: false,
+            metadata: { reason: limited ? 'All Groq keys rate limited' : 'Groq request failed', durationMs: Date.now() - started }
+          });
+          return res.status(limited ? 429 : 502).json({
+            error: limited
+              ? 'All Groq keys have reached their usage limit right now. Please wait a moment and try again.'
+              : 'Groq could not complete the answer. Please try again shortly, or ask an Admin to check the selected model.'
+          });
+        }
       }
     } else {
       completion = await openaiChatDetailed(openaiKey, chatModel, messages);
@@ -441,7 +472,7 @@ export default async function handler(req, res) {
     const scopedCount = matches.filter((item) => item._scoped).length;
     const evidenceCap = scope ? (scopedCount >= 3 ? 96 : scopedCount === 2 ? 90 : 80) : (sources.length >= 2 ? 92 : 82);
     let confidence = Math.min(modelConfidence, evidenceCap);
-    const confidenceLabel = confidence >= 85 ? 'High confidence' : confidence >= 65 ? 'Review suggested' : 'Needs verification';
+    let confidenceLabel = confidence >= 85 ? 'High confidence' : confidence >= 65 ? 'Review suggested' : 'Needs verification';
     let answer = cleanAnswer(applyBrandingReplacements(cleanAnswer(raw), brandRules));
     // An exact computation must not be thrown away as "unconfirmed".
     if (okCalc.length) confidence = Math.max(confidence, 74);
@@ -470,7 +501,32 @@ export default async function handler(req, res) {
       }
     }
     sources = sources.map(({ _aid, ...rest }) => ({ ...rest, kind: /^(kb|calc):/.test(_aid || '') ? 'calculator' : 'faq' }));
-    const usedCalculator = sources.some((s) => s.kind === 'calculator');
+    let usedCalculator = sources.some((s) => s.kind === 'calculator');
+
+    // ---- Grounding verification --------------------------------------------
+    // Independently check that the answer is actually supported by the evidence.
+    // This is what stops confident, mis-cited, invented answers. Skipped for pure
+    // calculator output (already exact) and when there is no real answer.
+    let groundingScore = null;
+    if (smartRetrieval && answer !== SAFE_UNCONFIRMED && !usedCalculator) {
+      const check = await verifyGrounding({
+        question: clearQuestion || question, answer, context,
+        provider: answerProvider, model: chatModel, openaiKey, groqKey: groqPrimary
+      });
+      if (check) {
+        groundingScore = check.score;
+        if (!check.grounded || check.score < 55) {
+          answer = 'I could not find a clear answer to this in the current FAQ knowledge, so I will not give an unverified answer. Please check the source directly or rephrase the question — and consider adding this to the FAQ if customers ask it often.';
+          sources = [];
+          segments = null;
+          usedCalculator = false;
+          confidence = Math.min(confidence, check.score, 25);
+        } else {
+          confidence = Math.min(confidence, check.score);
+        }
+        confidenceLabel = confidence >= 85 ? 'High confidence' : confidence >= 65 ? 'Review suggested' : 'Needs verification';
+      }
+    }
 
     const usage = completion.usage || {};
     const inputTokens = Number(usage.prompt_tokens || usage.input_tokens || 0);
@@ -490,7 +546,7 @@ export default async function handler(req, res) {
       estimatedCost: estimateCost(answerProvider, chatModel, inputTokens, outputTokens),
       metadata: {
         confidence, confidenceLabel, sourceCount: sources.length, scope,
-        fallback: false, durationMs: Date.now() - started,
+        fallback: usedFallback, grounding: groundingScore, durationMs: Date.now() - started,
         smart: !!clarity, ambiguous: isAmbiguous,
         questionPreview: question.slice(0, 180)
       }
