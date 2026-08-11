@@ -357,7 +357,7 @@ export default async function handler(req, res) {
       ? '\n\nParts of this question are calculations. The evidence items titled "Trade Calculator" are EXACT computed results — reproduce their formula and final figures verbatim for those parts and do NOT recompute them. Answer the remaining parts from the FAQ evidence. Cover every part.'
       : '';
     const formatText = '\n\nWrite all formulas and math in plain text using × ÷ + − = and parentheses. Never use LaTeX or markup such as \\frac, \\text, \\[, \\], or any backslash command.';
-    const groundingText = '\n\nCRITICAL GROUNDING: Answer ONLY from the FAQ evidence above. Do not use outside or prior knowledge about FundedNext, its accounts, or trading. If the evidence does not clearly and explicitly contain the answer, do NOT answer from memory — say you could not find it in the FAQ and set CONFIDENCE to 0. Never cite a source number unless that specific evidence explicitly states the claim you attribute to it.';
+    const groundingText = '\n\nGROUNDING: Base your answer on the FAQ evidence above and prefer it over prior knowledge. If the evidence only partially covers the question, answer the part it supports and briefly note what is uncertain — you do not need to refuse. Only decline (and set CONFIDENCE low) if the evidence contains essentially nothing relevant to the question. Do not state specific rules, numbers, or permissions that are absent from the evidence, and do not cite a source that does not contain the claim.';
     // If the question is about a calculation (max lot, margin, pip value, lot
     // size, risk), push the model to use the calculator formulas that are in the
     // evidence and to ask for any missing number rather than assuming it.
@@ -476,7 +476,8 @@ export default async function handler(req, res) {
     let answer = cleanAnswer(applyBrandingReplacements(cleanAnswer(raw), brandRules));
     // An exact computation must not be thrown away as "unconfirmed".
     if (okCalc.length) confidence = Math.max(confidence, 74);
-    if (confidence < 45 && !okCalc.length) answer = SAFE_UNCONFIRMED;
+    // Only fall back to the safe message when the model itself is very unsure.
+    if (confidence < 30 && !okCalc.length) answer = SAFE_UNCONFIRMED;
 
     // Per-paragraph attribution: map each answer paragraph to the source(s) that
     // support it, so the UI can show which FAQ backs which part. Fully optional —
@@ -504,9 +505,10 @@ export default async function handler(req, res) {
     let usedCalculator = sources.some((s) => s.kind === 'calculator');
 
     // ---- Grounding verification --------------------------------------------
-    // Independently check that the answer is actually supported by the evidence.
-    // This is what stops confident, mis-cited, invented answers. Skipped for pure
-    // calculator output (already exact) and when there is no real answer.
+    // The grounding check is a CONFIDENCE signal, not a refusal switch. It lowers
+    // confidence when the evidence weakly supports the answer, and only replaces
+    // the answer when the evidence supports almost nothing (a clear fabrication).
+    // This keeps the assistant useful for agents while catching invented claims.
     let groundingScore = null;
     if (smartRetrieval && answer !== SAFE_UNCONFIRMED && !usedCalculator) {
       const check = await verifyGrounding({
@@ -515,14 +517,17 @@ export default async function handler(req, res) {
       });
       if (check) {
         groundingScore = check.score;
-        if (!check.grounded || check.score < 55) {
-          answer = 'I could not find a clear answer to this in the current FAQ knowledge, so I will not give an unverified answer. Please check the source directly or rephrase the question — and consider adding this to the FAQ if customers ask it often.';
+        const topSimilarity = candidates.reduce((m, c) => Math.max(m, Number(c.similarity) || 0), 0);
+        // Replace only when the verifier AND retrieval agree there's little support:
+        // near-zero grounding score and no strongly matching FAQ evidence.
+        if (check.score < 30 && topSimilarity < 0.5) {
+          answer = 'I could not find a clear answer to this in the current FAQ knowledge, so I will not give an unverified answer. Please check the source directly or rephrase — and consider adding this to the FAQ if customers ask it often.';
           sources = [];
           segments = null;
           usedCalculator = false;
-          confidence = Math.min(confidence, check.score, 25);
+          confidence = Math.min(confidence, 22);
         } else {
-          confidence = Math.min(confidence, check.score);
+          confidence = Math.max(0, Math.min(confidence, check.score + 20));
         }
         confidenceLabel = confidence >= 85 ? 'High confidence' : confidence >= 65 ? 'Review suggested' : 'Needs verification';
       }
