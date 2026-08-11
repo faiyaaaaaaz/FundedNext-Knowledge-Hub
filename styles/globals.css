@@ -293,6 +293,9 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .seg-cite-pop em { font-style: normal; font-size: 11px; font-weight: 600; color: var(--violet); }
 /* Calculator-sourced citations look distinct so agents can see the tool was used */
 .calc-tag { margin-left: 8px; padding: 3px 8px; border-radius: 7px; background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); font: 700 10px/1 var(--display); letter-spacing: .02em; white-space: nowrap; user-select: none; -webkit-user-select: none; }
+.fallback-flash { margin-left: 8px; padding: 3px 8px; border-radius: 7px; background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); font: 700 10px/1 var(--display); letter-spacing: .02em; white-space: nowrap; user-select: none; -webkit-user-select: none; animation: flashIn .5s cubic-bezier(.2,.8,.2,1) both, flashPulse 1.6s ease 1; }
+@keyframes flashIn { from { opacity: 0; transform: translateY(-4px) scale(.9); } to { opacity: 1; transform: none; } }
+@keyframes flashPulse { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 30% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 22%, transparent); } }
 .seg-cite.calc { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
 .seg-cite.calc:hover, .seg-cite.calc:focus-visible { background: var(--success); color: #fff; box-shadow: 0 6px 14px -6px color-mix(in srgb, var(--success) 70%, transparent); }
 .seg-cite.calc .seg-cite-pop b { color: var(--success); }
