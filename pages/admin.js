@@ -242,6 +242,8 @@ export default function Admin() {
   const [openInst, setOpenInst] = useState(null);
   const [instDraft, setInstDraft] = useState(null);
   const [newLev, setNewLev] = useState({ stepKey: '', marketType: 'Currency', phase: 'any', leverage: '' });
+  const [groqKeys, setGroqKeys] = useState(null);
+  const [newGroqKey, setNewGroqKey] = useState({ label: '', key: '' });
 
   useEffect(() => {
     const savedSession = localStorage.getItem('appSession') || '';
@@ -262,6 +264,7 @@ export default function Admin() {
     if (tab === 'autosync') loadAutoSync();
     if (tab === 'knowledge') loadKnowledge();
     if (tab === 'calcdata') loadCalc();
+    if (tab === 'groqkeys') loadGroqKeys();
   }, [tab, session, role, disputeFilter]);
 
   function headers(json = false, token = session) {
@@ -391,6 +394,28 @@ export default function Admin() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not load calculator data.');
       setCalc(data);
+    } catch (e) { setError(e.message); }
+  }
+
+  async function loadGroqKeys() {
+    try {
+      const response = await fetch('/api/groqkeys', { headers: headers() });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not load Groq keys.');
+      setGroqKeys(data.keys || []);
+    } catch (e) { setError(e.message); }
+  }
+
+  async function groqKeyAction(payload, method, success) {
+    clearMessages();
+    try {
+      const response = await fetch('/api/groqkeys', { method, headers: headers(true), body: JSON.stringify(payload) });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not update Groq keys.');
+      setGroqKeys(data.keys || []);
+      if (success) setNotice(success);
     } catch (e) { setError(e.message); }
   }
 
@@ -564,7 +589,7 @@ export default function Admin() {
   const navigation = [
     ['access', '⌁', 'Team access'], ['ai', '✦', 'AI & model'], ['branding', 'Aa', 'Brand Language'],
     ['disputes', '⚑', 'Disputes'], ['snippets', '⌘', 'Snippets'], ['knowledge', '▤', 'Knowledge'], ['calcdata', '∑', 'Calculator data'], ['activity', '◫', 'Activity logs'],
-    ['autosync', '↻', 'Automatic sync'], ['keys', '◇', 'API vault']
+    ['autosync', '↻', 'Automatic sync'], ['groqkeys', '⚿', 'Groq keys'], ['keys', '◇', 'API vault']
   ];
   const titles = Object.fromEntries(navigation.map(([id,, title]) => [id, title]));
   const models = provider === 'groq' ? GROQ_MODELS : OPENAI_MODELS;
@@ -688,6 +713,23 @@ export default function Admin() {
             </div>
             <div className="autosync-actions"><button className="btn btn-primary" onClick={() => { if (!newLev.stepKey || !newLev.leverage) return setError('Enter an account key and leverage.'); saveLeverage(newLev, 'Leverage row added.'); setNewLev({ stepKey: '', marketType: 'Currency', phase: 'any', leverage: '' }); }}>Add leverage row</button></div>
             <p className="field-help">The account key is matched from the customer's wording — use "instant" for Stellar Instant, "1-step", "2-step", "lite". Use phase "any" when Challenge and Funded share the same leverage.</p>
+          </section>
+        </div>}
+
+        {tab === 'groqkeys' && <div className="settings-stack">
+          <section className="settings-card"><div className="settings-head"><div><h2>Groq key pool</h2><p>Add multiple free Groq keys and the app rotates across them for every answer, spreading the rate limit so many agents can work at once. Keys are stored encrypted and never shown again after saving.</p></div>{groqKeys?.length ? <span className="state-pill ready">{groqKeys.filter((k) => k.active).length} active</span> : null}</div>
+            <div className="sync-log-list">{(groqKeys || []).map((k) => <div key={k.id} className={`sync-log ${k.active ? '' : 'skipped'}`}><div className="sync-log-row" style={{ cursor: 'default' }}>
+              <span className={`sync-badge ${k.active ? 'success' : 'skipped'}`}>{k.active ? 'Active' : 'Off'}</span>
+              <span className="sync-log-main"><b>{k.label}</b><small>Added {formatDate(k.created_at)}</small></span>
+              <label className="toggle" onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={!!k.active} onChange={(e) => groqKeyAction({ id: k.id, active: e.target.checked }, 'POST', e.target.checked ? 'Key enabled.' : 'Key disabled.')} /><i /></label>
+              <button className="btn btn-secondary" style={{ padding: '6px 10px' }} onClick={() => { if (window.confirm('Delete this Groq key?')) groqKeyAction({ id: k.id }, 'DELETE', 'Key deleted.'); }}>Delete</button>
+            </div></div>)}{groqKeys && !groqKeys.length && <div className="empty-admin">No Groq keys yet. Add one below. (Run the groq-keys SQL first.)</div>}</div>
+            <div className="autosync-grid" style={{ marginTop: 14 }}>
+              <div className="field-block"><label>Label (for you)</label><input value={newGroqKey.label} onChange={(e) => setNewGroqKey((d) => ({ ...d, label: e.target.value }))} placeholder="e.g. Agent Momen's key" /></div>
+              <div className="field-block"><label>Groq API key</label><input type="password" value={newGroqKey.key} onChange={(e) => setNewGroqKey((d) => ({ ...d, key: e.target.value }))} placeholder="gsk_…" /></div>
+            </div>
+            <div className="autosync-actions"><button className="btn btn-primary" onClick={() => { if (!newGroqKey.key.trim()) return setError('Paste a Groq key first.'); groqKeyAction(newGroqKey, 'POST', 'Groq key added.'); setNewGroqKey({ label: '', key: '' }); }}>Add key</button></div>
+            <p className="field-help">Rotation is automatic and random so concurrent users spread evenly. If one key is rate-limited mid-answer, the app instantly tries the next active key. This works when the answering provider is set to Groq.</p>
           </section>
         </div>}
 
