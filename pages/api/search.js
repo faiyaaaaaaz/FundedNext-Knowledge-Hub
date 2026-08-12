@@ -117,7 +117,7 @@ export default async function handler(req, res) {
     access = await authenticateRequest(req);
     if (!access) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
 
-    const question = String(req.body?.question || '').trim();
+    const question = String(req.body?.question || '').trim().slice(0, 20000);
     if (!question) return res.status(400).json({ error: 'Please type a question.' });
 
     const { openaiKey, groqKey, chatModel, chatProvider, smartRetrieval } = await getKeys();
@@ -191,7 +191,8 @@ export default async function handler(req, res) {
     // The classic ambiguous case: a payout question that names no specific aspect.
     const payoutUmbrella = payoutish && !hasProcessingQualifier && !hasCycleQualifier && !hasMethodQualifier;
 
-    const isAmbiguous = !!clarity?.ambiguous || distinctMeanings.length >= 2 || payoutUmbrella;
+    const topicPlan = clarity?.topics?.length ? clarity.topics : [{ question: clearQuestion, queries: clarity?.queries || [] }];
+    const isAmbiguous = !!clarity?.ambiguous || distinctMeanings.length >= 2 || payoutUmbrella || topicPlan.length > 1;
 
     const DEFAULT_PAYOUT_INTERPRETATIONS = [
       'Payout eligibility and timing — this depends on the Account model / trading cycle',
@@ -229,20 +230,23 @@ export default async function handler(req, res) {
     const embedTexts = [...new Set([
       question, clearQuestion,
       ...(clarity?.queries || []),
+      ...topicPlan.flatMap((topic) => [topic.question, ...(topic.queries || [])]),
       ...umbrellaExpansions,
       ...concepts.expansions
-    ].map((t) => String(t || '').trim()).filter(Boolean))].slice(0, 8);
+    ].map((t) => String(t || '').trim()).filter(Boolean))].slice(0, 20);
 
     const vectors = await openaiEmbed(openaiKey, embedTexts);
     const combined = new Map();
+    const vectorMatches = [];
     for (const item of keywordMatches) combined.set(String(item.id), item);
 
-    const perQueryCount = embedTexts.length > 4 ? 8 : 12;
+    const perQueryCount = embedTexts.length > 10 ? 6 : embedTexts.length > 4 ? 8 : 12;
     for (const vector of vectors) {
       const vres = await sb.rpc('match_chunks', {
         query_embedding: vector, match_threshold: 0.14, match_count: perQueryCount
       });
       if (vres.error) throw new Error('Search failed: ' + vres.error.message);
+      vectorMatches.push(vres.data || []);
       for (const item of vres.data || []) {
         const key = String(item.id);
         const prev = combined.get(key) || {};
@@ -283,7 +287,32 @@ export default async function handler(req, res) {
     // covers each meaning instead of being dominated by the single strongest
     // topic. Reserve slots for eligibility/cycle, processing, and method chunks.
     let matches;
-    if (isAmbiguous && candidates.length) {
+    if (topicPlan.length > 1 && candidates.length) {
+      // Reserve evidence for every decomposed topic before filling the remaining
+      // slots by global rank. This prevents a dominant first topic from crowding
+      // later questions out of a long pasted message.
+      const candidateById = new Map(candidates.map((item) => [String(item.id), item]));
+      const seen = new Set();
+      const picked = [];
+      for (const topic of topicPlan) {
+        const topicTexts = [topic.question, ...(topic.queries || [])].map((t) => String(t || '').trim());
+        const ids = [];
+        for (const text of topicTexts) {
+          const idx = embedTexts.indexOf(text);
+          if (idx >= 0) for (const hit of vectorMatches[idx] || []) ids.push(String(hit.id));
+        }
+        const topicCandidates = [...new Set(ids)].map((id) => candidateById.get(id)).filter(Boolean)
+          .sort((a, b) => b._rank - a._rank);
+        for (const item of topicCandidates.slice(0, 2)) {
+          if (!seen.has(String(item.id))) { seen.add(String(item.id)); picked.push(item); }
+        }
+      }
+      for (const item of candidates) {
+        if (picked.length >= 16) break;
+        if (!seen.has(String(item.id))) { seen.add(String(item.id)); picked.push(item); }
+      }
+      matches = picked;
+    } else if (isAmbiguous && candidates.length) {
       const CYCLE_KW = ['cycle', 'first payout', 'eligible', 'eligibility', 'trading days', 'every 14', 'every 5', '14 days', '5 days', 'biweekly', 'bi-weekly', 'profit split', 'how often', 'minimum trading'];
       const PROCESS_KW = ['24 hour', '24-hour', 'brand promise', 'processed', 'processing', 'compensation', 'initiated', 'within 24'];
       const METHOD_KW = ['usdt', 'usdc', 'crypto', 'bank', 'riseworks', 'rise works', 'erc20', 'trc20', 'wallet'];
@@ -348,9 +377,11 @@ export default async function handler(req, res) {
     // paste in) should be answered part-by-part, not refused as a whole.
     const questionMarks = (question.match(/\?/g) || []).length;
     const listedParts = (question.match(/(?:^|\n)\s*(?:\d+[.)]|[-*])\s/g) || []).length;
-    const multiPart = questionMarks >= 2 || listedParts >= 2 || (calcResults.length > 0 && (calc?.other?.length > 0));
+    const multiPart = topicPlan.length > 1 || questionMarks >= 2 || listedParts >= 2 || (calcResults.length > 0 && (calc?.other?.length > 0));
     const multiPartText = multiPart
-      ? '\n\nThis question has several parts. Answer every part the evidence supports, each as its own clearly separated point. For any single part you cannot verify from the evidence, say only that that specific part needs checking — do not refuse or defer the entire answer because one part is unverified.'
+      ? '\n\nThis question has several parts. Answer them in this exact order and do not merge topics:\n' +
+        topicPlan.map((topic, index) => `${index + 1}. ${topic.question}`).join('\n') +
+        '\nAnswer every part the evidence supports, each as its own clearly separated numbered point. For any single part you cannot verify from the evidence, say only that that specific part needs checking — do not refuse or defer the entire answer because one part is unverified.'
       : '';
     // Exact computed results are provided as evidence — reproduce them verbatim.
     const calcMergeText = calcResults.length
