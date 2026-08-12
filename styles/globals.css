@@ -728,20 +728,28 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 }
 /* Essential account controls must remain discoverable without relying on
    unexplained icons. */
-.app-header .header-actions .icon-btn {
-  width: auto;
-  min-width: 42px;
-  padding: 0 12px;
+.header-action {
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   gap: 7px;
-}
-.app-header .header-actions .icon-btn::after {
-  font-size: 12px;
-  font-weight: 750;
-  letter-spacing: -.01em;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  background: var(--surface);
+  cursor: pointer;
   white-space: nowrap;
+  flex-direction: row !important;
+  min-width: 104px;
+  line-height: 1 !important;
 }
-.app-header .header-actions .icon-btn[aria-label="Change theme"]::after { content: "Appearance"; }
-.app-header .header-actions .icon-btn[aria-label="Sign out"]::after { content: "Sign out"; }
+.header-action:hover { border-color: #8d68ff; background: var(--panel); }
+.header-action span { color: #9b7cff; font-size: 15px; line-height: 1; }
+.header-action b { font-size: 12px; font-weight: 750; line-height: 1; }
+.model-card em { font-size: 0; }
+.model-card em::after { content: "Fallback controlled in Admin"; font-size: 10px; }
 
 .clarify-backdrop {
   position: fixed;
@@ -802,7 +810,7 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 
 @media (max-width: 720px) {
   .app-header .user-identity { display: none; }
-  .app-header .header-actions .icon-btn::after { display: inline; }
+  .header-action { padding: 0 10px; }
   .clarify-backdrop { padding: 12px; align-items: end; }
   .clarify-dialog { padding: 22px; border-radius: 20px 20px 12px 12px; }
   .clarify-other > div { flex-direction: column; }
