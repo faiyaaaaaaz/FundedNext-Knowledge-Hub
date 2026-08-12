@@ -742,7 +742,8 @@ export default function Admin() {
               <div className="field-block"><label>Waiting to index</label><b className="autosync-when">{autoSync?.queued ? `${autoSync.queued} article${autoSync.queued === 1 ? '' : 's'}` : 'Nothing queued'}</b></div>
             </div>
             <div className="autosync-actions"><button className="btn btn-primary" disabled={runningSync} onClick={runAutoSyncNow}>{runningSync ? 'Syncing…' : 'Run sync now'}</button><button className="btn btn-secondary" disabled={runningSync} onClick={loadAutoSync}>Refresh</button></div>
-            <p className="field-help">“Run sync now” works even when automatic sync is off. A long sync continues in the background and finishes across the next few automatic runs.</p>
+            <p className="field-help">“Run sync now” works even when automatic sync is off. A long sync continues across later scheduled runs.</p>
+            {autoSync && !autoSync.schedulerReady && <div className="sync-error"><span>Scheduled sync needs one Vercel setting</span><p>{autoSync.schedulerMessage}</p></div>}
           </section>
 
           <section className="settings-card"><div className="settings-head"><div><h2>Sync history</h2><p>Every automatic and manual run, newest first. Open a row for full details.</p></div>{autoSync?.logs?.length ? <span className="state-pill ready">{autoSync.logs.length} recorded</span> : null}</div>
