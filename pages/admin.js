@@ -230,6 +230,7 @@ export default function Admin() {
   const [activityPage, setActivityPage] = useState(1);
   const [allowedGoogleDomains, setAllowedGoogleDomains] = useState('');
   const [smartRetrieval, setSmartRetrieval] = useState(true);
+  const [normalUserGptFallback, setNormalUserGptFallback] = useState(true);
   const [autoSync, setAutoSync] = useState(null);
   const [runningSync, setRunningSync] = useState(false);
   const [expandedSync, setExpandedSync] = useState(null);
@@ -299,6 +300,7 @@ export default function Admin() {
       setStatus(data); setProvider(data.chatProvider || 'openai'); setModel(data.chatModel || 'gpt-4o'); setPrompt(data.chatPrompt || '');
       setAllowedGoogleDomains(data.allowedGoogleDomains || '');
       setSmartRetrieval(data.smartRetrieval !== false);
+      setNormalUserGptFallback(data.normalUserGptFallback !== false);
     } catch (e) { setError(e.message); }
   }
 
@@ -623,6 +625,7 @@ export default function Admin() {
         </div>}
 
         {tab === 'ai' && <div className="settings-stack">
+          <section className="settings-card"><div className="settings-head"><div><h2>GPT-4o fallback for Agents</h2><p>When Groq cannot answer, normal users automatically retry with GPT-4o. Admins always retain fallback access.</p></div><label className="toggle"><input type="checkbox" checked={normalUserGptFallback} onChange={(e) => { setNormalUserGptFallback(e.target.checked); settingsSave({ normalUserGptFallback: e.target.checked }, e.target.checked ? 'GPT-4o fallback turned on for Agents.' : 'GPT-4o fallback turned off for Agents.'); }} /><i /></label></div><p className="field-help">Recommended: keep this on for the most reliable support experience. OpenAI usage charges apply only when fallback is needed.</p></section>
           <section className="settings-card"><div className="settings-head"><div><h2>Answer provider</h2><p>OpenAI finds relevant FAQs. This controls which model writes the answer.</p></div></div><div className="provider-grid"><button className={provider === 'groq' ? 'selected' : ''} onClick={() => { setProvider('groq'); setModel(GROQ_MODELS[0]); }}><b>Groq</b><span>Fast, cost-efficient answers</span></button><button className={provider === 'openai' ? 'selected' : ''} onClick={() => { setProvider('openai'); setModel(OPENAI_MODELS[0]); }}><b>OpenAI</b><span>Direct OpenAI answers</span></button></div><label>Model</label><select value={models.includes(model) ? model : '__custom__'} onChange={(e) => setModel(e.target.value)}>{models.map((item) => <option key={item}>{item}</option>)}<option value="__custom__">Custom model…</option></select>{model === '__custom__' && <input value={customModel} onChange={(e) => setCustomModel(e.target.value)} placeholder="Exact model ID" />}</section>
           <section className="settings-card"><div className="settings-head"><div><h2>Smart query understanding</h2><p>Helps vague, misspelled, or ambiguous questions find the right FAQ. When a question could mean two things (for example a payout cycle versus the 24-hour Brand Promise), the assistant retrieves evidence for each meaning and answers them separately.</p></div><label className="toggle"><input type="checkbox" checked={smartRetrieval} onChange={(e) => { setSmartRetrieval(e.target.checked); settingsSave({ smartRetrieval: e.target.checked }, e.target.checked ? 'Smart query understanding turned on.' : 'Smart query understanding turned off.'); }} /><i /></label></div><p className="field-help">Adds one quick model call per question to interpret it. Concept matching for FundedNext terms stays on either way.</p></section>
           <section className="settings-card"><div className="settings-head"><div><h2>Assistant instructions</h2><p>Brand Language and approved snippets are enforced separately.</p></div></div><textarea className="prompt-area" value={prompt} onChange={(e) => setPrompt(e.target.value)} /><button className="btn btn-primary" disabled={saving} onClick={() => { const chosen = model === '__custom__' ? customModel.trim() : model; if (!chosen) return setError('Enter a model ID.'); settingsSave({ chatProvider: provider, chatModel: chosen, chatPrompt: prompt, smartRetrieval }, 'AI settings saved.'); }}>Save AI settings</button></section>
