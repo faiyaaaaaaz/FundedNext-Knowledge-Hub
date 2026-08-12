@@ -5,7 +5,7 @@ import {
 // Give the sync loop room to drain work in one invocation. Vercel Pro allows up
 // to 300s; on Hobby this is capped at 60s automatically and the run simply
 // continues on the next tick.
-export const config = { maxDuration: 300 };
+export const config = { maxDuration: 60 };
 
 // This endpoint is hit two ways:
 //  1) Vercel Cron (scheduled in vercel.json) — authenticated by CRON_SECRET.
@@ -59,7 +59,7 @@ export default async function handler(req, res) {
     }
 
     // Stay safely under the platform limit while draining as much as possible.
-    const budgetMs = isCron ? 270000 : 55000;
+    const budgetMs = 50000;
     const result = await runAutoSync(sb, { intercomToken, openaiKey }, {
       trigger: manual ? 'manual' : 'auto', budgetMs
     });
