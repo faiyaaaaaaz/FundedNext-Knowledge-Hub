@@ -751,6 +751,21 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .model-card em { font-size: 0; }
 .model-card em::after { content: "Fallback controlled in Admin"; font-size: 10px; }
 
+/* Compact, consistently aligned fallback audience controls. */
+.settings-stack > .settings-card:first-child .settings-head:has(h3) {
+  min-height: 68px;
+  margin: 10px 0 0 !important;
+  padding: 14px 16px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+.settings-stack > .settings-card:first-child .settings-head:has(h3) > div { min-width: 0; }
+.settings-stack > .settings-card:first-child .settings-head:has(h3) h3 { margin: 0 0 4px; font-size: 14px; line-height: 1.2; }
+.settings-stack > .settings-card:first-child .settings-head:has(h3) p { line-height: 1.35; }
+.settings-stack > .settings-card:first-child .settings-head:has(h3) .toggle { flex: 0 0 auto; margin: 0; }
+
 .clarify-backdrop {
   position: fixed;
   inset: 0;
