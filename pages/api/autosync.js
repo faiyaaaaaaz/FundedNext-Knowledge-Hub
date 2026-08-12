@@ -16,7 +16,13 @@ export default async function handler(req, res) {
       const cfg = await getAutoSyncConfig(sb);
       const logs = await getSyncLogs(sb, 25);
       const { count: queued } = await sb.from('articles').select('*', { count: 'exact', head: true }).eq('needs_index', true);
-      return res.status(200).json({ ...cfg, queued: queued || 0, logs });
+      return res.status(200).json({
+        ...cfg, queued: queued || 0, logs,
+        schedulerReady: !!process.env.CRON_SECRET,
+        schedulerMessage: process.env.CRON_SECRET
+          ? 'Vercel scheduler authentication is configured.'
+          : 'Add CRON_SECRET in Vercel Environment Variables, then redeploy. Scheduled calls are currently rejected.'
+      });
     }
 
     if (req.method === 'POST') {
