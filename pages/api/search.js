@@ -176,6 +176,25 @@ export default async function handler(req, res) {
     }
     const clearQuestion = (clarity?.clear && clarity.clear.length > 3) ? clarity.clear : question;
 
+    // Stop before retrieval when a missing detail would materially change the
+    // answer. The client presents these choices in a focused dialog and sends
+    // the selected detail back together with the untouched original question.
+    if (clarity?.needsClarification && clarity.clarifyingQuestion && clarity.choices?.length >= 2 && !req.body?.clarification) {
+      await logActivity({
+        actorRole: access.role, sessionId: access.sessionId, userName: access.name,
+        userEmail: access.email, authProvider: access.authProvider,
+        questionWordCount: wordCount(question), eventType: 'clarification', provider: 'openai',
+        model: 'gpt-4o-mini', success: true,
+        metadata: { choiceCount: clarity.choices.length, durationMs: Date.now() - started }
+      });
+      return res.status(200).json({
+        needsClarification: true,
+        originalQuestion: question,
+        clarifyingQuestion: clarity.clarifyingQuestion,
+        choices: clarity.choices
+      });
+    }
+
     // A question is ambiguous when the model flags it, when it touches two
     // genuinely different meaning-groups, OR when it is a *bare* payout question
     // ("when do I get paid") with no wording that pins down which aspect is meant.
@@ -419,12 +438,17 @@ export default async function handler(req, res) {
       const pool = groqPool.length ? groqPool : (groqPrimary ? [{ key: groqPrimary }] : []);
       const order = pool.map((_, i) => i).sort(() => Math.random() - 0.5);
       let lastErr = null;
-      for (const idx of order) {
-        try {
-          completion = await openaiChatDetailed(pool[idx].key, chatModel, messages, 'https://api.groq.com/openai/v1');
-          answerProvider = 'groq';
-          break;
-        } catch (e) { lastErr = e; completion = null; }
+      // Try every key once, then retry one complete pass after a short pause.
+      // This absorbs brief 429/5xx bursts without repeatedly hammering one key.
+      for (let round = 0; round < 2 && !completion; round++) {
+        if (round) await new Promise((resolve) => setTimeout(resolve, 700));
+        for (const idx of order) {
+          try {
+            completion = await openaiChatDetailed(pool[idx].key, chatModel, messages, 'https://api.groq.com/openai/v1');
+            answerProvider = 'groq';
+            break;
+          } catch (e) { lastErr = e; completion = null; }
+        }
       }
       if (!completion) {
         // Every Groq key failed. Only the master admin / creator falls back to GPT.
