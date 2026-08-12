@@ -120,14 +120,14 @@ export default async function handler(req, res) {
     const question = String(req.body?.question || '').trim().slice(0, 20000);
     if (!question) return res.status(400).json({ error: 'Please type a question.' });
 
-    const { openaiKey, groqKey, chatModel, chatProvider, smartRetrieval, normalUserGptFallback } = await getKeys();
+    const { openaiKey, groqKey, chatModel, chatProvider, smartRetrieval, normalUserGptFallback, adminAutoFallback, fallbackProvider, fallbackModel } = await getKeys();
 
     // Groq key pool for rotation; a single primary key powers the small helper
     // calls (query clarify, calculator extraction, grounding check).
-    const groqPool = chatProvider === 'groq' ? await getGroqKeys() : [];
+    const groqPool = await getGroqKeys();
     const groqPrimary = groqKey || (groqPool[0] && groqPool[0].key) || null;
     // Groq→GPT automatic fallback is allowed ONLY for the master admin / creator.
-    const canFallback = !!openaiKey && (access.role === 'admin' || normalUserGptFallback);
+    const canFallback = access.role === 'admin' ? adminAutoFallback : normalUserGptFallback;
 
     // Run the deterministic calculator over the (possibly mixed) message.
     // - Pure calculation(s) with no other question → answer exactly, here.
@@ -179,7 +179,7 @@ export default async function handler(req, res) {
     // Stop before retrieval when a missing detail would materially change the
     // answer. The client presents these choices in a focused dialog and sends
     // the selected detail back together with the untouched original question.
-    if (clarity?.needsClarification && clarity.clarifyingQuestion && clarity.choices?.length >= 2 && !req.body?.clarification) {
+    if ((clarity?.needsClarification || clarity?.ambiguous) && clarity.clarifyingQuestion && clarity.choices?.length >= 2 && !req.body?.clarification) {
       await logActivity({
         actorRole: access.role, sessionId: access.sessionId, userName: access.name,
         userEmail: access.email, authProvider: access.authProvider,
@@ -213,12 +213,32 @@ export default async function handler(req, res) {
       return res.status(200).json({
         needsClarification: true,
         originalQuestion: question,
-        clarifyingQuestion: 'Which part of the payout process do you mean?',
+        clarifyingQuestion: 'What would you like to know about the Performance Reward?',
         choices: [
-          'When the Account becomes eligible for a Performance Reward',
-          'Processing time after requesting a Performance Reward',
-          'How long the funds take to arrive',
-          'Compare all three'
+          'Eligibility — when the Account is allowed to request it',
+          'Request processing — how long FundedNext takes to approve it',
+          'Funds arrival — how long the selected payment method takes',
+          'Full overview — compare eligibility, processing, and arrival'
+        ]
+      });
+    }
+
+    const accountDependent = !scope && (
+      concepts.groups.includes('cycle') ||
+      /\b(payout|performance reward|trading cycle|profit target|daily loss|maximum loss|drawdown|breach|scaling|minimum trading days)\b/i.test(question)
+    );
+    const asksAcrossModels = /\b(all|each|every|compare|comparison|different models?|by model)\b/i.test(question);
+    if (accountDependent && !asksAcrossModels && !req.body?.clarification) {
+      return res.status(200).json({
+        needsClarification: true,
+        originalQuestion: question,
+        clarifyingQuestion: 'Which Account model should I check?',
+        choices: [
+          'Evaluation FundedNext Account',
+          'Stellar 1-Step FundedNext Account',
+          'Stellar 2-Step FundedNext Account',
+          'Stellar Lite FundedNext Account',
+          'I want a comparison of every Account model'
         ]
       });
     }
@@ -444,6 +464,21 @@ export default async function handler(req, res) {
     let answerProvider = chatProvider;
     let usedFallback = false;
     const isLimit = (e) => /429|rate.?limit|too many requests|quota/i.test(String((e && e.message) || e));
+    const runConfiguredFallback = async () => {
+      if (!canFallback) return null;
+      if (fallbackProvider === 'groq') {
+        const fallbackPool = groqPool.length ? groqPool : (groqPrimary ? [{ key: groqPrimary }] : []);
+        let fallbackError = null;
+        for (const item of fallbackPool) {
+          try { return await openaiChatDetailed(item.key, fallbackModel, messages, 'https://api.groq.com/openai/v1'); }
+          catch (e) { fallbackError = e; }
+        }
+        if (fallbackError) throw fallbackError;
+        throw new Error('No active Groq key is available for fallback.');
+      }
+      if (!openaiKey) throw new Error('No OpenAI key is available for fallback.');
+      return openaiChatDetailed(openaiKey, fallbackModel, messages);
+    };
 
     if (chatProvider === 'groq') {
       // Rotate over the key pool in a random order so concurrent users spread
@@ -465,10 +500,10 @@ export default async function handler(req, res) {
       }
       if (!completion) {
         // Every Groq key failed. Only the master admin / creator falls back to GPT.
-        if (canFallback && openaiKey) {
+        if (canFallback) {
           try {
-            completion = await openaiChatDetailed(openaiKey, 'gpt-4o', messages);
-            answerProvider = 'openai';
+            completion = await runConfiguredFallback();
+            answerProvider = fallbackProvider;
             usedFallback = true;
           } catch (e) { lastErr = e; }
         }
@@ -489,7 +524,14 @@ export default async function handler(req, res) {
         }
       }
     } else {
-      completion = await openaiChatDetailed(openaiKey, chatModel, messages);
+      try {
+        completion = await openaiChatDetailed(openaiKey, chatModel, messages);
+      } catch (primaryError) {
+        if (!canFallback) throw primaryError;
+        completion = await runConfiguredFallback();
+        answerProvider = fallbackProvider;
+        usedFallback = true;
+      }
     }
 
     const raw = completion.content;
@@ -581,7 +623,7 @@ export default async function handler(req, res) {
     if (smartRetrieval && answer !== SAFE_UNCONFIRMED && !usedCalculator) {
       const check = await verifyGrounding({
         question: clearQuestion || question, answer, context,
-        provider: answerProvider, model: answerProvider === 'openai' ? 'gpt-4o' : chatModel, openaiKey, groqKey: groqPrimary
+        provider: answerProvider, model: usedFallback ? fallbackModel : chatModel, openaiKey, groqKey: groqPrimary
       });
       if (check) {
         groundingScore = check.score;
@@ -613,7 +655,7 @@ export default async function handler(req, res) {
       questionWordCount: wordCount(question),
       eventType: 'query',
       provider: answerProvider,
-      model: answerProvider === 'openai' && usedFallback ? 'gpt-4o' : chatModel,
+      model: usedFallback ? fallbackModel : chatModel,
       inputTokens,
       outputTokens,
       estimatedCost: estimateCost(answerProvider, chatModel, inputTokens, outputTokens),
