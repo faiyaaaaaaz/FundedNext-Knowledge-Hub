@@ -166,6 +166,8 @@ export default function Home() {
   const [loginError, setLoginError] = useState('');
   const [loggingIn, setLoggingIn] = useState(false);
   const [theme, setTheme] = useState('light');
+  const [clarification, setClarification] = useState(null);
+  const [clarificationOther, setClarificationOther] = useState('');
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -269,18 +271,23 @@ export default function Home() {
     setTheme(next); localStorage.setItem('theme', next); document.documentElement.setAttribute('data-theme', next);
   }
 
-  async function send(question = input.trim()) {
+  async function send(question = input.trim(), clarificationAnswer = '', showUser = true) {
     const value = String(question).trim();
     if (!value || loading) return;
     const questionId = `${Date.now()}-${Math.random()}`;
-    setMessages((current) => [...current, { role: 'user', content: value, questionId }]);
+    if (showUser) setMessages((current) => [...current, { role: 'user', content: value, questionId }]);
     setInput(''); setLoading(true); setThinkingStep(0);
     thinkingRef.current = setInterval(() => setThinkingStep((current) => Math.min(current + 1, THINKING_STEPS.length - 1)), 1300);
     try {
-      const response = await fetch('/api/search', { method: 'POST', headers: headers(session, true), body: JSON.stringify({ question: value }) });
+      const response = await fetch('/api/search', { method: 'POST', headers: headers(session, true), body: JSON.stringify({ question: value, clarification: clarificationAnswer || undefined }) });
       const data = await response.json();
       if (response.status === 401) { logout(); throw new Error('Your session ended. Please sign in again.'); }
       if (!response.ok) throw new Error(data.error || 'The assistant could not answer.');
+      if (data.needsClarification) {
+        setClarification({ originalQuestion: data.originalQuestion || value, question: data.clarifyingQuestion, choices: data.choices || [] });
+        setClarificationOther('');
+        return;
+      }
       setMessages((current) => [...current, {
         role: 'assistant', question: value, questionId, content: data.answer,
         sources: data.sources || [], segments: data.segments || null,
@@ -291,6 +298,15 @@ export default function Home() {
     } catch (error) {
       setMessages((current) => [...current, { role: 'assistant', question: value, questionId, content: error.message, sources: [], error: true }]);
     } finally { clearInterval(thinkingRef.current); setLoading(false); loadStats(); }
+  }
+
+  function answerClarification(answer) {
+    const choice = String(answer || '').trim();
+    if (!clarification || !choice || loading) return;
+    const original = clarification.originalQuestion;
+    setMessages((current) => [...current, { role: 'user', content: `Clarification: ${choice}`, clarification: true }]);
+    setClarification(null); setClarificationOther('');
+    send(`${original}\n\nUser clarification: ${choice}`, choice, false);
   }
 
   async function copyAnswer(index, text) {
@@ -406,6 +422,7 @@ export default function Home() {
       </div>
 
       {disputeIndex !== null && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDisputeIndex(null)}><div className="modal-card"><div className="modal-icon">⚑</div><h2>Dispute this answer?</h2><p>Explain exactly what appears incorrect or incomplete. Your reason is required and will be reviewed by an Admin.</p><label htmlFor="dispute-reason">Reason for dispute</label><textarea id="dispute-reason" value={disputeReason} onChange={(event) => setDisputeReason(event.target.value)} placeholder="Example: The Performance Reward cycle is outdated for the Stellar Instant Account…" autoFocus />{disputeError && <div className="inline-error">{disputeError}</div>}<div className="modal-actions"><button className="btn btn-secondary" onClick={() => setDisputeIndex(null)}>Cancel</button><button className="btn btn-danger" onClick={submitDispute} disabled={submittingDispute}>{submittingDispute ? 'Submitting…' : 'Submit dispute'}</button></div></div></div>}
+      {clarification && <div className="clarify-backdrop" role="presentation"><section className="clarify-dialog" role="dialog" aria-modal="true" aria-labelledby="clarify-title"><div className="clarify-icon">?</div><span className="eyebrow">One quick clarification</span><h2 id="clarify-title">{clarification.question}</h2><p>This detail changes which FAQ rule applies. Choose the closest answer so I can give you a reliable response.</p><div className="clarify-choices">{clarification.choices.map((choice) => <button key={choice} onClick={() => answerClarification(choice)}>{choice}<span>→</span></button>)}</div><div className="clarify-other"><label htmlFor="clarify-other">Or type another answer</label><div><input id="clarify-other" value={clarificationOther} onChange={(e) => setClarificationOther(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && answerClarification(clarificationOther)} placeholder="Add the missing detail…" autoFocus /><button className="btn btn-primary" disabled={!clarificationOther.trim()} onClick={() => answerClarification(clarificationOther)}>Continue</button></div></div><button className="clarify-cancel" onClick={() => { setClarification(null); setClarificationOther(''); }}>Cancel</button></section></div>}
     </main>
   );
 }
