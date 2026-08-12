@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import Link from 'next/link';
 
-const OPENAI_MODELS = ['gpt-5.6-luna', 'gpt-5.6', 'gpt-5.5', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4o'];
+const OPENAI_MODELS = ['gpt-4o', 'gpt-4o-mini', 'o3', 'o3-mini'];
 const GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.6-27b'];
 const EMPTY_TERM = { category: 'Account Type', rule_type: 'exact', match_term: '', required_term: '', notes: '', active: true };
 const ACTIVITY_PAGE_SIZE = 12;
@@ -209,7 +209,7 @@ export default function Admin() {
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [provider, setProvider] = useState('groq');
-  const [model, setModel] = useState('openai/gpt-oss-120b');
+  const [model, setModel] = useState('gpt-4o');
   const [customModel, setCustomModel] = useState('');
   const [prompt, setPrompt] = useState('');
   const [intercom, setIntercom] = useState('');
@@ -296,7 +296,7 @@ export default function Admin() {
       if (handleAuthLoss(response)) return;
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not load settings.');
-      setStatus(data); setProvider(data.chatProvider || 'openai'); setModel(data.chatModel || 'gpt-4.1-mini'); setPrompt(data.chatPrompt || '');
+      setStatus(data); setProvider(data.chatProvider || 'openai'); setModel(data.chatModel || 'gpt-4o'); setPrompt(data.chatPrompt || '');
       setAllowedGoogleDomains(data.allowedGoogleDomains || '');
       setSmartRetrieval(data.smartRetrieval !== false);
     } catch (e) { setError(e.message); }
