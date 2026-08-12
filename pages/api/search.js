@@ -120,14 +120,14 @@ export default async function handler(req, res) {
     const question = String(req.body?.question || '').trim().slice(0, 20000);
     if (!question) return res.status(400).json({ error: 'Please type a question.' });
 
-    const { openaiKey, groqKey, chatModel, chatProvider, smartRetrieval } = await getKeys();
+    const { openaiKey, groqKey, chatModel, chatProvider, smartRetrieval, normalUserGptFallback } = await getKeys();
 
     // Groq key pool for rotation; a single primary key powers the small helper
     // calls (query clarify, calculator extraction, grounding check).
     const groqPool = chatProvider === 'groq' ? await getGroqKeys() : [];
     const groqPrimary = groqKey || (groqPool[0] && groqPool[0].key) || null;
     // Groq→GPT automatic fallback is allowed ONLY for the master admin / creator.
-    const canFallback = access.role === 'admin' || access.email === MASTER_GOOGLE_EMAIL;
+    const canFallback = !!openaiKey && (access.role === 'admin' || normalUserGptFallback);
 
     // Run the deterministic calculator over the (possibly mixed) message.
     // - Pure calculation(s) with no other question → answer exactly, here.
@@ -209,6 +209,19 @@ export default async function handler(req, res) {
     const payoutish = meaningGroups.has('payout_timing') || /\b(get paid|getting paid|paid|payout|withdraw)\b/.test(probe);
     // The classic ambiguous case: a payout question that names no specific aspect.
     const payoutUmbrella = payoutish && !hasProcessingQualifier && !hasCycleQualifier && !hasMethodQualifier;
+    if (payoutUmbrella && !req.body?.clarification) {
+      return res.status(200).json({
+        needsClarification: true,
+        originalQuestion: question,
+        clarifyingQuestion: 'Which part of the payout process do you mean?',
+        choices: [
+          'When the Account becomes eligible for a Performance Reward',
+          'Processing time after requesting a Performance Reward',
+          'How long the funds take to arrive',
+          'Compare all three'
+        ]
+      });
+    }
 
     const topicPlan = clarity?.topics?.length ? clarity.topics : [{ question: clearQuestion, queries: clarity?.queries || [] }];
     const isAmbiguous = !!clarity?.ambiguous || distinctMeanings.length >= 2 || payoutUmbrella || topicPlan.length > 1;
@@ -454,7 +467,7 @@ export default async function handler(req, res) {
         // Every Groq key failed. Only the master admin / creator falls back to GPT.
         if (canFallback && openaiKey) {
           try {
-            completion = await openaiChatDetailed(openaiKey, chatModel, messages);
+            completion = await openaiChatDetailed(openaiKey, 'gpt-4o', messages);
             answerProvider = 'openai';
             usedFallback = true;
           } catch (e) { lastErr = e; }
@@ -568,7 +581,7 @@ export default async function handler(req, res) {
     if (smartRetrieval && answer !== SAFE_UNCONFIRMED && !usedCalculator) {
       const check = await verifyGrounding({
         question: clearQuestion || question, answer, context,
-        provider: answerProvider, model: chatModel, openaiKey, groqKey: groqPrimary
+        provider: answerProvider, model: answerProvider === 'openai' ? 'gpt-4o' : chatModel, openaiKey, groqKey: groqPrimary
       });
       if (check) {
         groundingScore = check.score;
@@ -600,7 +613,7 @@ export default async function handler(req, res) {
       questionWordCount: wordCount(question),
       eventType: 'query',
       provider: answerProvider,
-      model: chatModel,
+      model: answerProvider === 'openai' && usedFallback ? 'gpt-4o' : chatModel,
       inputTokens,
       outputTokens,
       estimatedCost: estimateCost(answerProvider, chatModel, inputTokens, outputTokens),
