@@ -726,3 +726,84 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
 }
+/* Essential account controls must remain discoverable without relying on
+   unexplained icons. */
+.app-header .header-actions .icon-btn {
+  width: auto;
+  min-width: 42px;
+  padding: 0 12px;
+  gap: 7px;
+}
+.app-header .header-actions .icon-btn::after {
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: -.01em;
+  white-space: nowrap;
+}
+.app-header .header-actions .icon-btn[aria-label="Change theme"]::after { content: "Appearance"; }
+.app-header .header-actions .icon-btn[aria-label="Sign out"]::after { content: "Sign out"; }
+
+.clarify-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(10, 8, 24, .62);
+  backdrop-filter: blur(8px);
+}
+.clarify-dialog {
+  width: min(560px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 30px;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: var(--panel);
+  box-shadow: 0 30px 90px rgba(15, 10, 40, .28);
+}
+.clarify-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 16px;
+  border-radius: 13px;
+  color: #fff;
+  font-size: 20px;
+  font-weight: 850;
+  background: linear-gradient(135deg, #7c5cff, #9b6dff);
+}
+.clarify-dialog h2 { margin: 8px 0 8px; font-size: 24px; line-height: 1.25; }
+.clarify-dialog > p { margin: 0 0 20px; color: var(--muted); line-height: 1.55; }
+.clarify-choices { display: grid; gap: 9px; }
+.clarify-choices button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 13px 15px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--text);
+  background: var(--surface);
+  text-align: left;
+  font-weight: 700;
+  cursor: pointer;
+}
+.clarify-choices button:hover { border-color: #8d68ff; transform: translateY(-1px); }
+.clarify-choices button span { color: #8d68ff; font-size: 18px; }
+.clarify-other { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
+.clarify-other label { display: block; margin-bottom: 8px; font-size: 12px; font-weight: 750; color: var(--muted); }
+.clarify-other > div { display: flex; gap: 9px; }
+.clarify-other input { flex: 1; min-width: 0; }
+.clarify-cancel { display: block; margin: 16px auto 0; border: 0; color: var(--muted); background: transparent; cursor: pointer; }
+
+@media (max-width: 720px) {
+  .app-header .user-identity { display: none; }
+  .app-header .header-actions .icon-btn::after { display: inline; }
+  .clarify-backdrop { padding: 12px; align-items: end; }
+  .clarify-dialog { padding: 22px; border-radius: 20px 20px 12px 12px; }
+  .clarify-other > div { flex-direction: column; }
+}
