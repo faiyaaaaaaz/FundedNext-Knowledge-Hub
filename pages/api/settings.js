@@ -20,8 +20,8 @@ export default async function handler(req, res) {
 
     if (req.method === 'POST') {
       const body = req.body || {};
-      const { intercomToken, openaiKey, groqKey, chatModel, chatProvider, chatPrompt, allowedGoogleDomains, smartRetrieval, normalUserGptFallback } = body;
-      await saveKeys({ intercomToken, openaiKey, groqKey, chatModel, chatProvider, chatPrompt, allowedGoogleDomains, smartRetrieval, normalUserGptFallback });
+      const { intercomToken, openaiKey, groqKey, chatModel, chatProvider, chatPrompt, allowedGoogleDomains, smartRetrieval, normalUserGptFallback, adminAutoFallback, fallbackProvider, fallbackModel } = body;
+      await saveKeys({ intercomToken, openaiKey, groqKey, chatModel, chatProvider, chatPrompt, allowedGoogleDomains, smartRetrieval, normalUserGptFallback, adminAutoFallback, fallbackProvider, fallbackModel });
       if (body.agentPassword) return res.status(400).json({ error: 'Agent password login is disabled. Agents must use Google.' });
       if (body.logoutAgents) await revokeAgentSessions();
       return res.status(200).json({ ok: true, ...(await fullStatus()) });
