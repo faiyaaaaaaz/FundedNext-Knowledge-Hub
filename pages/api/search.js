@@ -113,6 +113,7 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   const started = Date.now();
   let access;
+  let usedGroqKeyLabel = null;
   try {
     access = await authenticateRequest(req);
     if (!access) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
@@ -225,7 +226,7 @@ export default async function handler(req, res) {
 
     const accountDependent = !scope && (
       concepts.groups.includes('cycle') ||
-      /\b(payout|performance reward|trading cycle|profit target|daily loss|maximum loss|drawdown|breach|scaling|minimum trading days)\b/i.test(question)
+      /\b(payout|performance reward|trading cycle|profit target|daily loss|maximum loss|mll|drawdown|breach|scaling|minimum trading days)\b/i.test(question)
     );
     const asksAcrossModels = /\b(all|each|every|compare|comparison|different models?|by model)\b/i.test(question);
     if (accountDependent && !asksAcrossModels && !req.body?.clarification) {
@@ -238,6 +239,9 @@ export default async function handler(req, res) {
           'Stellar 1-Step FundedNext Account',
           'Stellar 2-Step FundedNext Account',
           'Stellar Lite FundedNext Account',
+          'Stellar Instant FundedNext Account',
+          'Rapid Challenge',
+          'No DLL 1-Step CFD — Model FNL:001',
           'I want a comparison of every Account model'
         ]
       });
@@ -470,7 +474,7 @@ export default async function handler(req, res) {
         const fallbackPool = groqPool.length ? groqPool : (groqPrimary ? [{ key: groqPrimary }] : []);
         let fallbackError = null;
         for (const item of fallbackPool) {
-          try { return await openaiChatDetailed(item.key, fallbackModel, messages, 'https://api.groq.com/openai/v1'); }
+          try { const result = await openaiChatDetailed(item.key, fallbackModel, messages, 'https://api.groq.com/openai/v1'); usedGroqKeyLabel = item.label || `Key ${item.id}`; return result; }
           catch (e) { fallbackError = e; }
         }
         if (fallbackError) throw fallbackError;
@@ -493,6 +497,7 @@ export default async function handler(req, res) {
         for (const idx of order) {
           try {
             completion = await openaiChatDetailed(pool[idx].key, chatModel, messages, 'https://api.groq.com/openai/v1');
+            usedGroqKeyLabel = pool[idx].label || `Key ${pool[idx].id}`;
             answerProvider = 'groq';
             break;
           } catch (e) { lastErr = e; completion = null; }
@@ -514,7 +519,7 @@ export default async function handler(req, res) {
             userName: access.name, userEmail: access.email, authProvider: access.authProvider,
             questionWordCount: wordCount(question), eventType: 'query',
             provider: 'groq', model: chatModel, success: false,
-            metadata: { reason: limited ? 'All Groq keys rate limited' : 'Groq request failed', durationMs: Date.now() - started }
+            metadata: { reason: limited ? 'All Groq keys rate limited' : 'Groq request failed', attemptedGroqKeys: pool.map((item) => item.label || `Key ${item.id}`), durationMs: Date.now() - started }
           });
           return res.status(limited ? 429 : 502).json({
             error: limited
@@ -655,14 +660,14 @@ export default async function handler(req, res) {
       questionWordCount: wordCount(question),
       eventType: 'query',
       provider: answerProvider,
-      model: usedFallback ? fallbackModel : chatModel,
+      model: `${usedFallback ? fallbackModel : chatModel}${usedGroqKeyLabel ? ` · Key: ${usedGroqKeyLabel}` : ''}`,
       inputTokens,
       outputTokens,
       estimatedCost: estimateCost(answerProvider, chatModel, inputTokens, outputTokens),
       metadata: {
         confidence, confidenceLabel, sourceCount: sources.length, scope,
         fallback: usedFallback, grounding: groundingScore, durationMs: Date.now() - started,
-        smart: !!clarity, ambiguous: isAmbiguous,
+        smart: !!clarity, ambiguous: isAmbiguous, groqKeyLabel: usedGroqKeyLabel,
         questionPreview: question.slice(0, 180)
       }
     });
