@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import Link from 'next/link';
+import { getSupabaseBrowser } from '../lib/supabaseBrowser';
 
 const OPENAI_MODELS = ['gpt-4o', 'gpt-4o-mini', 'o3', 'o3-mini'];
 const GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.6-27b'];
@@ -200,7 +201,6 @@ function DateRangeFilter({ from, to, onApply }) {
 export default function Admin() {
   const [session, setSession] = useState('');
   const [role, setRole] = useState('');
-  const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [tab, setTab] = useState('access');
   const [status, setStatus] = useState(null);
@@ -257,6 +257,7 @@ export default function Admin() {
     if (savedSession && savedRole === 'admin') {
       setSession(savedSession); setRole(savedRole); loadSettings(savedSession);
     } else if (savedSession) { setSession(savedSession); setRole(savedRole); }
+    else completeGoogleLogin();
   }, []);
 
   useEffect(() => {
@@ -282,16 +283,27 @@ export default function Admin() {
     return false;
   }
 
-  async function login() {
+  async function completeGoogleLogin() {
+    const client = getSupabaseBrowser();
+    if (!client) return;
     setLoginError('');
     try {
-      const response = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Could not sign in.');
-      if (data.role !== 'admin') throw new Error('This area requires the master password.');
-      localStorage.setItem('appSession', data.token); localStorage.setItem('appRole', data.role);
-      setSession(data.token); setRole(data.role); setPassword(''); loadSettings(data.token);
+      const { data: authData } = await client.auth.getSession();
+      if (!authData.session?.access_token) return;
+      const response = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ googleAccessToken: authData.session.access_token }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not sign in.');
+      if (result.role !== 'admin') throw new Error('Your Google account is not listed in ADMIN_GOOGLE_EMAILS.');
+      localStorage.setItem('appSession', result.token); localStorage.setItem('appRole', result.role);
+      setSession(result.token); setRole(result.role); loadSettings(result.token);
     } catch (e) { setLoginError(e.message); }
+  }
+
+  async function googleLogin() {
+    const client = getSupabaseBrowser();
+    if (!client) return setLoginError('Google sign-in is not configured.');
+    const { error } = await client.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: `${window.location.origin}/admin` } });
+    if (error) setLoginError(error.message);
   }
 
   async function loadSettings(token = session) {
@@ -591,7 +603,7 @@ export default function Admin() {
   }
 
   if (!session || role !== 'admin') return (
-    <main className="login-page"><section className="login-panel admin-login"><Brand /><div className="login-copy"><span className="status-chip">Restricted area</span><h1>Admin access</h1><p>Use the master password to manage quality, access, and integrations.</p></div><div className="login-form"><label>Master password</label><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && login()} placeholder="Enter master password" /><button className="btn btn-primary" onClick={login}>Open Admin Console →</button>{loginError && <div className="inline-error">{loginError}</div>}<Link href="/" className="back-link">← Back to assistant</Link></div></section></main>
+    <main className="login-page"><section className="login-panel admin-login"><Brand /><div className="login-copy"><span className="status-chip">Restricted area</span><h1>Admin access</h1><p>Sign in with an approved nextventures.io Google account.</p></div><div className="login-form"><button className="google-button" onClick={googleLogin}>Continue with Google</button>{loginError && <div className="inline-error">{loginError}</div>}<Link href="/" className="back-link">← Back to assistant</Link></div></section></main>
   );
 
   const navigation = [
@@ -624,9 +636,8 @@ export default function Admin() {
         {notice && <div className="notice success">✓ {notice}</div>}{error && <div className="notice danger">{error}</div>}
 
         {tab === 'access' && <div className="settings-stack">
-          <section className="settings-card"><div className="settings-head"><div><h2>Google sign-in</h2><p>Only Google accounts from these company domains can enter the Agent workspace.</p></div><span className={`state-pill ${status?.googleAuthConfigured ? 'ready' : ''}`}>{status?.googleAuthConfigured ? 'App configured' : 'Vercel setup needed'}</span></div><label>Allowed email domains</label><div className="field-action"><input value={allowedGoogleDomains} onChange={(e) => setAllowedGoogleDomains(e.target.value)} placeholder="fundednext.com, example.com" /><button className="btn btn-primary" disabled={saving} onClick={() => settingsSave({ allowedGoogleDomains }, 'Google access domains saved.')}>Save domains</button></div><p className="field-help">Separate multiple domains with commas.</p></section>
-          <section className="settings-card"><div className="settings-head"><div><h2>Agent access</h2><p>Agents can sign in only with an approved Google account. Shared Agent passwords are permanently disabled.</p></div><span className="state-pill ready">Google only</span></div><div className="permission-table"><div><span>Sign-in method</span><b>Agent</b><b>Admin</b></div><div><span>Approved Google account</span><b>Yes</b><b>Yes</b></div><div><span>Master password</span><b>No</b><b>Yes</b></div></div></section>
-          <section className="settings-card"><div className="settings-head"><div><h2>Permanent Master Admin</h2><p>{status?.masterGoogleEmail || 'faiyaz@nextventures.io'} always receives full Admin access through Google sign-in.</p></div><span className={`state-pill ${status?.masterGoogleRegistered ? 'ready' : ''}`}>{status?.masterGoogleRegistered ? 'Registered' : 'First sign-in required'}</span></div><p className="field-help">The security lock becomes active after this Google account completes its first successful sign-in.</p></section>
+          <section className="settings-card"><div className="settings-head"><div><h2>Google sign-in</h2><p>Access is permanently restricted to nextventures.io Google accounts.</p></div><span className={`state-pill ${status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'ready' : ''}`}>{status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'Configured' : 'Vercel setup needed'}</span></div><div className="permission-table"><div><span>Access rule</span><b>Required value</b><b>Status</b></div><div><span>Allowed domain</span><b>nextventures.io</b><b>Fixed</b></div><div><span>Admin list</span><b>ADMIN_GOOGLE_EMAILS</b><b>{status?.adminGoogleConfigured ? 'Configured' : 'Missing'}</b></div></div></section>
+          <section className="settings-card"><div className="settings-head"><div><h2>Workspace roles</h2><p>Every user must authenticate with Google. Admin rights come only from the Vercel Admin email list.</p></div><span className="state-pill ready">Google only</span></div><div className="permission-table"><div><span>Requirement</span><b>Agent</b><b>Admin</b></div><div><span>@nextventures.io Google account</span><b>Required</b><b>Required</b></div><div><span>Listed in ADMIN_GOOGLE_EMAILS</span><b>No</b><b>Required</b></div></div></section>
           <section className="settings-card danger-card"><div className="settings-head"><div><h2>Sign everyone out</h2><p>Ends every active session across the workspace. All users — agents and admins — will have to sign in with Google again. Your own session will end too.</p></div></div><button className="btn btn-danger" disabled={saving} onClick={signEveryoneOut}>Sign everyone out</button></section>
         </div>}
 
