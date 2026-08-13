@@ -1,14 +1,11 @@
-import { createLoginSession, createGoogleLoginSession, logActivity } from '../../lib/server';
+import { createGoogleLoginSession, logActivity } from '../../lib/server';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   try {
-    const { password, googleAccessToken } = req.body || {};
-    if (!password && !googleAccessToken) return res.status(400).json({ error: 'Choose Google sign-in or enter the Admin password.' });
-    const session = googleAccessToken
-      ? await createGoogleLoginSession(googleAccessToken)
-      : await createLoginSession(password);
-    if (!session) return res.status(401).json({ error: 'That password is not correct.' });
+    const { googleAccessToken } = req.body || {};
+    if (!googleAccessToken) return res.status(400).json({ error: 'Google sign-in is required.' });
+    const session = await createGoogleLoginSession(googleAccessToken);
     await logActivity({
       actorRole: session.role,
       sessionId: session.sessionId,
