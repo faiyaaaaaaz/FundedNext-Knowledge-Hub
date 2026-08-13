@@ -162,7 +162,6 @@ export default function Home() {
   const [session, setSession] = useState('');
   const [role, setRole] = useState('');
   const [identity, setIdentity] = useState({ name: '', email: '' });
-  const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [loggingIn, setLoggingIn] = useState(false);
   const [theme, setTheme] = useState('light');
@@ -217,17 +216,6 @@ export default function Home() {
       if (response.status === 401) return logout();
       if (response.ok) setStats(await response.json());
     } catch {}
-  }
-
-  async function login() {
-    if (!password || loggingIn) return;
-    setLoggingIn(true); setLoginError('');
-    try {
-      const response = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Could not sign in.');
-      storeLogin(data); setPassword('');
-    } catch (error) { setLoginError(error.message); } finally { setLoggingIn(false); }
   }
 
   function storeLogin(data) {
@@ -394,7 +382,7 @@ export default function Home() {
   if (!session) return (
     <main className="login-page"><section className="login-panel"><div className="login-glow" /><Brand />
       <div className="login-copy"><span className="status-chip">Internal knowledge workspace</span><h1>Answers your team can trust.</h1><p>Clear, source-backed support answers for every FundedNext client conversation.</p></div>
-      <div className="login-form"><button className="google-button" onClick={googleLogin} disabled={loggingIn}><GoogleG />{loggingIn ? 'Finishing sign-in…' : 'Continue with Google'}</button><div className="login-divider"><span>Admin access</span></div><label htmlFor="password">Master password</label><input id="password" type="password" value={password} placeholder="Enter the Admin password" onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && login()} /><button className="btn btn-primary" onClick={login} disabled={loggingIn}>{loggingIn ? 'Signing in…' : 'Continue securely'} <span>→</span></button>{loginError && <div className="inline-error">{loginError}</div>}</div>
+      <div className="login-form"><button className="google-button" onClick={googleLogin} disabled={loggingIn}><GoogleG />{loggingIn ? 'Finishing sign-in…' : 'Continue with Google'}</button>{loginError && <div className="inline-error">{loginError}</div>}<p className="field-help" style={{ textAlign: 'center' }}>Only nextventures.io Google accounts are permitted.</p></div>
       <div className="login-foot">For authorized FundedNext team members only</div>
     </section></main>
   );
