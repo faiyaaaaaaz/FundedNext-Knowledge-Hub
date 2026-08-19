@@ -176,8 +176,8 @@ export default async function handler(req, res) {
       });
     }
     const clearQuestion = (clarity?.clear && clarity.clear.length > 3) ? clarity.clear : question;
-    const questionMarks = (question.match(/\?/g) || []).length;
-    const explicitMultiPart = (clarity?.topics?.length || 0) > 1 || questionMarks > 1 ||
+    const clarificationQuestionMarks = (question.match(/\?/g) || []).length;
+    const explicitMultiPart = (clarity?.topics?.length || 0) > 1 || clarificationQuestionMarks > 1 ||
       /\b(?:also|and (?:can|could|do|does|how|what|when|where|why|is|are|will|would)|second(?:ly)?|another question)\b/i.test(question);
     const answerLikeChoice = (choice) => {
       const text = `${choice?.label || ''} ${choice?.description || ''} ${choice?.value || ''}`;
