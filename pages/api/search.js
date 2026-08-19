@@ -176,23 +176,34 @@ export default async function handler(req, res) {
       });
     }
     const clearQuestion = (clarity?.clear && clarity.clear.length > 3) ? clarity.clear : question;
+    const questionMarks = (question.match(/\?/g) || []).length;
+    const explicitMultiPart = (clarity?.topics?.length || 0) > 1 || questionMarks > 1 ||
+      /\b(?:also|and (?:can|could|do|does|how|what|when|where|why|is|are|will|would)|second(?:ly)?|another question)\b/i.test(question);
+    const answerLikeChoice = (choice) => {
+      const text = `${choice?.label || ''} ${choice?.description || ''} ${choice?.value || ''}`;
+      return /(?:\$|\b\d+(?:\.\d+)?%|\byou (?:can|cannot|can't|must|will|are allowed)|\bwill be|\bthe (?:limit|answer|rule) is)/i.test(text);
+    };
+    const safeClarificationChoices = (clarity?.choices || []).filter((choice) =>
+      choice && choice.value && choice.label && !answerLikeChoice(choice)
+    );
 
     // Stop before retrieval when a missing detail would materially change the
     // answer. The client presents these choices in a focused dialog and sends
     // the selected detail back together with the untouched original question.
-    if ((clarity?.needsClarification || clarity?.ambiguous) && clarity.clarifyingQuestion && clarity.choices?.length >= 2 && !req.body?.clarification) {
+    if (clarity?.needsClarification && !explicitMultiPart && clarity.clarifyingQuestion && safeClarificationChoices.length >= 2 && !req.body?.clarification) {
       await logActivity({
         actorRole: access.role, sessionId: access.sessionId, userName: access.name,
         userEmail: access.email, authProvider: access.authProvider,
         questionWordCount: wordCount(question), eventType: 'clarification', provider: 'openai',
         model: 'gpt-4o-mini', success: true,
-        metadata: { choiceCount: clarity.choices.length, durationMs: Date.now() - started }
+        metadata: { choiceCount: safeClarificationChoices.length, durationMs: Date.now() - started }
       });
       return res.status(200).json({
         needsClarification: true,
         originalQuestion: question,
         clarifyingQuestion: clarity.clarifyingQuestion,
-        choices: clarity.choices
+        clarificationReason: clarity.clarificationReason || 'This detail determines which Account rule applies.',
+        choices: safeClarificationChoices
       });
     }
 
@@ -210,16 +221,17 @@ export default async function handler(req, res) {
     const payoutish = meaningGroups.has('payout_timing') || /\b(get paid|getting paid|paid|payout|withdraw)\b/.test(probe);
     // The classic ambiguous case: a payout question that names no specific aspect.
     const payoutUmbrella = payoutish && !hasProcessingQualifier && !hasCycleQualifier && !hasMethodQualifier;
-    if (payoutUmbrella && !req.body?.clarification) {
+    if (payoutUmbrella && !explicitMultiPart && !req.body?.clarification) {
       return res.status(200).json({
         needsClarification: true,
         originalQuestion: question,
-        clarifyingQuestion: 'What would you like to know about the Performance Reward?',
+        clarifyingQuestion: 'What part of the Performance Reward would you like me to explain?',
+        clarificationReason: 'Eligibility, request processing, and funds arrival follow different FAQ rules and timelines.',
         choices: [
-          'Eligibility — when the Account is allowed to request it',
-          'Request processing — how long FundedNext takes to approve it',
-          'Funds arrival — how long the selected payment method takes',
-          'Full overview — compare eligibility, processing, and arrival'
+          { value: 'Eligibility timing', label: 'When I become eligible', description: 'Check when the Account can request a Performance Reward.' },
+          { value: 'Request processing time', label: 'After I submit a request', description: 'Check FundedNext’s request-processing stage.' },
+          { value: 'Funds arrival time', label: 'After the request is processed', description: 'Check arrival time for the selected payout method.' },
+          { value: 'Full overview', label: 'Explain the full timeline', description: 'Compare eligibility, request processing, and funds arrival.' }
         ]
       });
     }
@@ -229,20 +241,21 @@ export default async function handler(req, res) {
       /\b(payout|performance reward|trading cycle|profit target|daily loss|maximum loss|mll|drawdown|breach|scaling|minimum trading days)\b/i.test(question)
     );
     const asksAcrossModels = /\b(all|each|every|compare|comparison|different models?|by model)\b/i.test(question);
-    if (accountDependent && !asksAcrossModels && !req.body?.clarification) {
+    if (accountDependent && !asksAcrossModels && !explicitMultiPart && !req.body?.clarification) {
       return res.status(200).json({
         needsClarification: true,
         originalQuestion: question,
         clarifyingQuestion: 'Which Account model should I check?',
+        clarificationReason: 'Targets, limits, cycles, and breach rules can differ by Account model.',
         choices: [
-          'Evaluation FundedNext Account',
-          'Stellar 1-Step FundedNext Account',
-          'Stellar 2-Step FundedNext Account',
-          'Stellar Lite FundedNext Account',
-          'Stellar Instant FundedNext Account',
-          'Rapid Challenge',
-          'No DLL 1-Step CFD — Model FNL:001',
-          'I want a comparison of every Account model'
+          { value: 'Evaluation FundedNext Account', label: 'Evaluation FundedNext Account', description: 'Use the Evaluation Account rules.' },
+          { value: 'Stellar 1-Step FundedNext Account', label: 'Stellar 1-Step', description: 'Use the Stellar 1-Step rules.' },
+          { value: 'Stellar 2-Step FundedNext Account', label: 'Stellar 2-Step', description: 'Use the Stellar 2-Step rules.' },
+          { value: 'Stellar Lite FundedNext Account', label: 'Stellar Lite', description: 'Use the Stellar Lite rules.' },
+          { value: 'Stellar Instant FundedNext Account', label: 'Stellar Instant', description: 'Use the Stellar Instant rules.' },
+          { value: 'Rapid Challenge', label: 'Rapid Challenge', description: 'Use the Rapid Challenge rules.' },
+          { value: 'No DLL 1-Step CFD — Model FNL:001', label: 'No DLL 1-Step CFD — FNL:001', description: 'Use the FNL:001 model rules.' },
+          { value: 'Compare every Account model', label: 'Compare all models', description: 'Show the differences across Account models.' }
         ]
       });
     }
