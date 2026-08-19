@@ -272,7 +272,7 @@ export default function Home() {
       if (response.status === 401) { logout(); throw new Error('Your session ended. Please sign in again.'); }
       if (!response.ok) throw new Error(data.error || 'The assistant could not answer.');
       if (data.needsClarification) {
-        setClarification({ originalQuestion: data.originalQuestion || value, question: data.clarifyingQuestion, choices: data.choices || [] });
+        setClarification({ originalQuestion: data.originalQuestion || value, question: data.clarifyingQuestion, reason: data.clarificationReason, choices: data.choices || [] });
         setClarificationOther('');
         return;
       }
@@ -289,7 +289,7 @@ export default function Home() {
   }
 
   function answerClarification(answer) {
-    const choice = String(answer || '').trim();
+    const choice = String(answer?.value || answer || '').trim();
     if (!clarification || !choice || loading) return;
     const original = clarification.originalQuestion;
     setMessages((current) => [...current, { role: 'user', content: `Clarification: ${choice}`, clarification: true }]);
@@ -337,10 +337,14 @@ export default function Home() {
           break;
         }
         const controller = new AbortController(); abortRef.current = controller;
-        const timeout = setTimeout(() => controller.abort(), 90000);
+        const timeout = setTimeout(() => controller.abort(), 45000);
+        const slowNotice = setTimeout(() => setSyncState((current) => ({
+          headline: 'Intercom is responding slowly — still working',
+          details: [...current.details.slice(0, 2), 'If this request times out, the same saved step will retry automatically']
+        })), 15000);
         try {
           const response = await fetch('/api/sync', { method: 'POST', headers: headers(session, true), body: '{}', signal: controller.signal });
-          clearTimeout(timeout);
+          clearTimeout(timeout); clearTimeout(slowNotice);
           const data = await response.json();
           if (response.status === 401) { logout(); break; }
           if (!response.ok) throw new Error(data.error || `Server ${response.status}`);
@@ -366,12 +370,12 @@ export default function Home() {
             details: detail
           });
           if (data.done) break;
-        } catch {
-          clearTimeout(timeout); if (cancelRef.current) continue;
+        } catch (error) {
+          clearTimeout(timeout); clearTimeout(slowNotice); if (cancelRef.current) continue;
           failures++;
-          if (failures > 8) { setSyncState({ headline: 'Sync paused after repeated connection issues', details: ['Your completed progress is safe', 'Press Check for updates to resume where it stopped'] }); break; }
-          setSyncState((current) => ({ headline: `Reconnecting automatically · attempt ${failures} of 8`, details: current.details }));
-          await new Promise((resolve) => setTimeout(resolve, 2500));
+          if (failures > 3) { setSyncState({ headline: 'Sync paused after repeated connection issues', details: ['Your completed progress is safe', 'Press Check for updates to resume where it stopped', error?.name === 'AbortError' ? 'Intercom did not respond within 45 seconds' : (error?.message || 'Temporary connection error')] }); break; }
+          setSyncState({ headline: `Retrying the saved step · attempt ${failures} of 3`, details: ['Completed progress is safe', error?.name === 'AbortError' ? 'The last request exceeded 45 seconds' : (error?.message || 'Temporary connection error'), 'Trying again in a moment'] });
+          await new Promise((resolve) => setTimeout(resolve, 1500 * failures));
         }
       }
     } finally {
@@ -401,7 +405,7 @@ export default function Home() {
               ? <div className="message user-message" key={index}><div className="message-label">You</div><div className="user-bubble">{message.content}</div></div>
               : <div className="message assistant-message" key={index}><div className="bot-avatar"><Logo /></div><div className={`assistant-bubble${message.error ? ' error-bubble' : ''}`}><div className="answer-head"><span>FundedNext Assistant</span><div>{Number.isFinite(message.confidence) && <span className={`confidence-pill ${confidenceTone(message.confidence)}`}><i style={{ '--score': `${message.confidence * 3.6}deg` }} />{message.confidence}% · {message.confidenceLabel}</span>}<small>{message.fallback ? 'OpenAI backup' : message.provider === 'groq' ? 'Groq' : 'OpenAI'}</small>{message.fallback && <span className="fallback-flash" title="Groq was busy, so this answer switched to GPT">⚡ Switched to GPT</span>}{message.usedCalculator && <span className="calc-tag" title="This answer used trade-calculator logic">⚙ Calculator logic</span>}</div></div>{message.segments?.length ? <AttributedAnswer segments={message.segments} sources={message.sources} /> : <Answer text={message.content} />}<div className="answer-actions"><button onClick={() => copyAnswer(index, message.content)}>{copied === index ? '✓ Copied' : '⧉ Copy answer'}</button><button className={message.disputed ? 'disputed' : ''} disabled={message.disputed || message.error} onClick={() => { setDisputeIndex(index); setDisputeReason(''); setDisputeError(''); }}>{message.disputed ? '✓ Answer disputed' : '⚑ Dispute answer'}</button></div>{message.sources?.length > 0 && <div className="sources"><button className="sources-toggle" onClick={() => setOpenSources((current) => ({ ...current, [index]: !current[index] }))}><span>◆</span>{message.sources.length} verified source{message.sources.length > 1 ? 's' : ''}<b>{openSources[index] ? '−' : '+'}</b></button>{openSources[index] && <div className="sources-list">{message.sources.map((source, sourceIndex) => <a key={sourceIndex} href={source.url || undefined} target="_blank" rel="noreferrer" className={source.kind === 'calculator' ? 'src-calc' : ''}><span className="src-num">{sourceIndex + 1}</span><span className="src-title">{source.title}</span><small>{source.kind === 'calculator' ? '⚙ Calculator' : 'Open article ↗'}</small></a>)}</div>}</div>}</div></div>
             )}
-            {loading && <div className="message assistant-message"><div className="bot-avatar thinking-avatar"><Logo /></div><div className="assistant-bubble thinking-card"><div className="thinking-head"><span className="thinking-orb" /><b>Finding the verified answer</b><span className="thinking-count">{thinkingStep + 1}/{THINKING_STEPS.length}</span></div><div className="thinking-label"><span key={thinkingStep}>{THINKING_STEPS[thinkingStep]}</span></div><div className="thinking-skeleton"><i /><i /><i /></div><div className="thinking-progress">{THINKING_STEPS.map((step, i) => <i key={step} className={i < thinkingStep ? 'active' : i === thinkingStep ? 'active current' : ''} />)}</div></div></div>}
+            {loading && <div className="message assistant-message"><div className="bot-avatar thinking-avatar"><Logo /></div><div className="assistant-bubble thinking-card"><div className="thinking-head"><span className="knowledge-scan" aria-hidden="true"><i /><i /><i /><b /></span><div><b>Building a verified answer</b><small>Scanning and cross-checking the FAQ</small></div><span className="thinking-count">{thinkingStep + 1}/{THINKING_STEPS.length}</span></div><div className="thinking-label"><span key={thinkingStep}>{THINKING_STEPS[thinkingStep]}</span></div><div className="thinking-skeleton"><i /><i /><i /></div><div className="thinking-progress">{THINKING_STEPS.map((step, i) => <i key={step} className={i < thinkingStep ? 'active' : i === thinkingStep ? 'active current' : ''} />)}</div></div></div>}
           </div>
           <div className="composer-wrap"><div className="composer"><textarea value={input} placeholder="Ask a support question…" onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } }} /><button onClick={() => send()} disabled={!input.trim() || loading} aria-label="Send">↑</button></div><div className="composer-foot"><div className="composer-note">Review the confidence and verified source before sending the answer.</div><div className="developer-credit"><i />Developed by <span>Faiyaz Ahmed</span></div></div></div>
         </section>
@@ -410,7 +414,7 @@ export default function Home() {
       </div>
 
       {disputeIndex !== null && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDisputeIndex(null)}><div className="modal-card"><div className="modal-icon">⚑</div><h2>Dispute this answer?</h2><p>Explain exactly what appears incorrect or incomplete. Your reason is required and will be reviewed by an Admin.</p><label htmlFor="dispute-reason">Reason for dispute</label><textarea id="dispute-reason" value={disputeReason} onChange={(event) => setDisputeReason(event.target.value)} placeholder="Example: The Performance Reward cycle is outdated for the Stellar Instant Account…" autoFocus />{disputeError && <div className="inline-error">{disputeError}</div>}<div className="modal-actions"><button className="btn btn-secondary" onClick={() => setDisputeIndex(null)}>Cancel</button><button className="btn btn-danger" onClick={submitDispute} disabled={submittingDispute}>{submittingDispute ? 'Submitting…' : 'Submit dispute'}</button></div></div></div>}
-      {clarification && <div className="clarify-backdrop" role="presentation"><section className="clarify-dialog" role="dialog" aria-modal="true" aria-labelledby="clarify-title"><div className="clarify-icon">?</div><span className="eyebrow">One quick clarification</span><h2 id="clarify-title">{clarification.question}</h2><p>This detail changes which FAQ rule applies. Choose the closest answer so I can give you a reliable response.</p><div className="clarify-choices">{clarification.choices.map((choice) => <button key={choice} onClick={() => answerClarification(choice)}>{choice}<span>→</span></button>)}</div><div className="clarify-other"><label htmlFor="clarify-other">Or type another answer</label><div><input id="clarify-other" value={clarificationOther} onChange={(e) => setClarificationOther(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && answerClarification(clarificationOther)} placeholder="Add the missing detail…" autoFocus /><button className="btn btn-primary" disabled={!clarificationOther.trim()} onClick={() => answerClarification(clarificationOther)}>Continue</button></div></div><button className="clarify-cancel" onClick={() => { setClarification(null); setClarificationOther(''); }}>Cancel</button></section></div>}
+      {clarification && <div className="clarify-backdrop" role="presentation"><section className="clarify-dialog" role="dialog" aria-modal="true" aria-labelledby="clarify-title"><div className="clarify-icon">?</div><span className="eyebrow">One detail needed</span><h2 id="clarify-title">{clarification.question}</h2><p>{clarification.reason || 'This detail determines which FAQ rule applies. Select the option that matches the customer’s situation.'}</p><div className="clarify-choices">{clarification.choices.map((choice) => <button key={choice.value || choice} onClick={() => answerClarification(choice)}><span className="clarify-choice-copy"><b>{choice.label || choice}</b>{choice.description && <small>{choice.description}</small>}</span><span className="clarify-arrow">→</span></button>)}</div><div className="clarify-other"><label htmlFor="clarify-other">None of these? Add the exact missing detail</label><div><input id="clarify-other" value={clarificationOther} onChange={(e) => setClarificationOther(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && answerClarification(clarificationOther)} placeholder="Type the customer’s Account model or intent…" autoFocus /><button className="btn btn-primary" disabled={!clarificationOther.trim()} onClick={() => answerClarification(clarificationOther)}>Use this detail</button></div></div><button className="clarify-cancel" onClick={() => { setClarification(null); setClarificationOther(''); }}>Cancel</button></section></div>}
     </main>
   );
 }
