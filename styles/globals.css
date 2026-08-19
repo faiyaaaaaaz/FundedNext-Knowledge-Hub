@@ -307,9 +307,15 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .thinking-avatar { animation: floaty 2.4s ease-in-out infinite; }
 .thinking-card { border-radius: 6px 18px 18px 18px; background: linear-gradient(120deg, var(--surface), color-mix(in srgb, var(--violet-soft) 55%, var(--surface))); }
 .thinking-head { display: flex; align-items: center; gap: 11px; }
-.thinking-orb { width: 26px; height: 26px; flex: 0 0 auto; border-radius: 50%; background: conic-gradient(from 0deg, var(--violet), var(--violet-2), var(--violet-3), var(--violet)); animation: spin 1.6s linear infinite; position: relative; }
-.thinking-orb::after { content: ''; position: absolute; inset: 5px; border-radius: 50%; background: var(--surface); }
+.knowledge-scan { width: 42px; height: 34px; flex: 0 0 auto; position: relative; perspective: 100px; }
+.knowledge-scan > i { position: absolute; left: 5px; width: 30px; height: 21px; border: 1px solid color-mix(in srgb, var(--violet) 52%, var(--line)); border-radius: 6px; background: color-mix(in srgb, var(--violet-soft) 72%, var(--surface)); box-shadow: 0 5px 14px color-mix(in srgb, var(--violet) 18%, transparent); animation: knowledgeCard 1.8s ease-in-out infinite; }
+.knowledge-scan > i:nth-child(1) { top: 0; animation-delay: -.6s; }
+.knowledge-scan > i:nth-child(2) { top: 5px; animation-delay: -.3s; }
+.knowledge-scan > i:nth-child(3) { top: 10px; }
+.knowledge-scan > b { position: absolute; z-index: 4; top: 0; bottom: 0; left: 1px; width: 2px; border-radius: 9px; background: #b997ff; box-shadow: 0 0 8px #9b6dff, 0 0 18px color-mix(in srgb, var(--violet) 70%, transparent); animation: knowledgeBeam 1.55s cubic-bezier(.45,0,.55,1) infinite; }
 .thinking-head b { font: 700 13px/1 var(--display); letter-spacing: -.01em; }
+.thinking-head > div { display: grid; gap: 5px; }
+.thinking-head > div small { color: var(--muted); font-size: 10.5px; }
 .thinking-head .thinking-count { margin-left: auto; color: var(--faint); font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: .06em; }
 .thinking-label { margin: 14px 0 12px; position: relative; height: 18px; }
 .thinking-label span { position: absolute; inset: 0; display: flex; align-items: center; color: var(--violet-ink); font-size: 13px; font-weight: 550; background: linear-gradient(90deg, var(--violet-ink), var(--violet-2), var(--violet-ink)); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; animation: shimmerText 2.4s linear infinite, fade .35s ease; }
@@ -570,6 +576,8 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 @keyframes popIn { from { opacity: 0; transform: translateY(-6px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes stepIn { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes spin { to { transform: rotate(360deg); } }
+@keyframes knowledgeCard { 0%,100% { transform: translateY(0) rotateX(0); opacity: .65; } 50% { transform: translateY(-3px) rotateX(5deg); opacity: 1; } }
+@keyframes knowledgeBeam { 0%,100% { transform: translateX(3px); opacity: .25; } 50% { transform: translateX(36px); opacity: 1; } }
 @keyframes floaty { 50% { transform: translateY(-4px); } }
 @keyframes livePulse { 0%,100% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--success) 22%, transparent); } 50% { box-shadow: 0 0 0 9px color-mix(in srgb, var(--success) 3%, transparent); } }
 @keyframes shimmerText { to { background-position: -200% 0; } }
@@ -816,7 +824,10 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
   cursor: pointer;
 }
 .clarify-choices button:hover { border-color: #8d68ff; transform: translateY(-1px); }
-.clarify-choices button span { color: #8d68ff; font-size: 18px; }
+.clarify-choice-copy { display: grid; gap: 4px; color: var(--text); font-size: inherit; }
+.clarify-choice-copy b { font-size: 13.5px; line-height: 1.3; }
+.clarify-choice-copy small { color: var(--muted); font-size: 11.5px; font-weight: 500; line-height: 1.4; }
+.clarify-choices button .clarify-arrow { flex: 0 0 auto; margin-left: 14px; color: #8d68ff; font-size: 18px; }
 .clarify-other { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
 .clarify-other label { display: block; margin-bottom: 8px; font-size: 12px; font-weight: 750; color: var(--muted); }
 .clarify-other > div { display: flex; gap: 9px; }
