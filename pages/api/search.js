@@ -164,6 +164,9 @@ export default async function handler(req, res) {
 
     const sb = supabaseAdmin();
     const scope = detectScope(question);
+    const directScopedQuestion = !!scope &&
+      /\b(?:can|could|do|does|did|will|would|if|what happens|how much|is there|are there)\b/i.test(question) &&
+      /\b(?:reset|restart|breach|daily loss|maximum loss|mll|drawdown|fee|price|target|cycle|reward|payout|withdraw)\b/i.test(question);
 
     // ---- Query understanding -------------------------------------------------
     // 1) deterministic concept expansion grounded in FundedNext terminology
@@ -190,7 +193,7 @@ export default async function handler(req, res) {
     // Stop before retrieval when a missing detail would materially change the
     // answer. The client presents these choices in a focused dialog and sends
     // the selected detail back together with the untouched original question.
-    if (clarity?.needsClarification && !explicitMultiPart && clarity.clarifyingQuestion && safeClarificationChoices.length >= 2 && !req.body?.clarification) {
+    if (clarity?.needsClarification && !directScopedQuestion && !explicitMultiPart && clarity.clarifyingQuestion && safeClarificationChoices.length >= 2 && !req.body?.clarification) {
       await logActivity({
         actorRole: access.role, sessionId: access.sessionId, userName: access.name,
         userEmail: access.email, authProvider: access.authProvider,
@@ -218,7 +221,9 @@ export default async function handler(req, res) {
     const hasProcessingQualifier = /(how long|how fast|how quickly|processing|processed|receive|received|arrive|arrival|transfer time|24 ?hour|24-hour|brand promise|compensat|initiat)/.test(probe);
     const hasCycleQualifier = /(cycle|how often|frequency|first payout|eligib|request a payout|when can i (?:request|withdraw)|trading days|next payout)/.test(probe);
     const hasMethodQualifier = /(method|usdt|usdc|crypto|bank|rise ?works|network|erc20|trc20|wallet|minimum|maximum|\bfee)/.test(probe);
-    const payoutish = meaningGroups.has('payout_timing') || /\b(get paid|getting paid|paid|payout|withdraw)\b/.test(probe);
+    // Do not infer payout intent from the broad word "pay" or from words such
+    // as payment/payments. Those commonly refer to reset or registration fees.
+    const payoutish = /\b(?:get paid|getting paid|payouts?|performance rewards?|reward share|profit split|withdraw|withdrawal|cash ?out)\b/.test(probe);
     // The classic ambiguous case: a payout question that names no specific aspect.
     const payoutUmbrella = payoutish && !hasProcessingQualifier && !hasCycleQualifier && !hasMethodQualifier;
     if (payoutUmbrella && !explicitMultiPart && !req.body?.clarification) {
