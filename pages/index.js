@@ -327,8 +327,9 @@ export default function Home() {
   async function checkUpdates() {
     setSyncing(true); setSyncOpen(true); cancelRef.current = false; setElapsed(0);
     const started = Date.now();
-    let processed = 0, chunks = 0, batches = 0, failures = 0;
-    setSyncState({ headline: 'Preparing knowledge sync', details: ['Connecting securely to Intercom', 'Loading your stored knowledge base'] });
+    let processed = 0, chunks = 0, batches = 0, failures = 0, changedDetectionPasses = 0;
+    const clock = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    setSyncState({ headline: 'Inspecting the saved sync queue', details: [`Started at ${clock()}`, 'No article comparison has run yet'] });
     timerRef.current = setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
     try {
       for (;;) {
@@ -336,48 +337,90 @@ export default function Home() {
           setSyncState((current) => ({ headline: 'Sync paused — progress saved', details: [...current.details, 'You can resume any time with Check for updates'] }));
           break;
         }
+        const statusResponse = await fetch('/api/sync', { method: 'POST', headers: headers(session, true), body: JSON.stringify({ action: 'status' }) });
+        const status = await statusResponse.json();
+        if (statusResponse.status === 401) { logout(); break; }
+        if (!statusResponse.ok) throw new Error(status.error || 'Could not inspect the sync queue.');
+        const activePhase = status.phase;
+        setSyncState(activePhase === 'detecting' ? {
+          headline: 'Comparing Intercom with the saved knowledge base',
+          details: [
+            `Comparison started at ${clock()}`,
+            'Saved queue confirmed empty',
+            'Fetching every published article and comparing its ID and content fingerprint'
+          ]
+        } : {
+          headline: `Indexing ${status.queued} previously detected article change${status.queued === 1 ? '' : 's'}`,
+          details: [
+            `Batch started at ${clock()}`,
+            `${status.queued} article${status.queued === 1 ? '' : 's'} already waiting in the saved queue`,
+            'Creating searchable sections and embeddings for this batch'
+          ]
+        });
+
         const controller = new AbortController(); abortRef.current = controller;
-        const timeout = setTimeout(() => controller.abort(), 45000);
-        const slowNotice = setTimeout(() => setSyncState((current) => ({
-          headline: 'Intercom is responding slowly — still working',
-          details: [...current.details.slice(0, 2), 'If this request times out, the same saved step will retry automatically']
+        const timeout = setTimeout(() => controller.abort(), 55000);
+        const progressNotice = setTimeout(() => setSyncState((current) => ({
+          headline: activePhase === 'detecting' ? 'Comparison is still scanning all article pages' : 'This indexing batch is still being processed',
+          details: [...current.details.slice(0, 3), `No result has returned yet · ${clock()}`]
         })), 15000);
         try {
           const response = await fetch('/api/sync', { method: 'POST', headers: headers(session, true), body: '{}', signal: controller.signal });
-          clearTimeout(timeout); clearTimeout(slowNotice);
+          clearTimeout(timeout); clearTimeout(progressNotice);
           const data = await response.json();
           if (response.status === 401) { logout(); break; }
           if (!response.ok) throw new Error(data.error || `Server ${response.status}`);
           failures = 0; processed += data.processed || 0; chunks += data.chunkCount || 0; batches += data.embeddingBatches || 0;
+          loadStats();
           const detail = data.phase === 'detecting'
             ? [
-                `Scanned ${data.scanned || 0} published articles in Intercom`,
-                `${data.changedFound || 0} new or updated since the last sync`,
-                'Safety check passed — nothing will be wrongly removed'
+                `Comparison completed at ${clock()}`,
+                `${data.scanned || 0} published Intercom articles compared`,
+                `New articles: ${data.newFound || 0} · Changed existing articles: ${data.updatedFound || 0} · Removed articles: ${data.deleted || 0}`,
+                data.comparisonConfirmed ? 'Final verification confirmed zero differences' : `${data.changedFound || 0} total difference${data.changedFound === 1 ? '' : 's'} added to the saved queue`
               ]
             : [
-                `${processed} article${processed === 1 ? '' : 's'} indexed`,
-                `${chunks} searchable section${chunks === 1 ? '' : 's'} created`,
-                `${batches} embedding batch${batches === 1 ? '' : 'es'} completed`,
-                ...(data.sampleTitles?.length ? [`Now processing: ${data.sampleTitles.join(' · ')}`] : [])
+                `Batch completed at ${clock()}`,
+                `${processed} queued article${processed === 1 ? '' : 's'} indexed during this run`,
+                `${chunks} searchable section${chunks === 1 ? '' : 's'} saved · ${batches} embedding batch${batches === 1 ? '' : 'es'} completed`,
+                `${data.remaining || 0} article${data.remaining === 1 ? '' : 's'} remain in the saved queue`,
+                ...(data.sampleTitles?.length ? [`Last completed batch: ${data.sampleTitles.join(' · ')}`] : [])
               ];
+          if (data.phase === 'detecting' && data.changedFound > 0) {
+            changedDetectionPasses++;
+            if (changedDetectionPasses > 1) {
+              setSyncState({ headline: 'Verification stopped: the same run detected another difference set', details: [...detail, 'Nothing is being labelled fully up to date. Review the sync history before retrying.'] });
+              break;
+            }
+          }
           setSyncState({
             headline: data.done
-              ? 'Knowledge base is fully up to date'
+              ? 'Verified up to date — zero differences found'
               : data.phase === 'detecting'
-                ? 'Comparing Intercom with your knowledge base'
-                : `Indexing — ${data.remaining} article${data.remaining === 1 ? '' : 's'} remaining`,
+                ? `${data.changedFound || 0} difference${data.changedFound === 1 ? '' : 's'} detected and queued`
+                : data.verificationRequired
+                  ? 'Indexing finished — starting final verification'
+                  : `Indexing saved changes — ${data.remaining} article${data.remaining === 1 ? '' : 's'} remaining`,
             details: detail
           });
           if (data.done) break;
         } catch (error) {
-          clearTimeout(timeout); clearTimeout(slowNotice); if (cancelRef.current) continue;
+          clearTimeout(timeout); clearTimeout(progressNotice); if (cancelRef.current) continue;
+          // Aborting the browser request does not guarantee the serverless
+          // function stopped. Never launch a duplicate indexing request while
+          // the first one may still be committing its batch.
+          if (error?.name === 'AbortError') {
+            setSyncState({ headline: 'Stopped waiting without starting a duplicate request', details: ['The request did not return within 55 seconds', 'The server may still finish the current saved batch', 'Wait one minute, then press Check for updates to inspect the real queue state'] });
+            break;
+          }
           failures++;
-          if (failures > 3) { setSyncState({ headline: 'Sync paused after repeated connection issues', details: ['Your completed progress is safe', 'Press Check for updates to resume where it stopped', error?.name === 'AbortError' ? 'Intercom did not respond within 45 seconds' : (error?.message || 'Temporary connection error')] }); break; }
-          setSyncState({ headline: `Retrying the saved step · attempt ${failures} of 3`, details: ['Completed progress is safe', error?.name === 'AbortError' ? 'The last request exceeded 45 seconds' : (error?.message || 'Temporary connection error'), 'Trying again in a moment'] });
+          if (failures > 2) { setSyncState({ headline: 'Sync stopped without claiming completion', details: ['Completed batches remain saved', `${activePhase === 'detecting' ? 'Comparison' : 'Indexing'} failed twice`, error?.message || 'The request failed'] }); break; }
+          setSyncState({ headline: `Retrying ${activePhase === 'detecting' ? 'the comparison' : 'this indexing batch'} · ${failures} of 2`, details: ['Completed batches remain saved', error?.message || 'The request failed', `Retry scheduled at ${clock()}`] });
           await new Promise((resolve) => setTimeout(resolve, 1500 * failures));
         }
       }
+    } catch (error) {
+      setSyncState({ headline: 'Sync stopped before article processing', details: ['No completion claim was recorded', error?.message || 'The saved queue could not be inspected', `Stopped at ${clock()}`] });
     } finally {
       clearInterval(timerRef.current); setSyncing(false); loadStats();
     }
@@ -395,7 +438,7 @@ export default function Home() {
     <main className="app-shell">
       <header className="app-header"><Brand /><div className="header-actions">{identity.name && <div className="user-identity"><b>{identity.name}</b><small>{identity.email}</small></div>}{!identity.name && <span className="role-badge">{role}</span>}<button className="header-action" onClick={toggleTheme} aria-label="Change theme"><span>{theme === 'dark' ? '☀' : '☾'}</span><b>{theme === 'dark' ? 'Light mode' : 'Dark mode'}</b></button>{role === 'admin' && <Link className="btn btn-secondary btn-small" href="/admin">Admin console</Link>}<button className="header-action" onClick={logout} aria-label="Sign out"><span>⏻</span><b>Sign out</b></button></div></header>
 
-      {role === 'admin' && <div className={`sync-console ${syncOpen ? 'expanded' : ''}`}><div className="sync-summary"><div className="sync-headline"><span className={`live-dot ${syncing ? 'working' : ''}`} /><div><b>{syncState.headline}</b><small>{syncing ? `Syncing · ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')} elapsed` : 'Knowledge base ready'}</small></div></div><div className="row"><button className="text-button neutral" onClick={() => setSyncOpen(!syncOpen)}>{syncOpen ? 'Hide details' : 'View details'}</button><button className="btn btn-secondary btn-small" onClick={checkUpdates} disabled={syncing}>{syncing ? 'Syncing…' : 'Check for updates'}</button>{syncing && <button className="text-button" onClick={() => { cancelRef.current = true; abortRef.current?.abort(); }}>Cancel</button>}</div></div>{syncOpen && <div className="sync-details">{syncState.details.map((detail, index) => <div key={index} className={`sync-step ${syncing ? 'pending' : ''}`}><span className="tick">{syncing ? index + 1 : '✓'}</span><span className="detail">{detail}</span></div>)}</div>}</div>}
+      {role === 'admin' && <div className={`sync-console ${syncOpen ? 'expanded' : ''}`}><div className="sync-summary"><div className="sync-headline"><span className={`sync-activity ${syncing ? 'working' : ''}`} aria-hidden="true"><i /><i /><i /></span><div><b>{syncState.headline}</b><small>{syncing ? `Syncing · ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')} elapsed` : 'Knowledge base ready'}</small></div></div><div className="row"><button className="text-button neutral" onClick={() => setSyncOpen(!syncOpen)}>{syncOpen ? 'Hide details' : 'View details'}</button><button className="btn btn-secondary btn-small" onClick={checkUpdates} disabled={syncing}>{syncing ? 'Syncing…' : 'Check for updates'}</button>{syncing && <button className="text-button" onClick={() => { cancelRef.current = true; abortRef.current?.abort(); }}>Cancel</button>}</div></div>{syncOpen && <div className="sync-details">{syncState.details.map((detail, index) => <div key={index} className={`sync-step ${syncing ? 'pending' : ''}`}><span className="tick">{syncing ? index + 1 : '✓'}</span><span className="detail">{detail}</span></div>)}</div>}</div>}
 
       <div className="workspace-grid">
         <section className="assistant-card">
