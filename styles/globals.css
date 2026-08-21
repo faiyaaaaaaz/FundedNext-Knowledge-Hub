@@ -194,7 +194,15 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .sync-console.expanded { box-shadow: var(--shadow); }
 .sync-summary { min-height: 58px; padding: 12px 14px 12px 18px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .sync-headline { min-width: 0; display: flex; align-items: center; gap: 12px; }
-.sync-headline .live-dot { flex: 0 0 auto; }
+.sync-activity { position: relative; width: 34px; height: 28px; flex: 0 0 auto; display: flex; align-items: end; justify-content: center; gap: 3px; padding: 5px 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--violet-soft); overflow: hidden; }
+.sync-activity::after { content: ''; position: absolute; inset: 0; background: linear-gradient(105deg, transparent 15%, color-mix(in srgb, var(--violet) 22%, transparent) 48%, transparent 80%); transform: translateX(-120%); }
+.sync-activity i { width: 4px; height: 7px; border-radius: 4px; background: var(--violet); opacity: .55; }
+.sync-activity i:nth-child(2) { height: 13px; }
+.sync-activity i:nth-child(3) { height: 10px; }
+.sync-activity.working::after { animation: syncSweep 1.4s ease-in-out infinite; }
+.sync-activity.working i { animation: syncBars .9s ease-in-out infinite alternate; }
+.sync-activity.working i:nth-child(2) { animation-delay: -.3s; }
+.sync-activity.working i:nth-child(3) { animation-delay: -.6s; }
 .sync-headline > div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .sync-headline b { font: 700 13px/1.2 var(--display); letter-spacing: -.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sync-headline small { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
@@ -578,6 +586,8 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes knowledgeCard { 0%,100% { transform: translateY(0) rotateX(0); opacity: .65; } 50% { transform: translateY(-3px) rotateX(5deg); opacity: 1; } }
 @keyframes knowledgeBeam { 0%,100% { transform: translateX(3px); opacity: .25; } 50% { transform: translateX(36px); opacity: 1; } }
+@keyframes syncSweep { to { transform: translateX(120%); } }
+@keyframes syncBars { from { transform: scaleY(.55); opacity: .45; } to { transform: scaleY(1.15); opacity: 1; } }
 @keyframes floaty { 50% { transform: translateY(-4px); } }
 @keyframes livePulse { 0%,100% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--success) 22%, transparent); } 50% { box-shadow: 0 0 0 9px color-mix(in srgb, var(--success) 3%, transparent); } }
 @keyframes shimmerText { to { background-position: -200% 0; } }
