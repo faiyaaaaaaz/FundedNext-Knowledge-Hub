@@ -13,6 +13,17 @@ export default async function handler(req, res) {
     if (!access) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
     if (access.role !== 'admin') return res.status(403).json({ error: 'Admin access is required.' });
 
+    if (req.body?.action === 'status') {
+      const sb = supabaseAdmin();
+      const { count, error } = await sb.from('articles').select('*', { count: 'exact', head: true }).eq('needs_index', true);
+      if (error) throw new Error('Could not inspect the sync queue: ' + error.message);
+      return res.status(200).json({
+        phase: (count || 0) > 0 ? 'indexing' : 'detecting',
+        queued: count || 0,
+        checkedAt: new Date().toISOString()
+      });
+    }
+
     const { intercomToken, openaiKey } = await getKeys();
     if (!intercomToken) return res.status(400).json({ error: 'No Intercom key saved yet. Add it in Admin first.' });
     if (!openaiKey) return res.status(400).json({ error: 'No OpenAI key saved yet. Add it in Admin first.' });
