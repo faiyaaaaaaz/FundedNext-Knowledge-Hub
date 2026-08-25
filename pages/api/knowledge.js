@@ -1,6 +1,6 @@
 import {
   authenticateRequest, supabaseAdmin, listKnowledge, saveKnowledgeDoc,
-  deleteKnowledgeDoc, knowledgeStatus, reindexKnowledge, getKeys
+  deleteKnowledgeDoc, knowledgeStatus, reindexKnowledge, getKeys, saveScopeModelOverride, saveArticleScopeOverride
 } from '../../lib/server';
 
 // Admin-only. Manage internal knowledge documents and push them into the
@@ -25,6 +25,14 @@ export default async function handler(req, res) {
         const { openaiKey } = await getKeys();
         const result = await reindexKnowledge(sb, { openaiKey });
         return res.status(200).json({ ok: true, ...result });
+      }
+      if (body.action === 'scope-status') {
+        const catalog = await saveScopeModelOverride(body.slug, { status: body.status, product: body.product, name: body.name }, sb);
+        return res.status(200).json({ ok: true, scopeCatalog: catalog });
+      }
+      if (body.action === 'article-scope') {
+        const catalog = await saveArticleScopeOverride(body.articleId, { product: body.product, model: body.model }, sb);
+        return res.status(200).json({ ok: true, scopeCatalog: catalog });
       }
       const doc = await saveKnowledgeDoc(body);
       return res.status(200).json({ ok: true, doc });
