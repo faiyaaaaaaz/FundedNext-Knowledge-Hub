@@ -3,7 +3,7 @@ import {
   openaiChatDetailed, getBrandingRules, brandingInstructions,
   applyBrandingReplacements, getRelevantSnippets, logActivity,
   expandConcepts, clarifyQuery, correctTypos, runCalculators,
-  getGroqKeys, verifyGrounding, getPublishedScopeCatalog, modelsMentioned
+  getGroqKeys, verifyGrounding, getPublishedScopeCatalog, modelsMentioned, getArticleScopeOverrides
 } from '../../lib/server';
 
 const STOP = new Set([
@@ -164,6 +164,7 @@ export default async function handler(req, res) {
 
     const sb = supabaseAdmin();
     const scopeCatalog = await getPublishedScopeCatalog(sb);
+    const articleScopeOverrides = await getArticleScopeOverrides(sb);
     const selectedProduct = ['cfd', 'futures', 'both'].includes(req.body?.scope?.product) ? req.body.scope.product : 'cfd';
     const selectedModelSlug = String(req.body?.scope?.model || 'all');
     const selectedModel = selectedModelSlug === 'all' ? null : scopeCatalog.models.find((item) =>
@@ -396,12 +397,16 @@ export default async function handler(req, res) {
     // eligible only when they include the selected model.
     candidates = candidates.filter((item) => {
       const blob = `${item.article_title || ''}\n${item.content || ''}`;
-      const mentioned = modelsMentioned(blob, scopeCatalog.models);
-      const futuresEvidence = /\bfutures?\b/i.test(blob) || mentioned.some((model) => model.product === 'futures');
-      const cfdEvidence = /\bcfd\b/i.test(blob) || mentioned.some((model) => model.product === 'cfd');
+      const override = articleScopeOverrides[String(item.article_id || '')];
+      const mentioned = override?.model && override.model !== 'all'
+        ? scopeCatalog.models.filter((model) => model.slug === override.model && model.product === override.product)
+        : modelsMentioned(blob, scopeCatalog.models);
+      const futuresEvidence = override ? override.product === 'futures' : (/\bfutures?\b/i.test(blob) || mentioned.some((model) => model.product === 'futures'));
+      const cfdEvidence = override ? override.product === 'cfd' : (/\bcfd\b/i.test(blob) || mentioned.some((model) => model.product === 'cfd'));
       if (selectedProduct === 'cfd' && futuresEvidence && !cfdEvidence) return false;
       if (selectedProduct === 'futures' && !futuresEvidence) return false;
       if (!selectedModel) return true;
+      if (override) return override.model === 'all' || override.model === selectedModel.slug;
       const namedInFamily = mentioned.filter((model) => model.product === selectedModel.product);
       if (!namedInFamily.length) return selectedModel.product === 'futures' ? futuresEvidence : !futuresEvidence;
       return namedInFamily.some((model) => model.slug === selectedModel.slug);
