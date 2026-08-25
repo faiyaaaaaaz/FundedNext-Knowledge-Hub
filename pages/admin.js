@@ -243,6 +243,8 @@ export default function Admin() {
   const [articleScopeDrafts, setArticleScopeDrafts] = useState({});
   const [savingArticleScope, setSavingArticleScope] = useState('');
   const [articleScopeSearch, setArticleScopeSearch] = useState('');
+  const [scopeStatusDrafts, setScopeStatusDrafts] = useState({});
+  const [savingScopeStatus, setSavingScopeStatus] = useState('');
   const [openDoc, setOpenDoc] = useState(null);
   const [docDraft, setDocDraft] = useState(null);
   const [calc, setCalc] = useState(null);
@@ -374,15 +376,18 @@ export default function Admin() {
   }
 
   async function updateScopeStatus(model, status) {
-    clearMessages();
+    clearMessages(); setSavingScopeStatus(model.slug);
     try {
       const response = await fetch('/api/knowledge', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'scope-status', slug: model.slug, status }) });
       if (handleAuthLoss(response)) return;
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not update the model status.');
+      if (data.savedStatus !== status) throw new Error('The saved catalogue status did not match your selection.');
       setKnowledge((current) => ({ ...current, scopeCatalog: data.scopeCatalog }));
+      setScopeStatusDrafts((drafts) => { const next = { ...drafts }; delete next[model.slug]; return next; });
       setNotice(`${model.name} is now marked ${status === 'previous' ? 'not currently live' : status}.`);
     } catch (e) { setError(e.message); }
+    finally { setSavingScopeStatus(''); }
   }
 
   function savedArticleScope(article, parentModel) {
@@ -411,7 +416,8 @@ export default function Admin() {
       const response = await fetch('/api/knowledge', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'article-scope', articleId: article.id, product: draft.product, model: draft.model }) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not save the article scope.');
-      setKnowledge((current) => ({ ...current, scopeCatalog: data.scopeCatalog, articleScopes: (current.articleScopes || []).map((item) => String(item.id) === String(article.id) ? { ...item, product: draft.product, model: draft.model, overridden: true } : item) }));
+      if (data.savedScope?.product !== draft.product || data.savedScope?.model !== draft.model) throw new Error('The saved article scope did not match your selection.');
+      setKnowledge((current) => ({ ...current, scopeCatalog: data.scopeCatalog, articleScopes: (current.articleScopes || []).map((item) => String(item.id) === String(article.id) ? { ...item, product: data.savedScope.product, model: data.savedScope.model, overridden: true } : item) }));
       undoArticleScope(article);
       setNotice(`Saved the scope for “${article.title}”. New searches will use this correction immediately.`);
     } catch (e) { setError(e.message); }
@@ -722,7 +728,7 @@ export default function Admin() {
                 return <div className="scope-catalog-entry" key={model.slug}>
                   <div className="scope-catalog-row"><span>{model.product.toUpperCase()}</span><b>{model.name}{model.adminConfirmed && <small className="admin-confirmed">Admin confirmed</small>}</b><span className={`scope-status-badge ${model.status}`}>{model.status === 'current' ? 'Current' : model.status === 'previous' ? 'Not currently live' : 'Needs review'}</span><button type="button" className="scope-evidence-toggle" onClick={() => setExpandedScope(expanded ? null : model.slug)} aria-expanded={expanded}>{expanded ? 'Hide evidence' : `View ${model.articleCount} article${model.articleCount === 1 ? '' : 's'}`}<i>{expanded ? '−' : '+'}</i></button></div>
                   {expanded && <div className="scope-evidence-panel">
-                    <div className="scope-status-actions"><span>Catalogue status</span><div>{[['current', 'Current'], ['previous', 'Not currently live'], ['review', 'Needs review']].map(([value, label]) => <button type="button" key={value} className={model.status === value ? 'selected' : ''} onClick={() => updateScopeStatus(model, value)}>{label}</button>)}</div></div>
+                    <div className="scope-status-actions"><span>Catalogue status</span><div>{[['current', 'Current'], ['previous', 'Not currently live'], ['review', 'Needs review']].map(([value, label]) => <button type="button" key={value} className={(scopeStatusDrafts[model.slug] || model.status) === value ? 'selected' : ''} onClick={() => setScopeStatusDrafts((drafts) => ({ ...drafts, [model.slug]: value }))}>{label}</button>)}<button type="button" className="status-undo" disabled={!scopeStatusDrafts[model.slug] || savingScopeStatus === model.slug} onClick={() => setScopeStatusDrafts((drafts) => { const next = { ...drafts }; delete next[model.slug]; return next; })}>↶ Undo</button><button type="button" className="status-save" disabled={!scopeStatusDrafts[model.slug] || scopeStatusDrafts[model.slug] === model.status || savingScopeStatus === model.slug} onClick={() => updateScopeStatus(model, scopeStatusDrafts[model.slug])}>{savingScopeStatus === model.slug ? 'Saving…' : 'Save status'}</button></div></div>
                     <div className="scope-evidence-list">{articles.length ? articles.map((article, index) => {
                       const draft = articleScopeDraft(article, model);
                       const saved = savedArticleScope(article, model);
