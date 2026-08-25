@@ -368,6 +368,8 @@ export default function Home() {
         provider: data.answerProvider, fallback: data.usedFallback,
         confidence: data.confidence, confidenceLabel: data.confidenceLabel, confidenceReasons: data.confidenceReasons || [], disputed: false
       }]);
+      setScopeProduct(savedScope.product);
+      setScopeModel(savedScope.model);
     } catch (error) {
       setMessages((current) => [...current, { role: 'assistant', question: value, questionId, content: error.message, sources: [], error: true }]);
     } finally { clearInterval(thinkingRef.current); setLoading(false); loadStats(); }
