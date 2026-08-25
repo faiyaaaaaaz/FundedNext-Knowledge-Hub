@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import Link from 'next/link';
 import { getSupabaseBrowser } from '../lib/supabaseBrowser';
 
@@ -160,8 +161,50 @@ function confidenceTone(score) {
 
 function ConfidenceHealth({ score, label, reasons = [] }) {
   const tone = confidenceTone(score);
-  const explanation = reasons.length ? reasons.map((reason) => `• ${reason.label}`).join('\n') : 'Confidence is based on applicable FAQ evidence and grounding checks.';
-  return <span className={`confidence-health ${tone}`} title={explanation} tabIndex="0" aria-label={`${score}% ${label}. ${explanation}`}><span className="confidence-copy"><b>{score}%</b><small>{label}</small></span><span className="confidence-track"><i style={{ width: `${Math.max(3, score)}%` }} /></span><span className="confidence-info">i</span></span>;
+  const items = reasons.length ? reasons : [{ label: 'Based on applicable FAQ evidence and grounding checks', impact: 'neutral' }];
+  return <span className={`confidence-health ${tone}`} tabIndex="0" aria-label={`${score}% ${label}`}><span className="confidence-copy"><b>{score}%</b><small>{label}</small></span><span className="confidence-track"><i style={{ width: `${Math.max(3, score)}%` }} /></span><span className="confidence-info">i</span><span className="confidence-tooltip" role="tooltip"><b>Why this confidence?</b>{items.map((reason, index) => <span key={`${reason.code || 'reason'}-${index}`}><i className={reason.impact || 'neutral'} />{reason.label}</span>)}</span></span>;
+}
+
+function ScopeSelect({ label, value, groups, onChange, className = '' }) {
+  const [open, setOpen] = useState(false);
+  const [placement, setPlacement] = useState(null);
+  const triggerRef = useRef(null);
+  const menuRef = useRef(null);
+  const options = groups.flatMap((group) => group.options);
+  const selected = options.find((option) => option.value === value) || options[0];
+
+  useEffect(() => {
+    if (!open) return;
+    const update = () => {
+      const rect = triggerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const margin = 10;
+      const below = window.innerHeight - rect.bottom - margin;
+      const above = rect.top - margin;
+      const placeAbove = below < 240 && above > below;
+      const maxHeight = Math.max(160, Math.min(420, (placeAbove ? above : below) - 8));
+      setPlacement({
+        position: 'fixed', left: Math.max(margin, Math.min(rect.left, window.innerWidth - rect.width - margin)),
+        width: rect.width, maxHeight,
+        ...(placeAbove ? { bottom: window.innerHeight - rect.top + 7 } : { top: Math.min(window.innerHeight - margin, rect.bottom + 7) }),
+        zIndex: 10000
+      });
+    };
+    const outside = (event) => {
+      if (!triggerRef.current?.contains(event.target) && !menuRef.current?.contains(event.target)) setOpen(false);
+    };
+    update();
+    window.addEventListener('scroll', update, true);
+    window.addEventListener('resize', update);
+    document.addEventListener('pointerdown', outside);
+    return () => {
+      window.removeEventListener('scroll', update, true);
+      window.removeEventListener('resize', update);
+      document.removeEventListener('pointerdown', outside);
+    };
+  }, [open]);
+
+  return <div className={`app-select ${className}`}><span className="app-select-label">{label}</span><button ref={triggerRef} type="button" className={open ? 'open' : ''} onClick={() => setOpen((current) => !current)} aria-haspopup="listbox" aria-expanded={open}><span><b>{selected?.label}</b>{selected?.description && <small>{selected.description}</small>}</span><i>⌄</i></button>{open && placement && createPortal(<div ref={menuRef} className="app-select-menu" style={placement} role="listbox">{groups.map((group) => <div className="app-select-group" key={group.label || 'options'}>{group.label && <div className="app-select-group-label">{group.label}</div>}{group.options.map((option) => <button type="button" role="option" aria-selected={option.value === value} className={option.value === value ? 'selected' : ''} key={option.value} onClick={() => { onChange(option.value); setOpen(false); }}><span><b>{option.label}</b>{option.description && <small>{option.description}</small>}</span>{option.badge && <em className={option.badgeTone || ''}>{option.badge}</em>}{option.value === value && <i>✓</i>}</button>)}</div>)}</div>, document.body)}</div>;
 }
 
 export default function Home() {
@@ -174,6 +217,7 @@ export default function Home() {
   const [scopeCatalog, setScopeCatalog] = useState({ products: [], models: [] });
   const [scopeProduct, setScopeProduct] = useState('cfd');
   const [scopeModel, setScopeModel] = useState('all');
+  const [savedScope, setSavedScope] = useState({ product: 'cfd', model: 'all' });
   const [scopeNotice, setScopeNotice] = useState(null);
   const [clarification, setClarification] = useState(null);
   const [clarificationOther, setClarificationOther] = useState('');
@@ -237,14 +281,20 @@ export default function Home() {
       setScopeCatalog(data.catalog || { products: [], models: [] });
       setScopeProduct(data.preference?.product || 'cfd');
       setScopeModel(data.selectedExists === false ? 'all' : (data.preference?.model || 'all'));
+      setSavedScope({ product: data.preference?.product || 'cfd', model: data.selectedExists === false ? 'all' : (data.preference?.model || 'all') });
       if (data.selectedExists === false) setScopeNotice({ title: 'Your previous Account model is no longer verified', text: 'The selection was reset to all models. Choose a verified model before asking a model-specific question.' });
     } catch {}
   }
 
   async function saveScope(product, model = 'all') {
     setScopeProduct(product); setScopeModel(model); setScopeNotice(null);
+  }
+
+  async function saveDefaultScope() {
     try {
-      await fetch('/api/scopes', { method: 'POST', headers: headers(session, true), body: JSON.stringify({ product, model }) });
+      const response = await fetch('/api/scopes', { method: 'POST', headers: headers(session, true), body: JSON.stringify({ product: scopeProduct, model: scopeModel }) });
+      if (!response.ok) throw new Error('Could not save this default.');
+      setSavedScope({ product: scopeProduct, model: scopeModel });
     } catch {}
   }
 
@@ -476,6 +526,17 @@ export default function Home() {
   const previousModels = availableModels.filter((model) => model.status === 'previous');
   const selectedModelName = availableModels.find((model) => model.slug === scopeModel)?.name ||
     (scopeProduct === 'both' ? 'All products' : `All ${scopeProduct.toUpperCase()} models`);
+  const productGroups = [{ label: 'Knowledge family', options: [
+    { value: 'cfd', label: 'CFD', description: 'CFD Accounts and policies' },
+    { value: 'futures', label: 'Futures', description: 'Futures models and policies' },
+    { value: 'both', label: 'Both', description: 'Search both product families' }
+  ] }];
+  const modelGroups = [
+    { label: 'Scope', options: [{ value: 'all', label: scopeProduct === 'both' ? 'All products and models' : `All ${scopeProduct.toUpperCase()} models`, description: 'Use every verified model in this family' }] },
+    ...(currentModels.length ? [{ label: 'Current models', options: currentModels.map((model) => ({ value: model.slug, label: model.name, description: `${model.articleCount || 0} matching FAQ article${model.articleCount === 1 ? '' : 's'}`, badge: 'Current', badgeTone: 'current' })) }] : []),
+    ...(previousModels.length ? [{ label: 'Previous models', options: previousModels.map((model) => ({ value: model.slug, label: model.name, description: `${model.articleCount || 0} saved FAQ article${model.articleCount === 1 ? '' : 's'}`, badge: 'Not currently live', badgeTone: 'previous' })) }] : [])
+  ];
+  const scopeIsDefault = savedScope.product === scopeProduct && savedScope.model === scopeModel;
 
   return (
     <main className="app-shell">
@@ -494,7 +555,7 @@ export default function Home() {
             {loading && <div className="message assistant-message"><div className="bot-avatar thinking-avatar"><Logo /></div><div className="assistant-bubble thinking-card"><div className="thinking-head"><span className="knowledge-scan" aria-hidden="true"><i /><i /><i /><b /></span><div><b>Building a verified answer</b><small>Locked to {scopeProduct.toUpperCase()} · {selectedModelName}</small></div><span className="thinking-count">{thinkingStep + 1}/{THINKING_STEPS.length}</span></div><div className="thinking-label"><span key={thinkingStep}>{THINKING_STEPS[thinkingStep]}</span></div><div className="thinking-skeleton"><i /><i /><i /></div><div className="thinking-progress">{THINKING_STEPS.map((step, i) => <i key={step} className={i < thinkingStep ? 'active' : i === thinkingStep ? 'active current' : ''} />)}</div></div></div>}
           </div>
           <div className="composer-wrap">
-            <div className="scope-bar" aria-label="Knowledge scope"><div className="scope-heading"><span>Answer scope</span><small>The assistant cannot search outside this selection</small></div><label><span>Product</span><select value={scopeProduct} onChange={(event) => saveScope(event.target.value, 'all')}><option value="cfd">CFD</option><option value="futures">Futures</option><option value="both">Both</option></select></label><label className="scope-model"><span>Account model</span><select value={scopeModel} onChange={(event) => saveScope(scopeProduct, event.target.value)}><option value="all">{scopeProduct === 'both' ? 'All products and models' : `All ${scopeProduct.toUpperCase()} models`}</option>{currentModels.length > 0 && <optgroup label="Current models">{currentModels.map((model) => <option key={model.slug} value={model.slug}>{model.name}</option>)}</optgroup>}{previousModels.length > 0 && <optgroup label="Previous models">{previousModels.map((model) => <option key={model.slug} value={model.slug}>{model.name} — Not currently live</option>)}</optgroup>}</select></label></div>
+            <div className="scope-bar" aria-label="Knowledge scope"><div className="scope-heading"><span>Answer scope</span><small>The assistant cannot search outside this selection</small><button type="button" className={`scope-default${scopeIsDefault ? ' saved' : ''}`} disabled={scopeIsDefault} onClick={saveDefaultScope}>{scopeIsDefault ? '✓ My default' : '☆ Set as my default'}</button></div><ScopeSelect label="Product" value={scopeProduct} groups={productGroups} onChange={(next) => saveScope(next, 'all')} /><ScopeSelect label="Account model" value={scopeModel} groups={modelGroups} onChange={(next) => saveScope(scopeProduct, next)} className="scope-model" /></div>
             {scopeNotice && <div className="scope-notice" role="status"><div><b>{scopeNotice.title}</b><span>{scopeNotice.text}</span></div>{scopeModel !== 'all' && <button onClick={() => saveScope(scopeProduct, 'all')}>Search all {scopeProduct.toUpperCase()} models</button>}</div>}
             <div className="composer"><textarea value={input} placeholder={`Ask about ${selectedModelName}…`} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } }} /><button onClick={() => send()} disabled={!input.trim() || loading} aria-label="Send">↑</button></div><div className="composer-foot"><div className="composer-note">Review the confidence and verified source before sending the answer.</div><div className="developer-credit"><i />Developed by <span>Faiyaz Ahmed</span></div></div></div>
         </section>
