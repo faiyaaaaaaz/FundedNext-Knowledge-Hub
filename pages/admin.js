@@ -204,7 +204,7 @@ export default function Admin() {
   const [loginError, setLoginError] = useState('');
   const [tab, setTab] = useState('access');
   const [status, setStatus] = useState(null);
-  const [theme, setTheme] = useState('light');
+  const [theme, setTheme] = useState('dark');
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
@@ -252,7 +252,7 @@ export default function Admin() {
   useEffect(() => {
     const savedSession = localStorage.getItem('appSession') || '';
     const savedRole = localStorage.getItem('appRole') || '';
-    const savedTheme = localStorage.getItem('theme') || 'light';
+    const savedTheme = localStorage.getItem('theme') || 'dark';
     setTheme(savedTheme); document.documentElement.setAttribute('data-theme', savedTheme);
     if (savedSession && savedRole === 'admin') {
       setSession(savedSession); setRole(savedRole); loadSettings(savedSession);
@@ -366,6 +366,18 @@ export default function Admin() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not load knowledge.');
       setKnowledge(data);
+    } catch (e) { setError(e.message); }
+  }
+
+  async function updateScopeStatus(model, status) {
+    clearMessages();
+    try {
+      const response = await fetch('/api/knowledge', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'scope-status', slug: model.slug, status }) });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not update the model status.');
+      setKnowledge((current) => ({ ...current, scopeCatalog: data.scopeCatalog }));
+      setNotice(`${model.name} is now marked ${status === 'previous' ? 'not currently live' : status}.`);
     } catch (e) { setError(e.message); }
   }
 
@@ -663,6 +675,10 @@ export default function Admin() {
         {tab === 'activity' && <div className="settings-stack"><section className="settings-card activity-filters"><div className="settings-head"><div><h2>Filter activity</h2><p>Dates are interpreted in GMT+6.</p></div><DateRangeFilter from={activityFrom} to={activityTo} onApply={applyDateRange} /></div><div className="field-action"><input type="search" value={activityEmail} onChange={(e) => setActivityEmail(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && loadActivity()} placeholder="Search a teammate’s email address" /><div className="row"><button className="btn btn-primary" onClick={() => loadActivity()}>Search</button><button className="btn btn-secondary" onClick={clearActivityFilters}>Clear</button></div></div></section>{activity && <><div className="activity-kpis">{[['Users', activity.summary.users], ['Queries', activity.summary.queries], ['Question words', activity.summary.questionWords.toLocaleString()], ['Input tokens', activity.summary.inputTokens.toLocaleString()], ['Output tokens', activity.summary.outputTokens.toLocaleString()], ['Estimated cost', `$${activity.summary.estimatedCost.toFixed(4)}`]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><section className="settings-card"><div className="settings-head"><div><h2>Activity results</h2><p className="activity-count">{activityLogs.length} event{activityLogs.length === 1 ? '' : 's'} match the current filters.</p></div></div><div className="activity-table detailed"><div><b>Time</b><b>Google user</b><b>Email</b><b>Event</b><b>Words</b><b>Input</b><b>Output</b><b>Model</b><b>Status</b></div>{pageLogs.map((log) => <div key={log.id}><span data-label="Time">{formatDate(log.created_at)}</span><span data-label="User">{log.user_name || (log.actor_role === 'admin' ? 'Master Admin' : 'Legacy Agent')}</span><span data-label="Email" title={log.user_email || ''}>{log.user_email || '—'}</span><span data-label="Event">{log.event_type}</span><span data-label="Words">{log.question_word_count || 0}</span><span data-label="Input">{log.input_tokens || 0}</span><span data-label="Output">{log.output_tokens || 0}</span><span data-label="Model" title={log.model || ''}>{log.provider || '—'}{log.model ? ` · ${log.model}` : ''}</span><span data-label="Status" className={log.success ? 'good' : 'bad'}>{log.success ? 'Success' : 'Failed'}</span></div>)}{!pageLogs.length && <div className="empty-admin">No activity for this filter.</div>}</div>{totalPages > 1 && <div className="pager"><button disabled={activityPage === 1} onClick={() => setActivityPage((p) => Math.max(1, p - 1))}>‹ Prev</button>{pageNumbers.map((p, i) => p === '…' ? <span key={`e${i}`} className="pager-info">…</span> : <button key={p} className={p === activityPage ? 'current' : ''} onClick={() => setActivityPage(p)}>{p}</button>)}<button disabled={activityPage === totalPages} onClick={() => setActivityPage((p) => Math.min(totalPages, p + 1))}>Next ›</button></div>}</section></>}</div>}
 
         {tab === 'knowledge' && <div className="settings-stack">
+          <section className="settings-card"><div className="settings-head"><div><h2>Product and Account catalogue</h2><p>Bird’s-eye view of the scopes detected from the current FAQ library. Previous models remain available to Agents; uncertain new detections stay in review instead of entering the live selector.</p></div><span className="state-pill ready">{knowledge?.scopeCatalog?.models?.length || 0} detected</span></div>
+            <div className="scope-catalog-table"><div><b>Product</b><b>Account model</b><b>Status</b><b>FAQ evidence</b></div>{(knowledge?.scopeCatalog?.models || []).map((model) => <div key={model.slug}><span>{model.product.toUpperCase()}</span><b>{model.name}{model.adminConfirmed && <small className="admin-confirmed">Admin confirmed</small>}</b><select className={`scope-status-select ${model.status}`} value={model.status} onChange={(event) => updateScopeStatus(model, event.target.value)} aria-label={`Status for ${model.name}`}><option value="current">Current</option><option value="previous">Not currently live</option><option value="review">Needs review</option></select><span>{model.articleCount} article{model.articleCount === 1 ? '' : 's'}</span></div>)}</div>
+            <p className="field-help">A new name needs repeated FAQ-title evidence before Agents can select it. One-off candidates remain visible here as “Needs review.” FNL:001 is treated as current.</p>
+          </section>
           <section className="settings-card"><div className="settings-head"><div><h2>Chatbot knowledge</h2><p>Internal knowledge the chatbot can use alongside the Intercom FAQ — for example the trade calculator's formulas, instrument pip values, and account leverage. Turn documents on or off, edit them, then re-index to push changes into the chatbot.</p></div></div>
             <div className="autosync-grid">
               <div className="field-block"><label>Documents</label><b className="autosync-when">{knowledge?.docs?.length || 0} total · {knowledge?.docs?.filter((d) => d.enabled).length || 0} on</b></div>
