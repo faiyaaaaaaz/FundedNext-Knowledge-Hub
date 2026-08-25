@@ -240,6 +240,9 @@ export default function Admin() {
   const [knowledge, setKnowledge] = useState(null);
   const [knowledgeBusy, setKnowledgeBusy] = useState(false);
   const [expandedScope, setExpandedScope] = useState(null);
+  const [articleScopeDrafts, setArticleScopeDrafts] = useState({});
+  const [savingArticleScope, setSavingArticleScope] = useState('');
+  const [articleScopeSearch, setArticleScopeSearch] = useState('');
   const [openDoc, setOpenDoc] = useState(null);
   const [docDraft, setDocDraft] = useState(null);
   const [calc, setCalc] = useState(null);
@@ -380,6 +383,39 @@ export default function Admin() {
       setKnowledge((current) => ({ ...current, scopeCatalog: data.scopeCatalog }));
       setNotice(`${model.name} is now marked ${status === 'previous' ? 'not currently live' : status}.`);
     } catch (e) { setError(e.message); }
+  }
+
+  function savedArticleScope(article, parentModel) {
+    return article.scope || (article.product ? { product: article.product, model: article.model || 'all' } : { product: parentModel.product, model: parentModel.slug });
+  }
+
+  function articleScopeDraft(article, parentModel) {
+    return articleScopeDrafts[String(article.id)] || savedArticleScope(article, parentModel);
+  }
+
+  function changeArticleScope(article, parentModel, changes) {
+    const current = articleScopeDraft(article, parentModel);
+    const next = { ...current, ...changes };
+    if (changes.product && changes.product !== current.product) next.model = 'all';
+    setArticleScopeDrafts((drafts) => ({ ...drafts, [String(article.id)]: next }));
+  }
+
+  function undoArticleScope(article) {
+    setArticleScopeDrafts((drafts) => { const next = { ...drafts }; delete next[String(article.id)]; return next; });
+  }
+
+  async function saveArticleScope(article, parentModel) {
+    const draft = articleScopeDraft(article, parentModel);
+    setSavingArticleScope(String(article.id)); setError(''); setNotice('');
+    try {
+      const response = await fetch('/api/knowledge', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'article-scope', articleId: article.id, product: draft.product, model: draft.model }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not save the article scope.');
+      setKnowledge((current) => ({ ...current, scopeCatalog: data.scopeCatalog, articleScopes: (current.articleScopes || []).map((item) => String(item.id) === String(article.id) ? { ...item, product: draft.product, model: draft.model, overridden: true } : item) }));
+      undoArticleScope(article);
+      setNotice(`Saved the scope for “${article.title}”. New searches will use this correction immediately.`);
+    } catch (e) { setError(e.message); }
+    finally { setSavingArticleScope(''); }
   }
 
   async function saveDoc(payload, success) {
@@ -627,6 +663,7 @@ export default function Admin() {
   const titles = Object.fromEntries(navigation.map(([id,, title]) => [id, title]));
   const models = provider === 'groq' ? GROQ_MODELS : OPENAI_MODELS;
   const filteredTerms = terms.filter((term) => `${term.category} ${term.match_term || ''} ${term.required_term} ${term.notes || ''}`.toLowerCase().includes(termSearch.toLowerCase()));
+  const filteredArticleScopes = (knowledge?.articleScopes || []).filter((article) => `${article.title} ${article.product}`.toLowerCase().includes(articleScopeSearch.toLowerCase())).slice(0, 100);
 
   const activityLogs = activity?.logs || [];
   const totalPages = Math.max(1, Math.ceil(activityLogs.length / ACTIVITY_PAGE_SIZE));
@@ -686,7 +723,13 @@ export default function Admin() {
                   <div className="scope-catalog-row"><span>{model.product.toUpperCase()}</span><b>{model.name}{model.adminConfirmed && <small className="admin-confirmed">Admin confirmed</small>}</b><span className={`scope-status-badge ${model.status}`}>{model.status === 'current' ? 'Current' : model.status === 'previous' ? 'Not currently live' : 'Needs review'}</span><button type="button" className="scope-evidence-toggle" onClick={() => setExpandedScope(expanded ? null : model.slug)} aria-expanded={expanded}>{expanded ? 'Hide evidence' : `View ${model.articleCount} article${model.articleCount === 1 ? '' : 's'}`}<i>{expanded ? '−' : '+'}</i></button></div>
                   {expanded && <div className="scope-evidence-panel">
                     <div className="scope-status-actions"><span>Catalogue status</span><div>{[['current', 'Current'], ['previous', 'Not currently live'], ['review', 'Needs review']].map(([value, label]) => <button type="button" key={value} className={model.status === value ? 'selected' : ''} onClick={() => updateScopeStatus(model, value)}>{label}</button>)}</div></div>
-                    <div className="scope-evidence-list">{articles.length ? articles.map((article, index) => <a key={`${article.id || article.url || index}`} href={article.url || undefined} target={article.url ? '_blank' : undefined} rel={article.url ? 'noreferrer' : undefined}><span>{article.title || 'Untitled FAQ'}</span><em>{article.url ? 'Open article ↗' : 'Stored FAQ'}</em></a>) : <p>No linked article details are available yet. Run a successful knowledge update to rebuild this evidence.</p>}</div>
+                    <div className="scope-evidence-list">{articles.length ? articles.map((article, index) => {
+                      const draft = articleScopeDraft(article, model);
+                      const saved = savedArticleScope(article, model);
+                      const dirty = draft.product !== saved.product || draft.model !== saved.model;
+                      const modelOptions = (knowledge?.scopeCatalog?.models || []).filter((item) => item.product === draft.product && item.status !== 'review');
+                      return <div className="article-scope-card" key={`${article.id || article.url || index}`}><a href={article.url || undefined} target={article.url ? '_blank' : undefined} rel={article.url ? 'noreferrer' : undefined}><span>{article.title || 'Untitled FAQ'}</span><em>{article.url ? 'Open article ↗' : 'Stored FAQ'}</em></a><div className="article-scope-editor"><label>Product<select value={draft.product} onChange={(event) => changeArticleScope(article, model, { product: event.target.value })}><option value="cfd">CFD</option><option value="futures">Futures</option></select></label><label>Availability<select value={draft.model} onChange={(event) => changeArticleScope(article, model, { model: event.target.value })}><option value="all">All {draft.product.toUpperCase()} models (product-wide)</option>{modelOptions.map((item) => <option key={item.slug} value={item.slug}>{item.name}{item.status === 'previous' ? ' — Not currently live' : ''}</option>)}</select></label><div className="article-scope-actions"><button type="button" className="btn-undo" disabled={!dirty || savingArticleScope === String(article.id)} onClick={() => undoArticleScope(article)}>↶ Undo</button><button type="button" className="btn-save-scope" disabled={!dirty || savingArticleScope === String(article.id)} onClick={() => saveArticleScope(article, model)}>{savingArticleScope === String(article.id) ? 'Saving…' : 'Save'}</button></div></div></div>;
+                    }) : <p>No linked article details are available yet. Run a successful knowledge update to rebuild this evidence.</p>}</div>
                     {model.articleCount > articles.length && <small className="scope-evidence-note">Showing the first {articles.length} of {model.articleCount} matching articles.</small>}
                   </div>}
                 </div>;
@@ -694,6 +737,14 @@ export default function Admin() {
             </div>
             <p className="field-help">A new name needs repeated FAQ-title evidence before Agents can select it. One-off candidates remain visible here as “Needs review.” FNL:001 is treated as current.</p>
           </section>
+          <section className="settings-card"><div className="settings-head"><div><h2>Article scope manager</h2><p>Correct the product and Account-model availability for any published FAQ. Edits remain local until that article’s Save button is pressed.</p></div><span className="state-pill ready">{knowledge?.articleScopes?.length || 0} articles</span></div><input className="admin-search" value={articleScopeSearch} onChange={(event) => setArticleScopeSearch(event.target.value)} placeholder="Search every published article…" /><div className="all-article-scopes">{filteredArticleScopes.map((article) => {
+            const parent = { product: article.product, slug: article.model || 'all' };
+            const draft = articleScopeDraft(article, parent);
+            const saved = savedArticleScope(article, parent);
+            const dirty = draft.product !== saved.product || draft.model !== saved.model;
+            const options = (knowledge?.scopeCatalog?.models || []).filter((item) => item.product === draft.product && item.status !== 'review');
+            return <div className="article-scope-card" key={article.id}><a href={article.url || undefined} target={article.url ? '_blank' : undefined} rel={article.url ? 'noreferrer' : undefined}><span>{article.title}</span><em>{article.overridden ? 'Admin assigned · Open ↗' : 'Detected · Open ↗'}</em></a><div className="article-scope-editor"><label>Product<select value={draft.product} onChange={(event) => changeArticleScope(article, parent, { product: event.target.value })}><option value="cfd">CFD</option><option value="futures">Futures</option></select></label><label>Availability<select value={draft.model} onChange={(event) => changeArticleScope(article, parent, { model: event.target.value })}><option value="all">All {draft.product.toUpperCase()} models (product-wide)</option>{options.map((item) => <option key={item.slug} value={item.slug}>{item.name}{item.status === 'previous' ? ' — Not currently live' : ''}</option>)}</select></label><div className="article-scope-actions"><button type="button" className="btn-undo" disabled={!dirty || savingArticleScope === String(article.id)} onClick={() => undoArticleScope(article)}>↶ Undo</button><button type="button" className="btn-save-scope" disabled={!dirty || savingArticleScope === String(article.id)} onClick={() => saveArticleScope(article, parent)}>{savingArticleScope === String(article.id) ? 'Saving…' : 'Save'}</button></div></div></div>;
+          })}{!filteredArticleScopes.length && <div className="empty-admin">No published articles match this search.</div>}</div><p className="field-help">Showing up to 100 matching articles at a time. Search by the complete FAQ title to reach any article.</p></section>
           <section className="settings-card"><div className="settings-head"><div><h2>Chatbot knowledge</h2><p>Internal knowledge the chatbot can use alongside the Intercom FAQ — for example the trade calculator's formulas, instrument pip values, and account leverage. Turn documents on or off, edit them, then re-index to push changes into the chatbot.</p></div></div>
             <div className="autosync-grid">
               <div className="field-block"><label>Documents</label><b className="autosync-when">{knowledge?.docs?.length || 0} total · {knowledge?.docs?.filter((d) => d.enabled).length || 0} on</b></div>
