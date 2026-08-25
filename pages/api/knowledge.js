@@ -27,12 +27,12 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, ...result });
       }
       if (body.action === 'scope-status') {
-        const catalog = await saveScopeModelOverride(body.slug, { status: body.status, product: body.product, name: body.name }, sb);
-        return res.status(200).json({ ok: true, scopeCatalog: catalog });
+        const saved = await saveScopeModelOverride(body.slug, { status: body.status, product: body.product, name: body.name }, sb);
+        return res.status(200).json({ ok: true, scopeCatalog: saved.catalog, savedStatus: saved.savedStatus });
       }
       if (body.action === 'article-scope') {
-        const catalog = await saveArticleScopeOverride(body.articleId, { product: body.product, model: body.model }, sb);
-        return res.status(200).json({ ok: true, scopeCatalog: catalog });
+        const saved = await saveArticleScopeOverride(body.articleId, { product: body.product, model: body.model }, sb);
+        return res.status(200).json({ ok: true, scopeCatalog: saved.catalog, savedScope: saved.savedScope });
       }
       const doc = await saveKnowledgeDoc(body);
       return res.status(200).json({ ok: true, doc });
