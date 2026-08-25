@@ -3,7 +3,7 @@ import {
   openaiChatDetailed, getBrandingRules, brandingInstructions,
   applyBrandingReplacements, getRelevantSnippets, logActivity,
   expandConcepts, clarifyQuery, correctTypos, runCalculators,
-  getGroqKeys, verifyGrounding
+  getGroqKeys, verifyGrounding, getPublishedScopeCatalog, modelsMentioned
 } from '../../lib/server';
 
 const STOP = new Set([
@@ -163,10 +163,55 @@ export default async function handler(req, res) {
     if (chatProvider === 'groq' && !groqPool.length && !groqPrimary) return res.status(400).json({ error: 'Groq is selected, but no Groq key is saved. Add one in Admin → Groq keys.' });
 
     const sb = supabaseAdmin();
-    const scope = detectScope(question);
+    const scopeCatalog = await getPublishedScopeCatalog(sb);
+    const selectedProduct = ['cfd', 'futures', 'both'].includes(req.body?.scope?.product) ? req.body.scope.product : 'cfd';
+    const selectedModelSlug = String(req.body?.scope?.model || 'all');
+    const selectedModel = selectedModelSlug === 'all' ? null : scopeCatalog.models.find((item) =>
+      item.slug === selectedModelSlug && item.status !== 'review' && (selectedProduct === 'both' || item.product === selectedProduct)
+    );
+    if (selectedModelSlug !== 'all' && !selectedModel) {
+      return res.status(200).json({
+        scopeNotice: true,
+        noticeTitle: 'The selected Account model is not available',
+        notice: 'Choose another verified model or search the full product family. The assistant did not broaden the search automatically.'
+      });
+    }
+    const questionModels = modelsMentioned(question, scopeCatalog.models);
+    const conflictingModel = selectedModel && questionModels.find((item) => item.slug !== selectedModel.slug);
+    if (conflictingModel) {
+      return res.status(200).json({
+        scopeNotice: true,
+        noticeTitle: 'Your question and selected scope do not match',
+        notice: `The selector is set to ${selectedModel.name}, but the question mentions ${conflictingModel.name}. Change the selector if you want an answer about ${conflictingModel.name}.`
+      });
+    }
+    const scope = selectedModel ? selectedModel.aliases[0] : detectScope(question);
+    const allocationQuestion = /\b(?:maximum|max|total|aggregate)?\s*allocation\b/i.test(question);
+    const personalAllocation = allocationQuestion && /\b(?:my|i|me|mine|for me)\b/i.test(question);
+    if (personalAllocation && !selectedModel) {
+      return res.status(200).json({
+        scopeNotice: true,
+        noticeTitle: 'Select the customer’s Account model first',
+        notice: 'The maximum allocation differs by Account model. Choose the applicable model above, then ask the question again; the assistant may also confirm the customer’s country because regional allocation limits can apply.'
+      });
+    }
     const directScopedQuestion = !!scope &&
       /\b(?:can|could|do|does|did|will|would|if|what happens|how much|is there|are there)\b/i.test(question) &&
       /\b(?:reset|restart|breach|daily loss|maximum loss|mll|drawdown|fee|price|target|cycle|reward|payout|withdraw)\b/i.test(question);
+
+    if (personalAllocation && selectedModel && selectedModel.product === 'cfd' && selectedModel.slug !== 'stellar-instant' && !req.body?.clarification) {
+      return res.status(200).json({
+        needsClarification: true,
+        originalQuestion: question,
+        clarifyingQuestion: 'Which country is the customer registered in?',
+        clarificationReason: 'The country is needed because FundedNext’s maximum CFD allocation can be lower in specific regions, and U.S. Match-Trader conditions can differ.',
+        choices: [
+          { value: 'Standard allocation country', label: 'Another country', description: 'The customer is not in a specially restricted country and is not using the U.S. exception.' },
+          { value: 'Restricted allocation country: Cambodia, Mongolia, Slovakia, Slovenia, Taiwan, Ukraine, Czech Republic, or Pakistan', label: 'Listed restricted country', description: 'The customer is registered in one of the countries listed here.' },
+          { value: 'United States using Match-Trader', label: 'United States', description: 'Use the verified U.S. Match-Trader conditions.' }
+        ]
+      });
+    }
 
     // ---- Query understanding -------------------------------------------------
     // 1) deterministic concept expansion grounded in FundedNext terminology
@@ -241,10 +286,9 @@ export default async function handler(req, res) {
       });
     }
 
-    const accountDependent = !scope && (
-      concepts.groups.includes('cycle') ||
-      /\b(payout|performance reward|trading cycle|profit target|daily loss|maximum loss|mll|drawdown|breach|scaling|minimum trading days)\b/i.test(question)
-    );
+    // The visible product/model controls now provide this missing scope. Do not
+    // open a redundant Account-model clarification dialog.
+    const accountDependent = false;
     const asksAcrossModels = /\b(all|each|every|compare|comparison|different models?|by model)\b/i.test(question);
     if (accountDependent && !asksAcrossModels && !explicitMultiPart && !req.body?.clarification) {
       return res.status(200).json({
@@ -285,6 +329,12 @@ export default async function handler(req, res) {
       'when a trader becomes eligible to request the first payout profit split schedule',
       'payout processing time 24 hour Brand Promise compensation',
       'withdrawal processing time by method crypto USDT bank'
+    ] : allocationQuestion && !selectedModel ? [
+      'maximum aggregate allocation across Stellar 1-Step Stellar 2-Step and Stellar Lite FundedNext Accounts',
+      'maximum allocation Stellar Instant purchase allocation and scaling',
+      'country restricted maximum allocation Cambodia Mongolia Slovakia Slovenia Taiwan Ukraine Czech Republic Pakistan',
+      'Challenge Account purchase allocation compared with FundedNext Account allocation',
+      'United States Match-Trader allocation restriction exception'
     ] : [];
 
     // ---- Keyword recall (typo-corrected) ------------------------------------
@@ -339,7 +389,37 @@ export default async function handler(req, res) {
       return { ...item, _rank: termScore + scopeScore + vectorScore, _scoped: !!scope && (title.includes(scope) || content.includes(scope)) };
     }).sort((a, b) => b._rank - a._rank);
 
-    if (scope) {
+    // Enforce the UI selection before evidence reaches the answering model.
+    // Articles naming no model are treated as product-wide policy (KYC,
+    // restricted strategies, merging, scale-up, etc.). An article that names
+    // only another model is rejected. Multi-model comparison articles remain
+    // eligible only when they include the selected model.
+    candidates = candidates.filter((item) => {
+      const blob = `${item.article_title || ''}\n${item.content || ''}`;
+      const mentioned = modelsMentioned(blob, scopeCatalog.models);
+      const futuresEvidence = /\bfutures?\b/i.test(blob) || mentioned.some((model) => model.product === 'futures');
+      const cfdEvidence = /\bcfd\b/i.test(blob) || mentioned.some((model) => model.product === 'cfd');
+      if (selectedProduct === 'cfd' && futuresEvidence && !cfdEvidence) return false;
+      if (selectedProduct === 'futures' && !futuresEvidence) return false;
+      if (!selectedModel) return true;
+      const namedInFamily = mentioned.filter((model) => model.product === selectedModel.product);
+      if (!namedInFamily.length) return selectedModel.product === 'futures' ? futuresEvidence : !futuresEvidence;
+      return namedInFamily.some((model) => model.slug === selectedModel.slug);
+    });
+
+    if (!candidates.length) {
+      const family = selectedProduct === 'both' ? 'the complete knowledge base' : selectedProduct.toUpperCase();
+      const target = selectedModel?.name || `all ${family} models`;
+      return res.status(200).json({
+        scopeNotice: true,
+        noticeTitle: `No verified answer found for ${target}`,
+        notice: selectedModel
+          ? `No FAQ evidence within ${selectedModel.name} supports this question. You can search all ${selectedModel.product.toUpperCase()} models, but the assistant will not widen the scope without your approval.`
+          : `No applicable evidence was found within ${family}. The assistant did not use another product's rules.`
+      });
+    }
+
+    if (scope && !selectedModel) {
       const exactScope = candidates.filter((item) => item._scoped);
       const neutral = candidates.filter((item) => !item._scoped && !hasOtherScope(`${item.article_title} ${item.content}`, scope));
       candidates = [...exactScope, ...neutral];
@@ -361,7 +441,28 @@ export default async function handler(req, res) {
     // covers each meaning instead of being dominated by the single strongest
     // topic. Reserve slots for eligibility/cycle, processing, and method chunks.
     let matches;
-    if (topicPlan.length > 1 && candidates.length) {
+    if (allocationQuestion && !selectedModel && candidates.length) {
+      const groups = [
+        /how many accounts|aggregate simulated capital|\$300,?000|allocation threshold/i,
+        /stellar instant|maximum purchase allocation|\$20,?000/i,
+        /cambodia|mongolia|slovakia|slovenia|taiwan|ukraine|czech|pakistan|\$50,?000/i,
+        /challenge accounts?|challenge phase|not applicable for purchasing/i,
+        /u\.s\.|united states|match-trader|no restrictions regarding the account balance/i
+      ];
+      const seen = new Set(); const picked = [];
+      for (const pattern of groups) {
+        for (const item of candidates) {
+          if (pattern.test(`${item.article_title || ''}\n${item.content || ''}`) && !seen.has(String(item.id))) {
+            seen.add(String(item.id)); picked.push(item); break;
+          }
+        }
+      }
+      for (const item of candidates) {
+        if (picked.length >= 14) break;
+        if (!seen.has(String(item.id))) { seen.add(String(item.id)); picked.push(item); }
+      }
+      matches = picked;
+    } else if (topicPlan.length > 1 && candidates.length) {
       // Reserve evidence for every decomposed topic before filling the remaining
       // slots by global rank. This prevents a dominant first topic from crowding
       // later questions out of a long pasted message.
@@ -437,8 +538,10 @@ export default async function handler(req, res) {
     const snippetText = snippets.length
       ? '\n\nCORRECTIVE INSTRUCTIONS FROM APPROVED REVIEWS:\n' + snippets.map((item) => `- ${item.instruction}`).join('\n')
       : '';
-    const scopeText = scope
-      ? `\n\nACCOUNT SCOPE: The question is specifically about "${scope}". Do not use rules belonging to a different Account type.`
+    const scopeText = `\n\nMANDATORY USER-SELECTED SCOPE: Product = ${selectedProduct.toUpperCase()}; Account model = ${selectedModel?.name || 'All models in the selected product family'}. ` +
+      'Every supplied evidence item has already passed this scope filter. Never mention, compare, or borrow a rule from an Account model or product outside this selection. Product-wide policy evidence may be used when it applies to the selected family.';
+    const allocationText = allocationQuestion && !selectedModel
+      ? '\n\nALLOCATION OVERVIEW: The user selected all models. Do not answer from one Account perspective. Give a concise overall comparison of every materially different allocation rule supported by the evidence: standard aggregate FundedNext Account allocation, model-specific exceptions such as Stellar Lite, Challenge-phase treatment, regional limits, Stellar Instant purchase/scaling limits, and any verified U.S. exception. Clearly separate purchase allocation from scaled balance and do not merge them into one limit.'
       : '';
     // When a question could reasonably mean more than one thing, tell the model
     // to resolve each supported meaning separately instead of guessing one.
@@ -469,7 +572,11 @@ export default async function handler(req, res) {
     const calcText = concepts.groups.includes('calculator')
       ? '\n\nThis is a calculation question. If the FAQ evidence includes a Trade Calculator formula, use it: state the formula, then plug in the numbers. If a required value is missing (for example the current price, or the account/instrument leverage), give the formula and ask for that value instead of assuming it. Do not merge a calculation with a separate account limit — present them as distinct points.'
       : '';
-    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + ambiguityText + multiPartText + calcText + calcMergeText + formatText + groundingText +
+    const emotion = clarity?.emotion || 'neutral';
+    const empathyText = emotion === 'neutral'
+      ? '\n\nTONE: Respond professionally and directly. Do not add a generic empathy sentence.'
+      : `\n\nTONE: The client appears ${emotion}. Begin with one brief, natural, professional acknowledgement appropriate to that emotion, then answer directly. Do not say you detected an emotion. Do not over-apologize, admit fault, promise an outcome, or change any policy fact. Empathy affects tone only.`;
+    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText +
       '\n\nAfter the customer-ready answer, add three private final lines:\n' +
       'SOURCES: comma-separated evidence numbers actually used, or none\n' +
       'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim\n' +
@@ -666,6 +773,19 @@ export default async function handler(req, res) {
       }
     }
 
+    // Structured, auditable confidence explanations. These are derived from
+    // actual retrieval/verification measurements; the answer model cannot
+    // invent the tooltip text.
+    const confidenceReasons = [];
+    if (sources.length === 1) confidenceReasons.push({ code: 'single_source', label: 'Only one applicable source supported this answer', impact: 'down' });
+    if (sources.length >= 2) confidenceReasons.push({ code: 'multiple_sources', label: `${sources.length} applicable sources supported this answer`, impact: 'up' });
+    if (selectedModel && matches.some((item) => modelsMentioned(`${item.article_title || ''}\n${item.content || ''}`, scopeCatalog.models).some((model) => model.slug === selectedModel.slug))) {
+      confidenceReasons.push({ code: 'exact_scope', label: `Evidence matched ${selectedModel.name}`, impact: 'up' });
+    }
+    if (multiPart && sources.length < topicPlan.length) confidenceReasons.push({ code: 'partial_coverage', label: 'Some question parts have limited source coverage', impact: 'down' });
+    if (groundingScore != null && groundingScore < 65) confidenceReasons.push({ code: 'grounding_reduced', label: `Grounding verification scored ${groundingScore}%`, impact: 'down' });
+    if (groundingScore != null && groundingScore >= 85) confidenceReasons.push({ code: 'grounding_strong', label: `Grounding verification scored ${groundingScore}%`, impact: 'up' });
+
     const usage = completion.usage || {};
     const inputTokens = Number(usage.prompt_tokens || usage.input_tokens || 0);
     const outputTokens = Number(usage.completion_tokens || usage.output_tokens || 0);
@@ -692,6 +812,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel,
+      confidenceReasons, selectedScope: { product: selectedProduct, model: selectedModel?.slug || 'all', label: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models` },
       ambiguous: isAmbiguous, interpretations, usedCalculator
     });
   } catch (error) {
