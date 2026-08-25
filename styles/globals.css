@@ -707,11 +707,27 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .scope-status-actions button { padding: 6px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--muted); font-size: 10px; font-weight: 750; cursor: pointer; }
 .scope-status-actions button:hover, .scope-status-actions button.selected { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 .scope-evidence-list { max-height: 280px; overflow: auto; overscroll-behavior: contain; display: grid; gap: 6px; padding-right: 4px; }
+.article-scope-card { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
 .scope-evidence-list a { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 14px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); color: var(--ink); text-decoration: none; }
+.article-scope-card > a { border: 0; border-radius: 0; }
 .scope-evidence-list a:hover { border-color: var(--accent); background: var(--accent-soft); }
 .scope-evidence-list a span { min-width: 0; white-space: normal; overflow-wrap: anywhere; font-size: 11px; line-height: 1.45; }
 .scope-evidence-list a em { color: var(--accent); font-size: 10px; font-style: normal; white-space: nowrap; }
 .scope-evidence-list p, .scope-evidence-note { margin: 0; color: var(--muted); font-size: 11px; }
+.article-scope-editor { display: grid; grid-template-columns: 130px minmax(220px, 1fr) auto; align-items: end; gap: 8px; padding: 9px 10px; border-top: 1px solid var(--line); background: var(--surface); }
+.article-scope-editor label { display: grid; gap: 5px; color: var(--muted); font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+.article-scope-editor select { width: 100%; min-width: 0; height: 34px; padding: 0 30px 0 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--ink); font: 700 11px/1 var(--body); cursor: pointer; }
+.article-scope-editor select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.article-scope-actions { display: flex; gap: 6px; }
+.article-scope-actions button { height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 10px; font-weight: 800; cursor: pointer; }
+.article-scope-actions .btn-undo { background: var(--surface-2); color: var(--muted); }
+.article-scope-actions .btn-save-scope { border-color: var(--accent); background: var(--accent); color: white; }
+.article-scope-actions button:disabled { opacity: .38; cursor: default; }
+.all-article-scopes { max-height: 620px; overflow: auto; overscroll-behavior: contain; display: grid; gap: 8px; margin-top: 10px; padding-right: 5px; }
+.all-article-scopes .article-scope-card > a { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; padding: 10px; color: var(--ink); text-decoration: none; }
+.all-article-scopes .article-scope-card > a:hover { background: var(--accent-soft); }
+.all-article-scopes .article-scope-card > a span { overflow-wrap: anywhere; font-size: 11px; font-weight: 700; }
+.all-article-scopes .article-scope-card > a em { color: var(--accent); font-size: 10px; font-style: normal; white-space: nowrap; }
 .scope-status { width: fit-content; padding: 5px 8px; border-radius: 99px; color: var(--success); background: var(--success-soft); font-size: 10px; font-weight: 750; }
 .scope-status.previous { color: var(--muted); background: var(--surface-3); }
 .scope-status.review { color: var(--warn); background: var(--warn-soft); }
@@ -772,6 +788,8 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
   .scope-status-badge, .scope-evidence-toggle { grid-column: auto; }
   .scope-status-actions { align-items: flex-start; flex-direction: column; }
   .scope-evidence-list a { grid-template-columns: 1fr; gap: 5px; }
+  .article-scope-editor { grid-template-columns: 1fr; align-items: stretch; }
+  .article-scope-actions { justify-content: flex-end; }
   .confidence-health { min-width: 150px; }
   .composer-foot { padding-bottom: 4px; }
   .developer-credit { position: static; margin-top: 8px; justify-content: center; }
