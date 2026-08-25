@@ -706,6 +706,9 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .scope-status-actions > div { display: flex; flex-wrap: wrap; gap: 6px; }
 .scope-status-actions button { padding: 6px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--muted); font-size: 10px; font-weight: 750; cursor: pointer; }
 .scope-status-actions button:hover, .scope-status-actions button.selected { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.scope-status-actions button.status-save { border-color: var(--accent); background: var(--accent); color: white; }
+.scope-status-actions button.status-undo { color: var(--muted); }
+.scope-status-actions button:disabled { opacity: .38; cursor: default; }
 .scope-evidence-list { max-height: 280px; overflow: auto; overscroll-behavior: contain; display: grid; gap: 6px; padding-right: 4px; }
 .article-scope-card { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
 .scope-evidence-list a { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 14px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); color: var(--ink); text-decoration: none; }
