@@ -239,6 +239,7 @@ export default function Admin() {
   const [expandedSync, setExpandedSync] = useState(null);
   const [knowledge, setKnowledge] = useState(null);
   const [knowledgeBusy, setKnowledgeBusy] = useState(false);
+  const [expandedScope, setExpandedScope] = useState(null);
   const [openDoc, setOpenDoc] = useState(null);
   const [docDraft, setDocDraft] = useState(null);
   const [calc, setCalc] = useState(null);
@@ -676,7 +677,21 @@ export default function Admin() {
 
         {tab === 'knowledge' && <div className="settings-stack">
           <section className="settings-card"><div className="settings-head"><div><h2>Product and Account catalogue</h2><p>Bird’s-eye view of the scopes detected from the current FAQ library. Previous models remain available to Agents; uncertain new detections stay in review instead of entering the live selector.</p></div><span className="state-pill ready">{knowledge?.scopeCatalog?.models?.length || 0} detected</span></div>
-            <div className="scope-catalog-table"><div><b>Product</b><b>Account model</b><b>Status</b><b>FAQ evidence</b></div>{(knowledge?.scopeCatalog?.models || []).map((model) => <div key={model.slug}><span>{model.product.toUpperCase()}</span><b>{model.name}{model.adminConfirmed && <small className="admin-confirmed">Admin confirmed</small>}</b><select className={`scope-status-select ${model.status}`} value={model.status} onChange={(event) => updateScopeStatus(model, event.target.value)} aria-label={`Status for ${model.name}`}><option value="current">Current</option><option value="previous">Not currently live</option><option value="review">Needs review</option></select><span>{model.articleCount} article{model.articleCount === 1 ? '' : 's'}</span></div>)}</div>
+            <div className="scope-catalog-table">
+              <div className="scope-catalog-head"><b>Product</b><b>Account model</b><b>Status</b><b>FAQ evidence</b></div>
+              {(knowledge?.scopeCatalog?.models || []).map((model) => {
+                const expanded = expandedScope === model.slug;
+                const articles = model.articles || [];
+                return <div className="scope-catalog-entry" key={model.slug}>
+                  <div className="scope-catalog-row"><span>{model.product.toUpperCase()}</span><b>{model.name}{model.adminConfirmed && <small className="admin-confirmed">Admin confirmed</small>}</b><span className={`scope-status-badge ${model.status}`}>{model.status === 'current' ? 'Current' : model.status === 'previous' ? 'Not currently live' : 'Needs review'}</span><button type="button" className="scope-evidence-toggle" onClick={() => setExpandedScope(expanded ? null : model.slug)} aria-expanded={expanded}>{expanded ? 'Hide evidence' : `View ${model.articleCount} article${model.articleCount === 1 ? '' : 's'}`}<i>{expanded ? '−' : '+'}</i></button></div>
+                  {expanded && <div className="scope-evidence-panel">
+                    <div className="scope-status-actions"><span>Catalogue status</span><div>{[['current', 'Current'], ['previous', 'Not currently live'], ['review', 'Needs review']].map(([value, label]) => <button type="button" key={value} className={model.status === value ? 'selected' : ''} onClick={() => updateScopeStatus(model, value)}>{label}</button>)}</div></div>
+                    <div className="scope-evidence-list">{articles.length ? articles.map((article, index) => <a key={`${article.id || article.url || index}`} href={article.url || undefined} target={article.url ? '_blank' : undefined} rel={article.url ? 'noreferrer' : undefined}><span>{article.title || 'Untitled FAQ'}</span><em>{article.url ? 'Open article ↗' : 'Stored FAQ'}</em></a>) : <p>No linked article details are available yet. Run a successful knowledge update to rebuild this evidence.</p>}</div>
+                    {model.articleCount > articles.length && <small className="scope-evidence-note">Showing the first {articles.length} of {model.articleCount} matching articles.</small>}
+                  </div>}
+                </div>;
+              })}
+            </div>
             <p className="field-help">A new name needs repeated FAQ-title evidence before Agents can select it. One-off candidates remain visible here as “Needs review.” FNL:001 is treated as current.</p>
           </section>
           <section className="settings-card"><div className="settings-head"><div><h2>Chatbot knowledge</h2><p>Internal knowledge the chatbot can use alongside the Intercom FAQ — for example the trade calculator's formulas, instrument pip values, and account leverage. Turn documents on or off, edit them, then re-index to push changes into the chatbot.</p></div></div>
