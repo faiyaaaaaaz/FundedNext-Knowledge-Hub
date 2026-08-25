@@ -158,13 +158,23 @@ function confidenceTone(score) {
   return 'low';
 }
 
+function ConfidenceHealth({ score, label, reasons = [] }) {
+  const tone = confidenceTone(score);
+  const explanation = reasons.length ? reasons.map((reason) => `• ${reason.label}`).join('\n') : 'Confidence is based on applicable FAQ evidence and grounding checks.';
+  return <span className={`confidence-health ${tone}`} title={explanation} tabIndex="0" aria-label={`${score}% ${label}. ${explanation}`}><span className="confidence-copy"><b>{score}%</b><small>{label}</small></span><span className="confidence-track"><i style={{ width: `${Math.max(3, score)}%` }} /></span><span className="confidence-info">i</span></span>;
+}
+
 export default function Home() {
   const [session, setSession] = useState('');
   const [role, setRole] = useState('');
   const [identity, setIdentity] = useState({ name: '', email: '' });
   const [loginError, setLoginError] = useState('');
   const [loggingIn, setLoggingIn] = useState(false);
-  const [theme, setTheme] = useState('light');
+  const [theme, setTheme] = useState('dark');
+  const [scopeCatalog, setScopeCatalog] = useState({ products: [], models: [] });
+  const [scopeProduct, setScopeProduct] = useState('cfd');
+  const [scopeModel, setScopeModel] = useState('all');
+  const [scopeNotice, setScopeNotice] = useState(null);
   const [clarification, setClarification] = useState(null);
   const [clarificationOther, setClarificationOther] = useState('');
   const [messages, setMessages] = useState([]);
@@ -194,9 +204,9 @@ export default function Home() {
     if (savedSession) {
       setSession(savedSession); setRole(savedRole);
       setIdentity({ name: localStorage.getItem('appName') || '', email: localStorage.getItem('appEmail') || '' });
-      loadStats(savedSession);
+      loadStats(savedSession); loadScopes(savedSession);
     } else completeGoogleLogin();
-    const savedTheme = localStorage.getItem('theme') || 'light';
+    const savedTheme = localStorage.getItem('theme') || 'dark';
     setTheme(savedTheme); document.documentElement.setAttribute('data-theme', savedTheme);
     return () => { timerRef.current && clearInterval(timerRef.current); thinkingRef.current && clearInterval(thinkingRef.current); };
   }, []);
@@ -218,11 +228,31 @@ export default function Home() {
     } catch {}
   }
 
+  async function loadScopes(token = session) {
+    if (!token) return;
+    try {
+      const response = await fetch('/api/scopes', { headers: { 'x-app-session': token } });
+      if (!response.ok) return;
+      const data = await response.json();
+      setScopeCatalog(data.catalog || { products: [], models: [] });
+      setScopeProduct(data.preference?.product || 'cfd');
+      setScopeModel(data.selectedExists === false ? 'all' : (data.preference?.model || 'all'));
+      if (data.selectedExists === false) setScopeNotice({ title: 'Your previous Account model is no longer verified', text: 'The selection was reset to all models. Choose a verified model before asking a model-specific question.' });
+    } catch {}
+  }
+
+  async function saveScope(product, model = 'all') {
+    setScopeProduct(product); setScopeModel(model); setScopeNotice(null);
+    try {
+      await fetch('/api/scopes', { method: 'POST', headers: headers(session, true), body: JSON.stringify({ product, model }) });
+    } catch {}
+  }
+
   function storeLogin(data) {
     localStorage.setItem('appSession', data.token); localStorage.setItem('appRole', data.role);
     localStorage.setItem('appName', data.name || ''); localStorage.setItem('appEmail', data.email || '');
     setSession(data.token); setRole(data.role); setIdentity({ name: data.name || '', email: data.email || '' });
-    loadStats(data.token);
+    loadStats(data.token); loadScopes(data.token);
   }
 
   async function completeGoogleLogin() {
@@ -264,10 +294,11 @@ export default function Home() {
     if (!value || loading) return;
     const questionId = `${Date.now()}-${Math.random()}`;
     if (showUser) setMessages((current) => [...current, { role: 'user', content: value, questionId }]);
+    setScopeNotice(null);
     setInput(''); setLoading(true); setThinkingStep(0);
     thinkingRef.current = setInterval(() => setThinkingStep((current) => Math.min(current + 1, THINKING_STEPS.length - 1)), 1300);
     try {
-      const response = await fetch('/api/search', { method: 'POST', headers: headers(session, true), body: JSON.stringify({ question: value, clarification: clarificationAnswer || undefined }) });
+      const response = await fetch('/api/search', { method: 'POST', headers: headers(session, true), body: JSON.stringify({ question: value, clarification: clarificationAnswer || undefined, scope: { product: scopeProduct, model: scopeModel } }) });
       const data = await response.json();
       if (response.status === 401) { logout(); throw new Error('Your session ended. Please sign in again.'); }
       if (!response.ok) throw new Error(data.error || 'The assistant could not answer.');
@@ -276,12 +307,16 @@ export default function Home() {
         setClarificationOther('');
         return;
       }
+      if (data.scopeNotice) {
+        setScopeNotice({ title: data.noticeTitle, text: data.notice });
+        return;
+      }
       setMessages((current) => [...current, {
         role: 'assistant', question: value, questionId, content: data.answer,
         sources: data.sources || [], segments: data.segments || null,
         usedCalculator: !!data.usedCalculator,
         provider: data.answerProvider, fallback: data.usedFallback,
-        confidence: data.confidence, confidenceLabel: data.confidenceLabel, disputed: false
+        confidence: data.confidence, confidenceLabel: data.confidenceLabel, confidenceReasons: data.confidenceReasons || [], disputed: false
       }]);
     } catch (error) {
       setMessages((current) => [...current, { role: 'assistant', question: value, questionId, content: error.message, sources: [], error: true }]);
@@ -434,6 +469,14 @@ export default function Home() {
     </section></main>
   );
 
+  const availableModels = (scopeCatalog.models || []).filter((model) =>
+    model.status !== 'review' && (scopeProduct === 'both' || model.product === scopeProduct)
+  );
+  const currentModels = availableModels.filter((model) => model.status === 'current');
+  const previousModels = availableModels.filter((model) => model.status === 'previous');
+  const selectedModelName = availableModels.find((model) => model.slug === scopeModel)?.name ||
+    (scopeProduct === 'both' ? 'All products' : `All ${scopeProduct.toUpperCase()} models`);
+
   return (
     <main className="app-shell">
       <header className="app-header"><Brand /><div className="header-actions">{identity.name && <div className="user-identity"><b>{identity.name}</b><small>{identity.email}</small></div>}{!identity.name && <span className="role-badge">{role}</span>}<button className="header-action" onClick={toggleTheme} aria-label="Change theme"><span>{theme === 'dark' ? '☀' : '☾'}</span><b>{theme === 'dark' ? 'Light mode' : 'Dark mode'}</b></button>{role === 'admin' && <Link className="btn btn-secondary btn-small" href="/admin">Admin console</Link>}<button className="header-action" onClick={logout} aria-label="Sign out"><span>⏻</span><b>Sign out</b></button></div></header>
@@ -446,11 +489,14 @@ export default function Home() {
             {!messages.length && <div className="welcome-state"><div className="assistant-orb"><Logo /></div><span className="status-chip">Source-backed assistance</span><h1>How can I help today?</h1><p>Ask about a policy, Account, Performance Reward, trading rule, or platform.</p><div className="suggestion-grid">{['How does trailing drawdown work?', 'Explain Performance Reward eligibility', 'What causes an Account breach?'].map((question) => <button key={question} onClick={() => send(question)}>{question}<span>↗</span></button>)}</div></div>}
             {messages.map((message, index) => message.role === 'user'
               ? <div className="message user-message" key={index}><div className="message-label">You</div><div className="user-bubble">{message.content}</div></div>
-              : <div className="message assistant-message" key={index}><div className="bot-avatar"><Logo /></div><div className={`assistant-bubble${message.error ? ' error-bubble' : ''}`}><div className="answer-head"><span>FundedNext Assistant</span><div>{Number.isFinite(message.confidence) && <span className={`confidence-pill ${confidenceTone(message.confidence)}`}><i style={{ '--score': `${message.confidence * 3.6}deg` }} />{message.confidence}% · {message.confidenceLabel}</span>}<small>{message.fallback ? 'OpenAI backup' : message.provider === 'groq' ? 'Groq' : 'OpenAI'}</small>{message.fallback && <span className="fallback-flash" title="Groq was busy, so this answer switched to GPT">⚡ Switched to GPT</span>}{message.usedCalculator && <span className="calc-tag" title="This answer used trade-calculator logic">⚙ Calculator logic</span>}</div></div>{message.segments?.length ? <AttributedAnswer segments={message.segments} sources={message.sources} /> : <Answer text={message.content} />}<div className="answer-actions"><button onClick={() => copyAnswer(index, message.content)}>{copied === index ? '✓ Copied' : '⧉ Copy answer'}</button><button className={message.disputed ? 'disputed' : ''} disabled={message.disputed || message.error} onClick={() => { setDisputeIndex(index); setDisputeReason(''); setDisputeError(''); }}>{message.disputed ? '✓ Answer disputed' : '⚑ Dispute answer'}</button></div>{message.sources?.length > 0 && <div className="sources"><button className="sources-toggle" onClick={() => setOpenSources((current) => ({ ...current, [index]: !current[index] }))}><span>◆</span>{message.sources.length} verified source{message.sources.length > 1 ? 's' : ''}<b>{openSources[index] ? '−' : '+'}</b></button>{openSources[index] && <div className="sources-list">{message.sources.map((source, sourceIndex) => <a key={sourceIndex} href={source.url || undefined} target="_blank" rel="noreferrer" className={source.kind === 'calculator' ? 'src-calc' : ''}><span className="src-num">{sourceIndex + 1}</span><span className="src-title">{source.title}</span><small>{source.kind === 'calculator' ? '⚙ Calculator' : 'Open article ↗'}</small></a>)}</div>}</div>}</div></div>
+              : <div className="message assistant-message" key={index}><div className="bot-avatar"><Logo /></div><div className={`assistant-bubble${message.error ? ' error-bubble' : ''}`}><div className="answer-head"><span>FundedNext Assistant</span><div>{Number.isFinite(message.confidence) && <ConfidenceHealth score={message.confidence} label={message.confidenceLabel} reasons={message.confidenceReasons} />}<small>{message.fallback ? 'OpenAI backup' : message.provider === 'groq' ? 'Groq' : 'OpenAI'}</small>{message.fallback && <span className="fallback-flash" title="Groq was busy, so this answer switched to GPT">⚡ Switched to GPT</span>}{message.usedCalculator && <span className="calc-tag" title="This answer used trade-calculator logic">⚙ Calculator logic</span>}</div></div>{message.segments?.length ? <AttributedAnswer segments={message.segments} sources={message.sources} /> : <Answer text={message.content} />}<div className="answer-actions"><button onClick={() => copyAnswer(index, message.content)}>{copied === index ? '✓ Copied' : '⧉ Copy answer'}</button><button className={message.disputed ? 'disputed' : ''} disabled={message.disputed || message.error} onClick={() => { setDisputeIndex(index); setDisputeReason(''); setDisputeError(''); }}>{message.disputed ? '✓ Answer disputed' : '⚑ Dispute answer'}</button></div>{message.sources?.length > 0 && <div className="sources"><button className="sources-toggle" onClick={() => setOpenSources((current) => ({ ...current, [index]: !current[index] }))}><span>◆</span>{message.sources.length} verified source{message.sources.length > 1 ? 's' : ''}<b>{openSources[index] ? '−' : '+'}</b></button>{openSources[index] && <div className="sources-list">{message.sources.map((source, sourceIndex) => <a key={sourceIndex} href={source.url || undefined} target="_blank" rel="noreferrer" className={source.kind === 'calculator' ? 'src-calc' : ''}><span className="src-num">{sourceIndex + 1}</span><span className="src-title">{source.title}</span><small>{source.kind === 'calculator' ? '⚙ Calculator' : 'Open article ↗'}</small></a>)}</div>}</div>}</div></div>
             )}
-            {loading && <div className="message assistant-message"><div className="bot-avatar thinking-avatar"><Logo /></div><div className="assistant-bubble thinking-card"><div className="thinking-head"><span className="knowledge-scan" aria-hidden="true"><i /><i /><i /><b /></span><div><b>Building a verified answer</b><small>Scanning and cross-checking the FAQ</small></div><span className="thinking-count">{thinkingStep + 1}/{THINKING_STEPS.length}</span></div><div className="thinking-label"><span key={thinkingStep}>{THINKING_STEPS[thinkingStep]}</span></div><div className="thinking-skeleton"><i /><i /><i /></div><div className="thinking-progress">{THINKING_STEPS.map((step, i) => <i key={step} className={i < thinkingStep ? 'active' : i === thinkingStep ? 'active current' : ''} />)}</div></div></div>}
+            {loading && <div className="message assistant-message"><div className="bot-avatar thinking-avatar"><Logo /></div><div className="assistant-bubble thinking-card"><div className="thinking-head"><span className="knowledge-scan" aria-hidden="true"><i /><i /><i /><b /></span><div><b>Building a verified answer</b><small>Locked to {scopeProduct.toUpperCase()} · {selectedModelName}</small></div><span className="thinking-count">{thinkingStep + 1}/{THINKING_STEPS.length}</span></div><div className="thinking-label"><span key={thinkingStep}>{THINKING_STEPS[thinkingStep]}</span></div><div className="thinking-skeleton"><i /><i /><i /></div><div className="thinking-progress">{THINKING_STEPS.map((step, i) => <i key={step} className={i < thinkingStep ? 'active' : i === thinkingStep ? 'active current' : ''} />)}</div></div></div>}
           </div>
-          <div className="composer-wrap"><div className="composer"><textarea value={input} placeholder="Ask a support question…" onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } }} /><button onClick={() => send()} disabled={!input.trim() || loading} aria-label="Send">↑</button></div><div className="composer-foot"><div className="composer-note">Review the confidence and verified source before sending the answer.</div><div className="developer-credit"><i />Developed by <span>Faiyaz Ahmed</span></div></div></div>
+          <div className="composer-wrap">
+            <div className="scope-bar" aria-label="Knowledge scope"><div className="scope-heading"><span>Answer scope</span><small>The assistant cannot search outside this selection</small></div><label><span>Product</span><select value={scopeProduct} onChange={(event) => saveScope(event.target.value, 'all')}><option value="cfd">CFD</option><option value="futures">Futures</option><option value="both">Both</option></select></label><label className="scope-model"><span>Account model</span><select value={scopeModel} onChange={(event) => saveScope(scopeProduct, event.target.value)}><option value="all">{scopeProduct === 'both' ? 'All products and models' : `All ${scopeProduct.toUpperCase()} models`}</option>{currentModels.length > 0 && <optgroup label="Current models">{currentModels.map((model) => <option key={model.slug} value={model.slug}>{model.name}</option>)}</optgroup>}{previousModels.length > 0 && <optgroup label="Previous models">{previousModels.map((model) => <option key={model.slug} value={model.slug}>{model.name} — Not currently live</option>)}</optgroup>}</select></label></div>
+            {scopeNotice && <div className="scope-notice" role="status"><div><b>{scopeNotice.title}</b><span>{scopeNotice.text}</span></div>{scopeModel !== 'all' && <button onClick={() => saveScope(scopeProduct, 'all')}>Search all {scopeProduct.toUpperCase()} models</button>}</div>}
+            <div className="composer"><textarea value={input} placeholder={`Ask about ${selectedModelName}…`} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } }} /><button onClick={() => send()} disabled={!input.trim() || loading} aria-label="Send">↑</button></div><div className="composer-foot"><div className="composer-note">Review the confidence and verified source before sending the answer.</div><div className="developer-credit"><i />Developed by <span>Faiyaz Ahmed</span></div></div></div>
         </section>
 
         <aside className="insights-rail"><div className="rail-head"><span className="live-dot" /><div><b>Knowledge health</b><small>{stats?.healthy ? 'All systems operational' : 'Checking status…'}</small></div></div><div className="metric-card model-card"><span>Answering model</span><strong>{stats?.answerProvider === 'groq' ? 'Groq' : 'OpenAI'}</strong><small>{stats?.answerModel || 'Checking model…'}</small><em>{role === 'admin' ? 'Automatic GPT fallback: on (admin only)' : 'Automatic fallback is off'}</em></div><div className="metric-card primary"><span>Published articles</span><strong>{stats?.totalArticles?.toLocaleString() ?? '—'}</strong><small>Total articles stored and available</small></div><div className="metric-grid"><div className="metric-card"><span>Indexed</span><strong>{stats?.indexedArticles?.toLocaleString() ?? '—'}</strong></div><div className="metric-card"><span>Queued</span><strong>{stats?.queuedArticles?.toLocaleString() ?? '—'}</strong></div></div><div className="metric-card"><span>Searchable sections</span><strong>{stats?.totalChunks?.toLocaleString() ?? '—'}</strong><small>Focused pieces used for retrieval</small></div><div className="metric-card update-time"><span>Last knowledge update</span><strong>{formatDhaka(stats?.lastUpdatedAt)}</strong>{stats?.lastSyncAt && <small className="sync-ago"><span className="live-dot tiny" />Auto-synced {timeAgo(stats.lastSyncAt)}{stats?.lastSyncSummary?.changed ? ` · ${stats.lastSyncSummary.changed} updated` : ' · no changes'}</small>}</div>{role === 'admin' && <div className="metric-card dispute-metric"><span>Pending disputes</span><strong>{stats?.pendingDisputes ?? '—'}</strong><Link href="/admin">Review in Admin →</Link></div>}<div className="rail-tip"><b>Confidence guide</b><p><span className="dot high" />85–100: strong direct support</p><p><span className="dot medium" />65–84: review suggested</p><p><span className="dot low" />Below 65: verify carefully</p></div></aside>
