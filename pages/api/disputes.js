@@ -25,6 +25,11 @@ export default async function handler(req, res) {
       if (!String(body.question || '').trim() || !String(body.answer || '').trim()) {
         return res.status(400).json({ error: 'The question and answer are required.' });
       }
+      const selectedScope = body.scope && ['cfd', 'futures', 'both'].includes(body.scope.product)
+        ? { type: 'answer_scope', product: body.scope.product, model: String(body.scope.model || 'all'), label: String(body.scope.label || '').slice(0, 160), title: `Answer scope: ${body.scope.product.toUpperCase()} · ${String(body.scope.label || body.scope.model || 'All models').slice(0, 160)}`, url: '' }
+        : null;
+      const recordedSources = Array.isArray(body.sources) ? body.sources.slice(0, 30) : [];
+      if (selectedScope) recordedSources.unshift(selectedScope);
       const { data, error } = await sb.from('disputes').insert({
         actor_role: access.role,
         session_id: access.sessionId,
@@ -35,14 +40,14 @@ export default async function handler(req, res) {
         dispute_reason: reason,
         confidence: Number.isFinite(Number(body.confidence)) ? Number(body.confidence) : null,
         provider: body.provider || null,
-        sources: Array.isArray(body.sources) ? body.sources : []
+        sources: recordedSources
       }).select().single();
       if (error) throw error;
       await logActivity({
         actorRole: access.role, sessionId: access.sessionId,
         userName: access.name, userEmail: access.email, authProvider: access.authProvider,
         eventType: 'dispute',
-        provider: body.provider, metadata: { disputeId: data.id, questionPreview: String(body.question).slice(0, 180) }
+        provider: body.provider, metadata: { disputeId: data.id, question: String(body.question).slice(0, 4000), questionPreview: String(body.question).slice(0, 180), selectedScope }
       });
       return res.status(200).json({ dispute: data });
     }
@@ -82,7 +87,13 @@ export default async function handler(req, res) {
         const [vector] = await openaiEmbed(openaiKey, [dispute.question]);
         const result = await sb.rpc('match_chunks', { query_embedding: vector, match_threshold: 0.12, match_count: 12 });
         if (result.error) throw result.error;
-        const evidence = (result.data || []).map((item, index) =>
+        const recordedScope = (dispute.sources || []).find((item) => item?.type === 'answer_scope');
+        const scopedEvidence = (result.data || []).filter((item) => {
+          if (!recordedScope || recordedScope.product === 'both') return true;
+          const url = String(item.article_url || '');
+          return recordedScope.product === 'futures' ? /helpfutures\.fundednext\.com/i.test(url) : /help\.fundednext\.com/i.test(url);
+        });
+        const evidence = scopedEvidence.map((item, index) =>
           `[${index + 1}] ${item.article_title}\n${item.content}`
         ).join('\n\n---\n\n');
         const rules = await getBrandingRules();
@@ -94,6 +105,7 @@ export default async function handler(req, res) {
           'and state what the AI must and must not do in future answers.' + brandingInstructions(rules);
         const user =
           `Original question:\n${dispute.question}\n\nDisputed answer:\n${dispute.answer}\n\n` +
+          `Recorded answer scope:\n${recordedScope ? `${recordedScope.product.toUpperCase()} · ${recordedScope.label || recordedScope.model}` : 'Legacy dispute — scope was not recorded'}\n\n` +
           `Agent dispute reason:\n${dispute.dispute_reason}\n\nAdmin approval reason:\n${dispute.approval_reason}\n\n` +
           `Fresh FAQ evidence:\n${evidence || 'No matching FAQ evidence was found.'}`;
         let completion;
