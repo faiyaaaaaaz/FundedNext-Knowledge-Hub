@@ -347,12 +347,14 @@ export default function Home() {
     setScopeNotice(null);
     setInput(''); setLoading(true); setThinkingStep(0);
     thinkingRef.current = setInterval(() => setThinkingStep((current) => Math.min(current + 1, THINKING_STEPS.length - 1)), 1300);
+    let keepTemporaryScope = false;
     try {
       const response = await fetch('/api/search', { method: 'POST', headers: headers(session, true), body: JSON.stringify({ question: value, clarification: clarificationAnswer || undefined, scope: { product: scopeProduct, model: scopeModel } }) });
       const data = await response.json();
       if (response.status === 401) { logout(); throw new Error('Your session ended. Please sign in again.'); }
       if (!response.ok) throw new Error(data.error || 'The assistant could not answer.');
       if (data.needsClarification) {
+        keepTemporaryScope = true;
         setClarification({ originalQuestion: data.originalQuestion || value, question: data.clarifyingQuestion, reason: data.clarificationReason, choices: data.choices || [] });
         setClarificationOther('');
         return;
@@ -369,11 +371,9 @@ export default function Home() {
         confidence: data.confidence, confidenceLabel: data.confidenceLabel, confidenceReasons: data.confidenceReasons || [],
         selectedScope: data.selectedScope || { product: scopeProduct, model: scopeModel, label: selectedModelName }, disputed: false
       }]);
-      setScopeProduct(savedScope.product);
-      setScopeModel(savedScope.model);
     } catch (error) {
       setMessages((current) => [...current, { role: 'assistant', question: value, questionId, content: error.message, sources: [], error: true }]);
-    } finally { clearInterval(thinkingRef.current); setLoading(false); loadStats(); }
+    } finally { clearInterval(thinkingRef.current); setLoading(false); loadStats(); if (!keepTemporaryScope) { setScopeProduct(savedScope.product); setScopeModel(savedScope.model); } }
   }
 
   function answerClarification(answer) {
