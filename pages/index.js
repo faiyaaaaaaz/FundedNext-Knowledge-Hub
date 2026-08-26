@@ -366,7 +366,8 @@ export default function Home() {
         sources: data.sources || [], segments: data.segments || null,
         usedCalculator: !!data.usedCalculator,
         provider: data.answerProvider, fallback: data.usedFallback,
-        confidence: data.confidence, confidenceLabel: data.confidenceLabel, confidenceReasons: data.confidenceReasons || [], disputed: false
+        confidence: data.confidence, confidenceLabel: data.confidenceLabel, confidenceReasons: data.confidenceReasons || [],
+        selectedScope: data.selectedScope || { product: scopeProduct, model: scopeModel, label: selectedModelName }, disputed: false
       }]);
       setScopeProduct(savedScope.product);
       setScopeModel(savedScope.model);
@@ -399,7 +400,7 @@ export default function Home() {
         method: 'POST', headers: headers(session, true),
         body: JSON.stringify({
           question: message.question, answer: message.content, reason: disputeReason.trim(),
-          confidence: message.confidence, provider: message.provider, sources: message.sources
+          confidence: message.confidence, provider: message.provider, sources: message.sources, scope: message.selectedScope
         })
       });
       const data = await response.json();
