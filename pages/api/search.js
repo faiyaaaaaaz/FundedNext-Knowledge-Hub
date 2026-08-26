@@ -339,7 +339,7 @@ export default async function handler(req, res) {
     ] : [];
 
     // ---- Keyword recall (typo-corrected) ------------------------------------
-    const terms = keywords(correctTypos(question) + ' ' + clearQuestion);
+    const terms = keywords(correctTypos(question) + ' ' + clearQuestion + (selectedModel ? ` ${selectedModel.name}` : ''));
     let keywordMatches = [];
     if (terms.length) {
       const expression = terms.map((term) => `content.ilike.%${term}%`).join(',');
@@ -354,6 +354,10 @@ export default async function handler(req, res) {
     // union their vector matches so every plausible meaning contributes evidence.
     const embedTexts = [...new Set([
       question, clearQuestion,
+      ...(selectedModel ? [
+        `${question} ${selectedModel.name}`,
+        `${selectedModel.name} exceptions restrictions not allowed eligibility policy`
+      ] : []),
       ...(clarity?.queries || []),
       ...topicPlan.flatMap((topic) => [topic.question, ...(topic.queries || [])]),
       ...umbrellaExpansions,
@@ -401,10 +405,15 @@ export default async function handler(req, res) {
       const mentioned = override?.model && override.model !== 'all'
         ? scopeCatalog.models.filter((model) => model.slug === override.model && model.product === override.product)
         : modelsMentioned(blob, scopeCatalog.models);
-      const futuresEvidence = override ? override.product === 'futures' : (/\bfutures?\b/i.test(blob) || mentioned.some((model) => model.product === 'futures'));
-      const cfdEvidence = override ? override.product === 'cfd' : (/\bcfd\b/i.test(blob) || mentioned.some((model) => model.product === 'cfd'));
-      if (selectedProduct === 'cfd' && futuresEvidence && !cfdEvidence) return false;
-      if (selectedProduct === 'futures' && !futuresEvidence) return false;
+      const articleUrl = String(item.article_url || '');
+      const internalKnowledge = String(item.article_id || '').startsWith('kb:') || item.kind === 'calculator';
+      const sourceProduct = override?.product ||
+        (/helpfutures\.fundednext\.com/i.test(articleUrl) ? 'futures' :
+          /help\.fundednext\.com/i.test(articleUrl) ? 'cfd' : null);
+      // Product isolation is determined only by the authoritative help-centre
+      // domain or an explicit Admin assignment. Words inside an article can
+      // never move CFD evidence into Futures (or the reverse).
+      if (!internalKnowledge && selectedProduct !== 'both' && sourceProduct !== selectedProduct) return false;
       if (!selectedModel) return true;
       if (override) return override.model === 'all' || override.model === selectedModel.slug;
       const namedInFamily = mentioned.filter((model) => model.product === selectedModel.product);
@@ -415,6 +424,12 @@ export default async function handler(req, res) {
     if (!candidates.length) {
       const family = selectedProduct === 'both' ? 'the complete knowledge base' : selectedProduct.toUpperCase();
       const target = selectedModel?.name || `all ${family} models`;
+      await logActivity({
+        actorRole: access.role, sessionId: access.sessionId, userName: access.name, userEmail: access.email,
+        authProvider: access.authProvider, questionWordCount: wordCount(question), eventType: 'query', success: true,
+        model: `No answer · Scope: ${selectedProduct.toUpperCase()}/${selectedModel?.name || 'All models'}`,
+        metadata: { question: question.slice(0, 4000), questionPreview: question.slice(0, 180), selectedProduct, selectedModel: selectedModel?.slug || 'all', selectedScopeLabel: target, sourceCount: 0, reason: 'No evidence inside selected product scope', durationMs: Date.now() - started }
+      });
       return res.status(200).json({
         scopeNotice: true,
         noticeTitle: `No verified answer found for ${target}`,
@@ -544,7 +559,8 @@ export default async function handler(req, res) {
       ? '\n\nCORRECTIVE INSTRUCTIONS FROM APPROVED REVIEWS:\n' + snippets.map((item) => `- ${item.instruction}`).join('\n')
       : '';
     const scopeText = `\n\nMANDATORY USER-SELECTED SCOPE: Product = ${selectedProduct.toUpperCase()}; Account model = ${selectedModel?.name || 'All models in the selected product family'}. ` +
-      'Every supplied evidence item has already passed this scope filter. Never mention, compare, or borrow a rule from an Account model or product outside this selection. Product-wide policy evidence may be used when it applies to the selected family.';
+      'Every supplied evidence item has already passed this scope filter. Never mention, compare, or borrow a rule from an Account model or product outside this selection. ' +
+      'Product-wide policy evidence may be used only when it does not conflict with model-specific evidence. If a model-specific FAQ states an exception, restriction, or prohibition, it always overrides a general FAQ. Never infer permission for the selected model merely because a general article allows it for another model.';
     const allocationText = allocationQuestion && !selectedModel
       ? '\n\nALLOCATION OVERVIEW: The user selected all models. Do not answer from one Account perspective. Give a concise overall comparison of every materially different allocation rule supported by the evidence: standard aggregate FundedNext Account allocation, model-specific exceptions such as Stellar Lite, Challenge-phase treatment, regional limits, Stellar Instant purchase/scaling limits, and any verified U.S. exception. Clearly separate purchase allocation from scaled balance and do not merge them into one limit.'
       : '';
@@ -803,15 +819,19 @@ export default async function handler(req, res) {
       questionWordCount: wordCount(question),
       eventType: 'query',
       provider: answerProvider,
-      model: `${usedFallback ? fallbackModel : chatModel}${usedGroqKeyLabel ? ` · Key: ${usedGroqKeyLabel}` : ''}`,
+      model: `${usedFallback ? fallbackModel : chatModel}${usedGroqKeyLabel ? ` · Key: ${usedGroqKeyLabel}` : ''} · Scope: ${selectedProduct.toUpperCase()}/${selectedModel?.name || 'All models'}`,
       inputTokens,
       outputTokens,
       estimatedCost: estimateCost(answerProvider, chatModel, inputTokens, outputTokens),
       metadata: {
         confidence, confidenceLabel, sourceCount: sources.length, scope,
+        selectedProduct, selectedModel: selectedModel?.slug || 'all',
+        selectedScopeLabel: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models`,
         fallback: usedFallback, grounding: groundingScore, durationMs: Date.now() - started,
         smart: !!clarity, ambiguous: isAmbiguous, groqKeyLabel: usedGroqKeyLabel,
-        questionPreview: question.slice(0, 180)
+        question: question.slice(0, 4000), questionPreview: question.slice(0, 180),
+        answerPreview: String(answer || '').slice(0, 1200),
+        sources: sources.slice(0, 12).map((source) => ({ title: source.title, url: source.url }))
       }
     });
 
