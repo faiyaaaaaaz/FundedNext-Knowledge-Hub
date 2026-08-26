@@ -417,7 +417,10 @@ export default async function handler(req, res) {
       if (!selectedModel) return true;
       if (override) return override.model === 'all' || override.model === selectedModel.slug;
       const namedInFamily = mentioned.filter((model) => model.product === selectedModel.product);
-      if (!namedInFamily.length) return selectedModel.product === 'futures' ? futuresEvidence : !futuresEvidence;
+      // No Account model from this product is named, so this is a
+      // product-wide policy article. The authoritative source-domain check
+      // above has already proved that it belongs to the selected product.
+      if (!namedInFamily.length) return true;
       return namedInFamily.some((model) => model.slug === selectedModel.slug);
     });
 
