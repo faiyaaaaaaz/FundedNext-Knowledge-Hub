@@ -234,6 +234,9 @@ export default function Admin() {
   const [queryLogsBusy, setQueryLogsBusy] = useState(false);
   const [selectedQueryLogs, setSelectedQueryLogs] = useState([]);
   const [deletingQueryLogs, setDeletingQueryLogs] = useState(false);
+  const [disputingQueryLog, setDisputingQueryLog] = useState(null);
+  const [queryLogDisputeReason, setQueryLogDisputeReason] = useState('');
+  const [submittingQueryLogDispute, setSubmittingQueryLogDispute] = useState(false);
   const [allowedGoogleDomains, setAllowedGoogleDomains] = useState('');
   const [smartRetrieval, setSmartRetrieval] = useState(true);
   const [normalUserGptFallback, setNormalUserGptFallback] = useState(true);
@@ -420,17 +423,29 @@ export default function Admin() {
   async function saveArticleScope(article, parentModel) {
     const draft = articleScopeDraft(article, parentModel);
     setSavingArticleScope(String(article.id)); setError(''); setNotice('');
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 25000);
     try {
-      const response = await fetch('/api/knowledge', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'article-scope', articleId: article.id, product: draft.product, model: draft.model }) });
+      const response = await fetch('/api/knowledge', { method: 'POST', headers: headers(true), signal: controller.signal, body: JSON.stringify({ action: 'article-scope', articleId: article.id, product: draft.product, model: draft.model }) });
+      if (handleAuthLoss(response)) return;
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not save the article scope.');
       if (data.savedScope?.product !== draft.product || data.savedScope?.model !== draft.model) throw new Error('The saved article scope did not match your selection.');
-      setKnowledge((current) => ({ ...current, scopeCatalog: data.scopeCatalog, articleScopes: (current.articleScopes || []).map((item) => String(item.id) === String(article.id) ? { ...item, product: data.savedScope.product, model: data.savedScope.model, overridden: true } : item) }));
+      setKnowledge((current) => ({
+        ...current,
+        articleScopes: (current.articleScopes || []).map((item) => String(item.id) === String(article.id) ? { ...item, product: data.savedScope.product, model: data.savedScope.model, overridden: true } : item),
+        scopeCatalog: {
+          ...current.scopeCatalog,
+          models: (current.scopeCatalog?.models || []).map((catalogModel) => ({
+            ...catalogModel,
+            articles: (catalogModel.articles || []).map((item) => String(item.id) === String(article.id) ? { ...item, scope: data.savedScope } : item)
+          }))
+        }
+      }));
       undoArticleScope(article);
-      setEditingArticleScope(null);
       setNotice(`Saved the scope for “${article.title}”. New searches will use this correction immediately.`);
-    } catch (e) { setError(e.message); }
-    finally { setSavingArticleScope(''); }
+    } catch (e) { setError(e.name === 'AbortError' ? 'Saving did not return within 25 seconds. The editor was kept open; refresh before trying again so you do not create a conflicting change.' : e.message); }
+    finally { window.clearTimeout(timer); setSavingArticleScope(''); }
   }
 
   async function saveDoc(payload, success) {
@@ -697,6 +712,30 @@ export default function Admin() {
     finally { setDeletingQueryLogs(false); }
   }
 
+  async function submitQueryLogDispute() {
+    if (!disputingQueryLog || queryLogDisputeReason.trim().length < 10) return;
+    setSubmittingQueryLogDispute(true); setError('');
+    try {
+      const log = disputingQueryLog;
+      const response = await fetch('/api/disputes', {
+        method: 'POST', headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: log.question, answer: log.answer, reason: queryLogDisputeReason.trim(),
+          confidence: log.confidence, provider: log.provider,
+          scope: log.product ? { product: log.product, model: log.accountModel || 'all', label: log.scopeLabel || log.accountModel || 'All models' } : undefined,
+          sources: [{ type: 'query_log', id: log.id, title: `Stored query log · ${formatDate(log.createdAt)}`, url: '' }, ...(log.sources || [])]
+        })
+      });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not submit the dispute.');
+      setNotice('Dispute submitted from the stored query and answer with its original scope and model context.');
+      setDisputingQueryLog(null); setQueryLogDisputeReason('');
+      await loadDisputes();
+    } catch (e) { setError(e.message); }
+    finally { setSubmittingQueryLogDispute(false); }
+  }
+
   function logout() {
     localStorage.removeItem('appSession'); localStorage.removeItem('appRole'); localStorage.removeItem('appPw');
     setSession(''); setRole(''); setStatus(null);
@@ -779,13 +818,15 @@ export default function Admin() {
           <section className="settings-card"><div className="settings-head"><div><h2>Recorded queries and answers</h2><p>{queryLogs?.logs?.length || 0} result{queryLogs?.logs?.length === 1 ? '' : 's'} · newest first</p></div></div><div className="query-log-bulk"><button className="btn btn-secondary" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs((queryLogs?.logs || []).map((log) => log.id))}>Select all filtered</button><button className="btn btn-secondary" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs([])}>Clear selection</button><span>{selectedQueryLogs.length} selected</span><button className="btn query-delete" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => deleteQueryLogs('ids')}>Delete selected permanently</button><button className="btn query-delete" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => deleteQueryLogs('filter')}>Delete all filtered permanently</button></div><div className="query-log-list">{(queryLogs?.logs || []).map((log) => { const expanded = expandedQueryLog === log.id; const selected = selectedQueryLogs.includes(log.id); return <article className={`query-log-card${expanded ? ' expanded' : ''}${selected ? ' selected' : ''}`} key={log.id}><div className="query-log-row"><label className="query-log-select"><input type="checkbox" checked={selected} onChange={() => toggleQueryLog(log.id)} /><span aria-hidden="true">✓</span><small>Select</small></label><button type="button" className="query-log-summary" onClick={() => setExpandedQueryLog(expanded ? null : log.id)} aria-expanded={expanded}><span className={`query-provider ${log.provider || 'unknown'}`}>{log.provider || 'No answer'}</span><div><b>{log.question || 'Question text was not retained in this older record.'}</b><p>{log.answer || (log.success ? 'No answer text was retained in this older record.' : 'The request failed before an answer was created.')}</p></div><div className="query-log-who"><strong>{log.userName || 'Unknown user'}</strong><small>{log.userEmail || 'No email recorded'}</small><time>{formatDate(log.createdAt)}</time></div><i>{expanded ? '−' : '+'}</i></button></div>{expanded && <div className="query-log-detail"><div className="query-log-facts"><span>Product<b>{log.product ? log.product.toUpperCase() : 'Legacy record'}</b></span><span>Account model<b>{log.scopeLabel || log.accountModel || 'Not recorded'}</b></span><span>Answer model<b>{log.model || 'Not recorded'}</b></span><span>Confidence<b>{log.confidence == null ? 'Not recorded' : `${log.confidence}% · ${log.confidenceLabel}`}</b></span><span>Question words<b>{log.questionWordCount.toLocaleString()}</b></span><span>Answer words<b>{log.answerWordCount.toLocaleString()}</b></span><span>Tokens<b>{log.inputTokens.toLocaleString()} in · ${log.outputTokens.toLocaleString()} out</b></span><span>Response time<b>{log.durationMs ? `${(log.durationMs / 1000).toFixed(1)}s` : 'Not recorded'}</b></span></div><div className="query-log-copy"><label>Complete query</label><div>{log.question || 'Not retained in this older record.'}</div><label>Complete answer</label><div>{log.answer || 'Not retained in this older record.'}</div></div>{log.sources?.length > 0 && <div className="query-log-sources"><label>Sources used ({log.sourceCount})</label>{log.sources.map((source, index) => <a key={`${source.url}-${index}`} href={source.url || undefined} target="_blank" rel="noreferrer">{source.title || 'Untitled source'}<span>Open ↗</span></a>)}</div>}<button type="button" className="query-collapse" onClick={() => setExpandedQueryLog(null)}>Collapse details ↑</button></div>}</article>; })}{!queryLogsBusy && !(queryLogs?.logs || []).length && <div className="empty-admin tall">No recorded queries match these filters. Complete query-and-answer storage starts with the new deployment.</div>}</div></section>
         </div>}
 
+        {tab === 'querylogs' && expandedQueryLog && (() => { const log = (queryLogs?.logs || []).find((item) => item.id === expandedQueryLog); return log ? <div className="query-dispute-dock"><span>Found something wrong in this stored answer?</span><button type="button" className="btn btn-danger" disabled={!log.question || !log.answer} onClick={() => { setDisputingQueryLog(log); setQueryLogDisputeReason(''); }}>⚑ Submit this answer as a dispute</button></div> : null; })()}
+
         {tab === 'knowledge' && <div className="settings-stack">
           <section className="settings-card"><div className="settings-head"><div><h2>Product and Account catalogue</h2><p>Bird’s-eye view of the scopes detected from the current FAQ library. Previous models remain available to Agents; uncertain new detections stay in review instead of entering the live selector.</p></div><span className="state-pill ready">{knowledge?.scopeCatalog?.models?.length || 0} detected</span></div>
             <div className="scope-catalog-table">
               <div className="scope-catalog-head"><b>Product</b><b>Account model</b><b>Status</b><b>FAQ evidence</b></div>
               {(knowledge?.scopeCatalog?.models || []).map((model) => {
                 const expanded = expandedScope === model.slug;
-                const articles = model.articles || [];
+                const articles = (model.articles || []).filter((article) => article && typeof article === 'object' && (article.title || article.url));
                 return <div className="scope-catalog-entry" key={model.slug}>
                   <div className="scope-catalog-row"><span>{model.product.toUpperCase()}</span><b>{model.name}{model.adminConfirmed && <small className="admin-confirmed">Admin confirmed</small>}</b><span className={`scope-status-badge ${model.status}`}>{model.status === 'current' ? 'Current' : model.status === 'previous' ? 'Not currently live' : 'Needs review'}</span><button type="button" className="scope-evidence-toggle" onClick={() => setExpandedScope(expanded ? null : model.slug)} aria-expanded={expanded}>{expanded ? 'Hide evidence' : `View ${model.articleCount} article${model.articleCount === 1 ? '' : 's'}`}<i>{expanded ? '−' : '+'}</i></button></div>
                   {expanded && <div className="scope-evidence-panel">
@@ -945,6 +986,7 @@ export default function Admin() {
 
         {tab === 'keys' && <div className="settings-stack"><section className="settings-card"><div className="settings-head"><div><h2>Encrypted API keys</h2><p>Keys are encrypted before storage and never displayed again.</p></div></div>{[['Intercom API key',intercom,setIntercom,status?.intercomSet],['OpenAI API key',openai,setOpenai,status?.openaiSet],['Groq API key',groq,setGroq,status?.groqSet]].map(([label,value,setter,isSet]) => <div className="vault-field" key={label}><div><label>{label}</label><span className={`state-pill ${isSet ? 'ready' : ''}`}>{isSet ? 'Connected' : 'Not set'}</span></div><input type="password" value={value} onChange={(e) => setter(e.target.value)} placeholder="Paste to set or replace" /></div>)}<button className="btn btn-primary" disabled={saving} onClick={async () => { const body = {}; if (intercom.trim()) body.intercomToken = intercom.trim(); if (openai.trim()) body.openaiKey = openai.trim(); if (groq.trim()) body.groqKey = groq.trim(); if (await settingsSave(body, 'API keys saved securely.')) { setIntercom(''); setOpenai(''); setGroq(''); } }}>Save API keys</button></section></div>}
       </section>
+      {disputingQueryLog && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !submittingQueryLogDispute && setDisputingQueryLog(null)}><div className="modal-card"><div className="modal-icon">⚑</div><h2>Dispute this stored answer?</h2><p>The complete stored query, answer, sources, answering model, and selected product scope will be attached automatically.</p><label htmlFor="query-log-dispute-reason">Reason for dispute</label><textarea id="query-log-dispute-reason" value={queryLogDisputeReason} onChange={(event) => setQueryLogDisputeReason(event.target.value)} placeholder="Explain exactly what is incorrect, incomplete, or outside the selected scope…" autoFocus /><div className="modal-actions"><button className="btn btn-secondary" disabled={submittingQueryLogDispute} onClick={() => setDisputingQueryLog(null)}>Cancel</button><button className="btn btn-danger" disabled={submittingQueryLogDispute || queryLogDisputeReason.trim().length < 10} onClick={submitQueryLogDispute}>{submittingQueryLogDispute ? 'Submitting…' : 'Submit dispute'}</button></div></div></div>}
     </main>
   );
 }
