@@ -32,7 +32,7 @@ export default async function handler(req, res) {
       }
       if (body.action === 'article-scope') {
         const saved = await saveArticleScopeOverride(body.articleId, { product: body.product, model: body.model }, sb);
-        return res.status(200).json({ ok: true, scopeCatalog: saved.catalog, savedScope: saved.savedScope });
+        return res.status(200).json({ ok: true, savedScope: saved.savedScope });
       }
       const doc = await saveKnowledgeDoc(body);
       return res.status(200).json({ ok: true, doc });
