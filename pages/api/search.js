@@ -431,7 +431,7 @@ export default async function handler(req, res) {
         actorRole: access.role, sessionId: access.sessionId, userName: access.name, userEmail: access.email,
         authProvider: access.authProvider, questionWordCount: wordCount(question), eventType: 'query', success: true,
         model: `No answer · Scope: ${selectedProduct.toUpperCase()}/${selectedModel?.name || 'All models'}`,
-        metadata: { question: question.slice(0, 4000), questionPreview: question.slice(0, 180), selectedProduct, selectedModel: selectedModel?.slug || 'all', selectedScopeLabel: target, sourceCount: 0, reason: 'No evidence inside selected product scope', durationMs: Date.now() - started }
+        metadata: { question, questionPreview: question.slice(0, 180), selectedProduct, selectedModel: selectedModel?.slug || 'all', selectedScopeLabel: target, sourceCount: 0, reason: 'No evidence inside selected product scope', durationMs: Date.now() - started, questionTruncated: false, answerTruncated: false }
       });
       return res.status(200).json({
         scopeNotice: true,
@@ -832,8 +832,9 @@ export default async function handler(req, res) {
         selectedScopeLabel: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models`,
         fallback: usedFallback, grounding: groundingScore, durationMs: Date.now() - started,
         smart: !!clarity, ambiguous: isAmbiguous, groqKeyLabel: usedGroqKeyLabel,
-        question: question.slice(0, 4000), questionPreview: question.slice(0, 180),
-        answerPreview: String(answer || '').slice(0, 1200),
+        question, questionPreview: question.slice(0, 180),
+        answer: String(answer || ''), answerPreview: String(answer || '').slice(0, 240),
+        answerWordCount: wordCount(answer), answerTruncated: false, questionTruncated: false,
         sources: sources.slice(0, 12).map((source) => ({ title: source.title, url: source.url }))
       }
     });
