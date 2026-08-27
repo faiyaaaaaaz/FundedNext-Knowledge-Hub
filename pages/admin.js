@@ -228,6 +228,12 @@ export default function Admin() {
   const [activityFrom, setActivityFrom] = useState('');
   const [activityTo, setActivityTo] = useState('');
   const [activityPage, setActivityPage] = useState(1);
+  const [queryLogs, setQueryLogs] = useState(null);
+  const [queryFilters, setQueryFilters] = useState({ from: '', to: '', name: '', email: '', provider: '', model: '', scope: '', search: '' });
+  const [expandedQueryLog, setExpandedQueryLog] = useState(null);
+  const [queryLogsBusy, setQueryLogsBusy] = useState(false);
+  const [selectedQueryLogs, setSelectedQueryLogs] = useState([]);
+  const [deletingQueryLogs, setDeletingQueryLogs] = useState(false);
   const [allowedGoogleDomains, setAllowedGoogleDomains] = useState('');
   const [smartRetrieval, setSmartRetrieval] = useState(true);
   const [normalUserGptFallback, setNormalUserGptFallback] = useState(true);
@@ -242,6 +248,7 @@ export default function Admin() {
   const [expandedScope, setExpandedScope] = useState(null);
   const [articleScopeDrafts, setArticleScopeDrafts] = useState({});
   const [savingArticleScope, setSavingArticleScope] = useState('');
+  const [editingArticleScope, setEditingArticleScope] = useState(null);
   const [articleScopeSearch, setArticleScopeSearch] = useState('');
   const [scopeStatusDrafts, setScopeStatusDrafts] = useState({});
   const [savingScopeStatus, setSavingScopeStatus] = useState('');
@@ -274,6 +281,7 @@ export default function Admin() {
     if (tab === 'activity') loadActivity();
     if (tab === 'autosync') loadAutoSync();
     if (tab === 'knowledge') loadKnowledge();
+    if (tab === 'querylogs') loadQueryLogs();
     if (tab === 'calcdata') loadCalc();
     if (tab === 'groqkeys') loadGroqKeys();
   }, [tab, session, role, disputeFilter]);
@@ -419,6 +427,7 @@ export default function Admin() {
       if (data.savedScope?.product !== draft.product || data.savedScope?.model !== draft.model) throw new Error('The saved article scope did not match your selection.');
       setKnowledge((current) => ({ ...current, scopeCatalog: data.scopeCatalog, articleScopes: (current.articleScopes || []).map((item) => String(item.id) === String(article.id) ? { ...item, product: data.savedScope.product, model: data.savedScope.model, overridden: true } : item) }));
       undoArticleScope(article);
+      setEditingArticleScope(null);
       setNotice(`Saved the scope for “${article.title}”. New searches will use this correction immediately.`);
     } catch (e) { setError(e.message); }
     finally { setSavingArticleScope(''); }
@@ -641,6 +650,53 @@ export default function Admin() {
     loadActivity({ email: '', from: '', to: '' });
   }
 
+  async function loadQueryLogs(filters = queryFilters) {
+    setQueryLogsBusy(true); setError('');
+    try {
+      const query = new URLSearchParams();
+      Object.entries(filters).forEach(([key, value]) => String(value || '').trim() && query.set(key, String(value).trim()));
+      const response = await fetch(`/api/query-logs?${query}`, { headers: headers() });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not load query and answer logs.');
+      setQueryLogs(data); setExpandedQueryLog(null); setSelectedQueryLogs([]);
+    } catch (e) { setError(e.message); }
+    finally { setQueryLogsBusy(false); }
+  }
+
+  function updateQueryFilter(key, value) {
+    setQueryFilters((current) => ({ ...current, [key]: value }));
+  }
+
+  function clearQueryFilters() {
+    const empty = { from: '', to: '', name: '', email: '', provider: '', model: '', scope: '', search: '' };
+    setQueryFilters(empty); loadQueryLogs(empty);
+  }
+
+  function toggleQueryLog(id) {
+    setSelectedQueryLogs((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  }
+
+  async function deleteQueryLogs(mode) {
+    const count = mode === 'filter' ? (queryLogs?.logs?.length || 0) : selectedQueryLogs.length;
+    if (!count) return;
+    const label = mode === 'filter' ? `all ${count} records matching the current filters` : `${count} selected record${count === 1 ? '' : 's'}`;
+    if (!window.confirm(`Permanently delete ${label}? This cannot be undone.`)) return;
+    setDeletingQueryLogs(true); setError('');
+    try {
+      const response = await fetch('/api/query-logs', {
+        method: 'DELETE', headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, ids: selectedQueryLogs, filters: queryFilters, confirm: 'PERMANENT_DELETE' })
+      });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not delete the records.');
+      setNotice(`Permanently deleted ${data.deleted} query-and-answer record${data.deleted === 1 ? '' : 's'}.`);
+      await loadQueryLogs();
+    } catch (e) { setError(e.message); }
+    finally { setDeletingQueryLogs(false); }
+  }
+
   function logout() {
     localStorage.removeItem('appSession'); localStorage.removeItem('appRole'); localStorage.removeItem('appPw');
     setSession(''); setRole(''); setStatus(null);
@@ -663,7 +719,7 @@ export default function Admin() {
 
   const navigation = [
     ['access', '⌁', 'Team access'], ['ai', '✦', 'AI & model'], ['branding', 'Aa', 'Brand Language'],
-    ['disputes', '⚑', 'Disputes'], ['snippets', '⌘', 'Snippets'], ['knowledge', '▤', 'Knowledge'], ['calcdata', '∑', 'Calculator data'], ['activity', '◫', 'Activity logs'],
+    ['disputes', '⚑', 'Disputes'], ['snippets', '⌘', 'Snippets'], ['knowledge', '▤', 'Knowledge'], ['querylogs', '◧', 'Query & answer logs'], ['calcdata', '∑', 'Calculator data'], ['activity', '◫', 'Activity logs'],
     ['autosync', '↻', 'Automatic sync'], ['groqkeys', '⚿', 'Groq keys'], ['keys', '◇', 'API vault']
   ];
   const titles = Object.fromEntries(navigation.map(([id,, title]) => [id, title]));
@@ -718,6 +774,11 @@ export default function Admin() {
 
         {tab === 'activity' && <div className="settings-stack"><section className="settings-card activity-filters"><div className="settings-head"><div><h2>Filter activity</h2><p>Dates are interpreted in GMT+6.</p></div><DateRangeFilter from={activityFrom} to={activityTo} onApply={applyDateRange} /></div><div className="field-action"><input type="search" value={activityEmail} onChange={(e) => setActivityEmail(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && loadActivity()} placeholder="Search a teammate’s email address" /><div className="row"><button className="btn btn-primary" onClick={() => loadActivity()}>Search</button><button className="btn btn-secondary" onClick={clearActivityFilters}>Clear</button></div></div></section>{activity && <><div className="activity-kpis">{[['Users', activity.summary.users], ['Queries', activity.summary.queries], ['Question words', activity.summary.questionWords.toLocaleString()], ['Input tokens', activity.summary.inputTokens.toLocaleString()], ['Output tokens', activity.summary.outputTokens.toLocaleString()], ['Estimated cost', `$${activity.summary.estimatedCost.toFixed(4)}`]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><section className="settings-card"><div className="settings-head"><div><h2>Activity results</h2><p className="activity-count">{activityLogs.length} event{activityLogs.length === 1 ? '' : 's'} match the current filters.</p></div></div><div className="activity-table detailed"><div><b>Time</b><b>Google user</b><b>Email</b><b>Event</b><b>Words</b><b>Input</b><b>Output</b><b>Model</b><b>Status</b></div>{pageLogs.map((log) => <div key={log.id}><span data-label="Time">{formatDate(log.created_at)}</span><span data-label="User">{log.user_name || (log.actor_role === 'admin' ? 'Master Admin' : 'Legacy Agent')}</span><span data-label="Email" title={log.user_email || ''}>{log.user_email || '—'}</span><span data-label="Event">{log.event_type}</span><span data-label="Words">{log.question_word_count || 0}</span><span data-label="Input">{log.input_tokens || 0}</span><span data-label="Output">{log.output_tokens || 0}</span><span data-label="Model" title={log.model || ''}>{log.provider || '—'}{log.model ? ` · ${log.model}` : ''}</span><span data-label="Status" className={log.success ? 'good' : 'bad'}>{log.success ? 'Success' : 'Failed'}</span></div>)}{!pageLogs.length && <div className="empty-admin">No activity for this filter.</div>}</div>{totalPages > 1 && <div className="pager"><button disabled={activityPage === 1} onClick={() => setActivityPage((p) => Math.max(1, p - 1))}>‹ Prev</button>{pageNumbers.map((p, i) => p === '…' ? <span key={`e${i}`} className="pager-info">…</span> : <button key={p} className={p === activityPage ? 'current' : ''} onClick={() => setActivityPage(p)}>{p}</button>)}<button disabled={activityPage === totalPages} onClick={() => setActivityPage((p) => Math.min(totalPages, p + 1))}>Next ›</button></div>}</section></>}</div>}
 
+        {tab === 'querylogs' && <div className="settings-stack query-log-page">
+          <section className="settings-card query-filter-card"><div className="settings-head"><div><h2>Find conversations</h2><p>Filter the questions and complete answers recorded from now onward.</p></div><DateRangeFilter from={queryFilters.from} to={queryFilters.to} onApply={(from, to) => setQueryFilters((current) => ({ ...current, from, to }))} /></div><div className="query-filter-grid"><label>Search question or answer<input value={queryFilters.search} onChange={(e) => updateQueryFilter('search', e.target.value)} placeholder="Search the conversation text…" /></label><label>Team member<input value={queryFilters.name} onChange={(e) => updateQueryFilter('name', e.target.value)} placeholder="Name" /></label><label>Email address<input value={queryFilters.email} onChange={(e) => updateQueryFilter('email', e.target.value)} placeholder="name@nextventures.io" /></label><label>Answering provider<select value={queryFilters.provider} onChange={(e) => updateQueryFilter('provider', e.target.value)}><option value="">All providers</option><option value="groq">Groq</option><option value="openai">OpenAI</option></select></label><label>Answering model<input value={queryFilters.model} onChange={(e) => updateQueryFilter('model', e.target.value)} placeholder="e.g. gpt-4o" /></label><label>Product scope<select value={queryFilters.scope} onChange={(e) => updateQueryFilter('scope', e.target.value)}><option value="">All products</option><option value="cfd">CFD</option><option value="futures">Futures</option><option value="both">Both</option></select></label><div className="query-filter-actions"><button className="btn btn-secondary" onClick={clearQueryFilters}>Clear</button><button className="btn btn-primary" disabled={queryLogsBusy} onClick={() => loadQueryLogs()}>{queryLogsBusy ? 'Loading…' : 'Apply filters'}</button></div></div></section>
+          <section className="settings-card"><div className="settings-head"><div><h2>Recorded queries and answers</h2><p>{queryLogs?.logs?.length || 0} result{queryLogs?.logs?.length === 1 ? '' : 's'} · newest first</p></div></div><div className="query-log-bulk"><button className="btn btn-secondary" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs((queryLogs?.logs || []).map((log) => log.id))}>Select all filtered</button><button className="btn btn-secondary" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs([])}>Clear selection</button><span>{selectedQueryLogs.length} selected</span><button className="btn query-delete" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => deleteQueryLogs('ids')}>Delete selected permanently</button><button className="btn query-delete" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => deleteQueryLogs('filter')}>Delete all filtered permanently</button></div><div className="query-log-list">{(queryLogs?.logs || []).map((log) => { const expanded = expandedQueryLog === log.id; const selected = selectedQueryLogs.includes(log.id); return <article className={`query-log-card${expanded ? ' expanded' : ''}${selected ? ' selected' : ''}`} key={log.id}><div className="query-log-row"><label className="query-log-select"><input type="checkbox" checked={selected} onChange={() => toggleQueryLog(log.id)} /><span aria-hidden="true">✓</span><small>Select</small></label><button type="button" className="query-log-summary" onClick={() => setExpandedQueryLog(expanded ? null : log.id)} aria-expanded={expanded}><span className={`query-provider ${log.provider || 'unknown'}`}>{log.provider || 'No answer'}</span><div><b>{log.question || 'Question text was not retained in this older record.'}</b><p>{log.answer || (log.success ? 'No answer text was retained in this older record.' : 'The request failed before an answer was created.')}</p></div><div className="query-log-who"><strong>{log.userName || 'Unknown user'}</strong><small>{log.userEmail || 'No email recorded'}</small><time>{formatDate(log.createdAt)}</time></div><i>{expanded ? '−' : '+'}</i></button></div>{expanded && <div className="query-log-detail"><div className="query-log-facts"><span>Product<b>{log.product ? log.product.toUpperCase() : 'Legacy record'}</b></span><span>Account model<b>{log.scopeLabel || log.accountModel || 'Not recorded'}</b></span><span>Answer model<b>{log.model || 'Not recorded'}</b></span><span>Confidence<b>{log.confidence == null ? 'Not recorded' : `${log.confidence}% · ${log.confidenceLabel}`}</b></span><span>Question words<b>{log.questionWordCount.toLocaleString()}</b></span><span>Answer words<b>{log.answerWordCount.toLocaleString()}</b></span><span>Tokens<b>{log.inputTokens.toLocaleString()} in · ${log.outputTokens.toLocaleString()} out</b></span><span>Response time<b>{log.durationMs ? `${(log.durationMs / 1000).toFixed(1)}s` : 'Not recorded'}</b></span></div><div className="query-log-copy"><label>Complete query</label><div>{log.question || 'Not retained in this older record.'}</div><label>Complete answer</label><div>{log.answer || 'Not retained in this older record.'}</div></div>{log.sources?.length > 0 && <div className="query-log-sources"><label>Sources used ({log.sourceCount})</label>{log.sources.map((source, index) => <a key={`${source.url}-${index}`} href={source.url || undefined} target="_blank" rel="noreferrer">{source.title || 'Untitled source'}<span>Open ↗</span></a>)}</div>}<button type="button" className="query-collapse" onClick={() => setExpandedQueryLog(null)}>Collapse details ↑</button></div>}</article>; })}{!queryLogsBusy && !(queryLogs?.logs || []).length && <div className="empty-admin tall">No recorded queries match these filters. Complete query-and-answer storage starts with the new deployment.</div>}</div></section>
+        </div>}
+
         {tab === 'knowledge' && <div className="settings-stack">
           <section className="settings-card"><div className="settings-head"><div><h2>Product and Account catalogue</h2><p>Bird’s-eye view of the scopes detected from the current FAQ library. Previous models remain available to Agents; uncertain new detections stay in review instead of entering the live selector.</p></div><span className="state-pill ready">{knowledge?.scopeCatalog?.models?.length || 0} detected</span></div>
             <div className="scope-catalog-table">
@@ -734,7 +795,7 @@ export default function Admin() {
                       const saved = savedArticleScope(article, model);
                       const dirty = draft.product !== saved.product || draft.model !== saved.model;
                       const modelOptions = (knowledge?.scopeCatalog?.models || []).filter((item) => item.product === draft.product && item.status !== 'review');
-                      return <div className="article-scope-card" key={`${article.id || article.url || index}`}><a href={article.url || undefined} target={article.url ? '_blank' : undefined} rel={article.url ? 'noreferrer' : undefined}><span>{article.title || 'Untitled FAQ'}</span><em>{article.url ? 'Open article ↗' : 'Stored FAQ'}</em></a><div className="article-scope-editor"><label>Product<select value={draft.product} onChange={(event) => changeArticleScope(article, model, { product: event.target.value })}><option value="cfd">CFD</option><option value="futures">Futures</option></select></label><label>Availability<select value={draft.model} onChange={(event) => changeArticleScope(article, model, { model: event.target.value })}><option value="all">All {draft.product.toUpperCase()} models (product-wide)</option>{modelOptions.map((item) => <option key={item.slug} value={item.slug}>{item.name}{item.status === 'previous' ? ' — Not currently live' : ''}</option>)}</select></label><div className="article-scope-actions"><button type="button" className="btn-undo" disabled={!dirty || savingArticleScope === String(article.id)} onClick={() => undoArticleScope(article)}>↶ Undo</button><button type="button" className="btn-save-scope" disabled={!dirty || savingArticleScope === String(article.id)} onClick={() => saveArticleScope(article, model)}>{savingArticleScope === String(article.id) ? 'Saving…' : 'Save'}</button></div></div></div>;
+                      return <div className={`article-scope-card${editingArticleScope === String(article.id) ? ' editing' : ''}`} key={`${article.id || article.url || index}`}><div className="article-scope-title"><a href={article.url || undefined} target={article.url ? '_blank' : undefined} rel={article.url ? 'noreferrer' : undefined}><span>{article.title || 'Untitled FAQ'}</span><em>{article.url ? 'Open article ↗' : 'Stored FAQ'}</em></a><button type="button" onClick={() => setEditingArticleScope(editingArticleScope === String(article.id) ? null : String(article.id))}>{editingArticleScope === String(article.id) ? 'Close editor' : 'Edit scope'}</button></div>{editingArticleScope === String(article.id) && <div className="article-scope-editor"><label>Product<select value={draft.product} onChange={(event) => changeArticleScope(article, model, { product: event.target.value })}><option value="cfd">CFD</option><option value="futures">Futures</option></select></label><label>Availability<select value={draft.model} onChange={(event) => changeArticleScope(article, model, { model: event.target.value })}><option value="all">All {draft.product.toUpperCase()} models (product-wide)</option>{modelOptions.map((item) => <option key={item.slug} value={item.slug}>{item.name}{item.status === 'previous' ? ' — Not currently live' : ''}</option>)}</select></label><div className="article-scope-actions"><button type="button" className="btn-undo" disabled={!dirty || savingArticleScope === String(article.id)} onClick={() => undoArticleScope(article)}>↶ Undo</button><button type="button" className="btn-save-scope" disabled={!dirty || savingArticleScope === String(article.id)} onClick={() => saveArticleScope(article, model)}>{savingArticleScope === String(article.id) ? 'Saving…' : 'Save'}</button></div></div>}</div>;
                     }) : <p>No linked article details are available yet. Run a successful knowledge update to rebuild this evidence.</p>}</div>
                     {model.articleCount > articles.length && <small className="scope-evidence-note">Showing the first {articles.length} of {model.articleCount} matching articles.</small>}
                   </div>}
@@ -749,7 +810,7 @@ export default function Admin() {
             const saved = savedArticleScope(article, parent);
             const dirty = draft.product !== saved.product || draft.model !== saved.model;
             const options = (knowledge?.scopeCatalog?.models || []).filter((item) => item.product === draft.product && item.status !== 'review');
-            return <div className="article-scope-card" key={article.id}><a href={article.url || undefined} target={article.url ? '_blank' : undefined} rel={article.url ? 'noreferrer' : undefined}><span>{article.title}</span><em>{article.overridden ? 'Admin assigned · Open ↗' : 'Detected · Open ↗'}</em></a><div className="article-scope-editor"><label>Product<select value={draft.product} onChange={(event) => changeArticleScope(article, parent, { product: event.target.value })}><option value="cfd">CFD</option><option value="futures">Futures</option></select></label><label>Availability<select value={draft.model} onChange={(event) => changeArticleScope(article, parent, { model: event.target.value })}><option value="all">All {draft.product.toUpperCase()} models (product-wide)</option>{options.map((item) => <option key={item.slug} value={item.slug}>{item.name}{item.status === 'previous' ? ' — Not currently live' : ''}</option>)}</select></label><div className="article-scope-actions"><button type="button" className="btn-undo" disabled={!dirty || savingArticleScope === String(article.id)} onClick={() => undoArticleScope(article)}>↶ Undo</button><button type="button" className="btn-save-scope" disabled={!dirty || savingArticleScope === String(article.id)} onClick={() => saveArticleScope(article, parent)}>{savingArticleScope === String(article.id) ? 'Saving…' : 'Save'}</button></div></div></div>;
+            return <div className={`article-scope-card${editingArticleScope === String(article.id) ? ' editing' : ''}`} key={article.id}><div className="article-scope-title"><a href={article.url || undefined} target={article.url ? '_blank' : undefined} rel={article.url ? 'noreferrer' : undefined}><span>{article.title}</span><em>{article.overridden ? 'Admin assigned · Open ↗' : 'Detected · Open ↗'}</em></a><button type="button" onClick={() => setEditingArticleScope(editingArticleScope === String(article.id) ? null : String(article.id))}>{editingArticleScope === String(article.id) ? 'Close editor' : 'Edit scope'}</button></div>{editingArticleScope === String(article.id) && <div className="article-scope-editor"><label>Product<select value={draft.product} onChange={(event) => changeArticleScope(article, parent, { product: event.target.value })}><option value="cfd">CFD</option><option value="futures">Futures</option></select></label><label>Availability<select value={draft.model} onChange={(event) => changeArticleScope(article, parent, { model: event.target.value })}><option value="all">All {draft.product.toUpperCase()} models (product-wide)</option>{options.map((item) => <option key={item.slug} value={item.slug}>{item.name}{item.status === 'previous' ? ' — Not currently live' : ''}</option>)}</select></label><div className="article-scope-actions"><button type="button" className="btn-undo" disabled={!dirty || savingArticleScope === String(article.id)} onClick={() => undoArticleScope(article)}>↶ Undo</button><button type="button" className="btn-save-scope" disabled={!dirty || savingArticleScope === String(article.id)} onClick={() => saveArticleScope(article, parent)}>{savingArticleScope === String(article.id) ? 'Saving…' : 'Save'}</button></div></div>}</div>;
           })}{!filteredArticleScopes.length && <div className="empty-admin">No published articles match this search.</div>}</div><p className="field-help">Showing up to 100 matching articles at a time. Search by the complete FAQ title to reach any article.</p></section>
           <section className="settings-card"><div className="settings-head"><div><h2>Chatbot knowledge</h2><p>Internal knowledge the chatbot can use alongside the Intercom FAQ — for example the trade calculator's formulas, instrument pip values, and account leverage. Turn documents on or off, edit them, then re-index to push changes into the chatbot.</p></div></div>
             <div className="autosync-grid">
