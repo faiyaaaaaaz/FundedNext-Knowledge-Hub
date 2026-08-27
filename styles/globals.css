@@ -710,6 +710,10 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .scope-status-actions button.status-undo { color: var(--muted); }
 .scope-status-actions button:disabled { opacity: .38; cursor: default; }
 .scope-evidence-list { max-height: 280px; overflow: auto; overscroll-behavior: contain; display: grid; gap: 6px; padding-right: 4px; }
+.scope-evidence-link { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; min-height: 40px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--ink); text-decoration: none; }
+.scope-evidence-link:hover { border-color: var(--accent); background: var(--accent-soft); }
+.scope-evidence-link span { min-width: 0; font-size: 11px; font-weight: 700; line-height: 1.45; overflow-wrap: anywhere; }
+.scope-evidence-link em { flex: 0 0 auto; color: var(--accent); font-size: 10px; font-style: normal; white-space: nowrap; }
 .article-scope-card { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
 .article-scope-card.editing { border-color: color-mix(in srgb, var(--accent) 48%, var(--line)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent); }
 .article-scope-title { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 42px; padding: 5px 6px 5px 10px; }
