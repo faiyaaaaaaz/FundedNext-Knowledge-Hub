@@ -12,6 +12,40 @@ const THINKING_STEPS = [
   'Writing a client-ready reply'
 ];
 
+/* When Google/Supabase rejects a sign-in (e.g. a brand-new user when new
+   sign-ups are turned off, or a failing auth trigger), it does NOT return a
+   session — it redirects back with the reason in the URL (?error= / #error=).
+   The old code ignored that, so the button just span forever with no message.
+   These helpers read that reason, clear it from the URL, and translate it. */
+function readOAuthError() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const url = new URL(window.location.href);
+    const hash = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
+    const code = url.searchParams.get('error_code') || hash.get('error_code') || '';
+    const rawError = url.searchParams.get('error') || hash.get('error') || '';
+    const desc = url.searchParams.get('error_description') || hash.get('error_description') || '';
+    if (!code && !rawError && !desc) return null;
+    // Remove the error from the address bar so a refresh doesn't re-show it.
+    window.history.replaceState({}, document.title, url.origin + url.pathname);
+    return { code: code.toLowerCase(), error: rawError.toLowerCase(), description: decodeURIComponent(desc.replace(/\+/g, ' ')) };
+  } catch { return null; }
+}
+
+function friendlyOAuthError(err) {
+  const d = (err.description || '').toLowerCase();
+  if (err.code === 'signup_disabled' || d.includes('signups not allowed') || d.includes('signup is disabled')) {
+    return 'New sign-ups are turned off for this workspace, so first-time accounts cannot be created. An Admin must enable them in Supabase → Authentication → Sign In / Providers → “Allow new users to sign up”.';
+  }
+  if (d.includes('database error saving new user')) {
+    return 'Your account could not be created because a Supabase database trigger failed on first sign-in. An Admin needs to fix the trigger on auth.users in Supabase.';
+  }
+  if (err.code === 'access_denied' || err.error === 'access_denied') {
+    return 'Google blocked this sign-in. If you are a new team member, an Admin needs to grant your account access.';
+  }
+  return err.description || 'Google sign-in did not complete. Please try again, or contact an Admin.';
+}
+
 /* Theme-aware FN mark — letters inherit the ink colour, triangle stays violet. */
 function Logo({ className = '' }) {
   return (
@@ -308,9 +342,14 @@ export default function Home() {
   async function completeGoogleLogin() {
     const client = getSupabaseBrowser();
     if (!client) return;
+    // If Google/Supabase redirected back with a rejection, show why instead of
+    // spinning forever. This is what new users hit when sign-ups are disabled.
+    const oauthError = readOAuthError();
+    if (oauthError) { setLoginError(friendlyOAuthError(oauthError)); setLoggingIn(false); return; }
     setLoggingIn(true);
     try {
-      const { data } = await client.auth.getSession();
+      const { data, error } = await client.auth.getSession();
+      if (error) throw new Error(error.message);
       if (!data.session?.access_token) return;
       const response = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ googleAccessToken: data.session.access_token }) });
       const result = await response.json();
