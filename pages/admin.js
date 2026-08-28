@@ -7,6 +7,36 @@ const GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.6-
 const EMPTY_TERM = { category: 'Account Type', rule_type: 'exact', match_term: '', required_term: '', notes: '', active: true };
 const ACTIVITY_PAGE_SIZE = 12;
 
+/* Read and translate an OAuth rejection that Supabase/Google puts in the return
+   URL (?error= / #error=) instead of leaving the sign-in silently stuck. */
+function readOAuthError() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const url = new URL(window.location.href);
+    const hash = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
+    const code = url.searchParams.get('error_code') || hash.get('error_code') || '';
+    const rawError = url.searchParams.get('error') || hash.get('error') || '';
+    const desc = url.searchParams.get('error_description') || hash.get('error_description') || '';
+    if (!code && !rawError && !desc) return null;
+    window.history.replaceState({}, document.title, url.origin + url.pathname);
+    return { code: code.toLowerCase(), error: rawError.toLowerCase(), description: decodeURIComponent(desc.replace(/\+/g, ' ')) };
+  } catch { return null; }
+}
+
+function friendlyOAuthError(err) {
+  const d = (err.description || '').toLowerCase();
+  if (err.code === 'signup_disabled' || d.includes('signups not allowed') || d.includes('signup is disabled')) {
+    return 'New sign-ups are turned off in Supabase (Authentication → Sign In / Providers → “Allow new users to sign up”), so first-time accounts cannot be created.';
+  }
+  if (d.includes('database error saving new user')) {
+    return 'Account creation failed because a Supabase database trigger errored on first sign-in. Fix the trigger on auth.users in Supabase.';
+  }
+  if (err.code === 'access_denied' || err.error === 'access_denied') {
+    return 'Google blocked this sign-in for this account.';
+  }
+  return err.description || 'Google sign-in did not complete. Please try again.';
+}
+
 function Logo({ className = '' }) {
   return (
     <svg className={`fn-logo ${className}`} viewBox="12 15 41 32" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -304,8 +334,11 @@ export default function Admin() {
     const client = getSupabaseBrowser();
     if (!client) return;
     setLoginError('');
+    const oauthError = readOAuthError();
+    if (oauthError) { setLoginError(friendlyOAuthError(oauthError)); return; }
     try {
-      const { data: authData } = await client.auth.getSession();
+      const { data: authData, error: sessionError } = await client.auth.getSession();
+      if (sessionError) throw new Error(sessionError.message);
       if (!authData.session?.access_token) return;
       const response = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ googleAccessToken: authData.session.access_token }) });
       const result = await response.json();
