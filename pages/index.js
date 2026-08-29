@@ -394,9 +394,14 @@ export default function Home() {
         selectedScope: data.selectedScope || { product: scopeProduct, model: scopeModel, label: selectedModelName },
         queryLogId: data.queryLogId || null, feedback: null, disputed: false
       }]);
+      // A one-off Account selection applies to this completed answer only.
+      // Return to the saved default afterward, but never reset while a scope
+      // warning or clarification is still waiting for the user.
+      setScopeProduct(savedScope.product);
+      setScopeModel(savedScope.model);
     } catch (error) {
       setMessages((current) => [...current, { role: 'assistant', question: value, questionId, content: error.message, sources: [], error: true }]);
-    } finally { clearInterval(thinkingRef.current); setLoading(false); loadStats(); }
+    } finally { clearInterval(thinkingRef.current); setLoading(false); }
   }
 
   async function rateAnswer(index, rating) {
