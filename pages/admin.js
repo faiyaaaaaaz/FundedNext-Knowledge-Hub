@@ -7,36 +7,6 @@ const GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.6-
 const EMPTY_TERM = { category: 'Account Type', rule_type: 'exact', match_term: '', required_term: '', notes: '', active: true };
 const ACTIVITY_PAGE_SIZE = 12;
 
-/* Read and translate an OAuth rejection that Supabase/Google puts in the return
-   URL (?error= / #error=) instead of leaving the sign-in silently stuck. */
-function readOAuthError() {
-  if (typeof window === 'undefined') return null;
-  try {
-    const url = new URL(window.location.href);
-    const hash = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
-    const code = url.searchParams.get('error_code') || hash.get('error_code') || '';
-    const rawError = url.searchParams.get('error') || hash.get('error') || '';
-    const desc = url.searchParams.get('error_description') || hash.get('error_description') || '';
-    if (!code && !rawError && !desc) return null;
-    window.history.replaceState({}, document.title, url.origin + url.pathname);
-    return { code: code.toLowerCase(), error: rawError.toLowerCase(), description: decodeURIComponent(desc.replace(/\+/g, ' ')) };
-  } catch { return null; }
-}
-
-function friendlyOAuthError(err) {
-  const d = (err.description || '').toLowerCase();
-  if (err.code === 'signup_disabled' || d.includes('signups not allowed') || d.includes('signup is disabled')) {
-    return 'New sign-ups are turned off in Supabase (Authentication → Sign In / Providers → “Allow new users to sign up”), so first-time accounts cannot be created.';
-  }
-  if (d.includes('database error saving new user')) {
-    return 'Account creation failed because a Supabase database trigger errored on first sign-in. Fix the trigger on auth.users in Supabase.';
-  }
-  if (err.code === 'access_denied' || err.error === 'access_denied') {
-    return 'Google blocked this sign-in for this account.';
-  }
-  return err.description || 'Google sign-in did not complete. Please try again.';
-}
-
 function Logo({ className = '' }) {
   return (
     <svg className={`fn-logo ${className}`} viewBox="12 15 41 32" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -228,12 +198,18 @@ function DateRangeFilter({ from, to, onApply }) {
   );
 }
 
+function DataLoader({ title, detail }) {
+  return <div className="page-loading-overlay" role="status" aria-live="polite"><div className="real-loader"><span className="loader-orbit"><i /><i /><i /></span><div><b>{title}</b><small>{detail}</small></div><span className="loader-pulse"><i /><i /><i /></span></div></div>;
+}
+
 export default function Admin() {
   const [session, setSession] = useState('');
   const [role, setRole] = useState('');
   const [loginError, setLoginError] = useState('');
   const [tab, setTab] = useState('access');
   const [status, setStatus] = useState(null);
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [loadingTab, setLoadingTab] = useState('');
   const [theme, setTheme] = useState('dark');
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState('');
@@ -308,15 +284,13 @@ export default function Admin() {
 
   useEffect(() => {
     if (!session || role !== 'admin') return;
-    if (tab === 'branding') loadTerms();
-    if (tab === 'disputes') loadDisputes();
-    if (tab === 'snippets') loadSnippets();
-    if (tab === 'activity') loadActivity();
-    if (tab === 'autosync') loadAutoSync();
-    if (tab === 'knowledge') loadKnowledge();
-    if (tab === 'querylogs') loadQueryLogs();
-    if (tab === 'calcdata') loadCalc();
-    if (tab === 'groqkeys') loadGroqKeys();
+    const loaders = { branding: loadTerms, disputes: loadDisputes, snippets: loadSnippets, activity: loadActivity, autosync: loadAutoSync, knowledge: loadKnowledge, querylogs: loadQueryLogs, calcdata: loadCalc, groqkeys: loadGroqKeys };
+    const loader = loaders[tab];
+    if (loader) {
+      const activeTab = tab;
+      setLoadingTab(activeTab);
+      Promise.resolve(loader()).finally(() => setLoadingTab((current) => current === activeTab ? '' : current));
+    }
   }, [tab, session, role, disputeFilter]);
 
   function headers(json = false, token = session) {
@@ -334,11 +308,8 @@ export default function Admin() {
     const client = getSupabaseBrowser();
     if (!client) return;
     setLoginError('');
-    const oauthError = readOAuthError();
-    if (oauthError) { setLoginError(friendlyOAuthError(oauthError)); return; }
     try {
-      const { data: authData, error: sessionError } = await client.auth.getSession();
-      if (sessionError) throw new Error(sessionError.message);
+      const { data: authData } = await client.auth.getSession();
       if (!authData.session?.access_token) return;
       const response = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ googleAccessToken: authData.session.access_token }) });
       const result = await response.json();
@@ -357,6 +328,7 @@ export default function Admin() {
   }
 
   async function loadSettings(token = session) {
+    setSettingsLoading(true);
     try {
       const response = await fetch('/api/settings', { headers: headers(false, token) });
       if (handleAuthLoss(response)) return;
@@ -369,7 +341,7 @@ export default function Admin() {
       setAdminAutoFallback(data.adminAutoFallback !== false);
       setFallbackProvider(data.fallbackProvider || 'openai');
       setFallbackModel(data.fallbackModel || 'gpt-4o');
-    } catch (e) { setError(e.message); }
+    } catch (e) { setError(e.message); } finally { setSettingsLoading(false); }
   }
 
   async function loadAutoSync() {
@@ -811,6 +783,7 @@ export default function Admin() {
     }
     return out;
   })();
+  const pageIsLoading = loadingTab === tab || (settingsLoading && ['access', 'ai', 'keys'].includes(tab));
 
   return (
     <main className="admin-shell">
@@ -818,6 +791,7 @@ export default function Admin() {
       <section className="admin-main">
         <header className="admin-top"><div><span className="eyebrow">Workspace settings</span><h1>{titles[tab]}</h1></div><button className="icon-btn" onClick={toggleTheme} aria-label="Change theme">{theme === 'dark' ? '☀' : '☾'}</button></header>
         {notice && <div className="notice success">✓ {notice}</div>}{error && <div className="notice danger">{error}</div>}
+        {pageIsLoading && <DataLoader title={`Loading ${titles[tab]}`} detail="Requesting the latest live workspace data…" />}
 
         {tab === 'access' && <div className="settings-stack">
           <section className="settings-card"><div className="settings-head"><div><h2>Google sign-in</h2><p>Access is permanently restricted to nextventures.io Google accounts.</p></div><span className={`state-pill ${status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'ready' : ''}`}>{status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'Configured' : 'Vercel setup needed'}</span></div><div className="permission-table"><div><span>Access rule</span><b>Required value</b><b>Status</b></div><div><span>Allowed domain</span><b>nextventures.io</b><b>Fixed</b></div><div><span>Admin list</span><b>ADMIN_GOOGLE_EMAILS</b><b>{status?.adminGoogleConfigured ? 'Configured' : 'Missing'}</b></div></div></section>
