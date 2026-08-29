@@ -612,6 +612,18 @@ export default async function handler(req, res) {
       { role: 'system', content: system },
       { role: 'user', content: `${askedText}\n\nFAQ evidence:\n${context}` }
     ];
+    // A smaller, evidence-preserving recovery request is used only after every
+    // normal Groq attempt fails. It keeps the highest-ranked scoped evidence and
+    // all calculator evidence, avoiding an unnecessary provider switch when a
+    // long prompt exceeds a model or gateway limit.
+    const recoveryMatches = matches.filter((item, index) => index < 7 || String(item.article_id || '').startsWith('calc:'));
+    const recoveryContext = recoveryMatches.map((item, index) =>
+      `[${index + 1}] ${item.article_title}\nURL: ${item.article_url}\n${String(item.content || '').slice(0, 4200)}`
+    ).join('\n\n---\n\n');
+    const recoveryMessages = [
+      { role: 'system', content: system },
+      { role: 'user', content: `${askedText}\n\nFAQ evidence (highest-ranked scoped evidence):\n${recoveryContext}` }
+    ];
 
     let completion;
     let answerProvider = chatProvider;
@@ -646,6 +658,18 @@ export default async function handler(req, res) {
         for (const idx of order) {
           try {
             completion = await openaiChatDetailed(pool[idx].key, chatModel, messages, 'https://api.groq.com/openai/v1');
+            usedGroqKeyLabel = pool[idx].label || `Key ${pool[idx].id}`;
+            answerProvider = 'groq';
+            break;
+          } catch (e) { lastErr = e; completion = null; }
+        }
+      }
+      // Last Groq-only recovery. OpenAI is not considered until this has failed.
+      if (!completion && recoveryContext.length < context.length) {
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        for (const idx of order) {
+          try {
+            completion = await openaiChatDetailed(pool[idx].key, chatModel, recoveryMessages, 'https://api.groq.com/openai/v1');
             usedGroqKeyLabel = pool[idx].label || `Key ${pool[idx].id}`;
             answerProvider = 'groq';
             break;
@@ -692,20 +716,30 @@ export default async function handler(req, res) {
     const sourceLine = raw.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
     const confidenceLine = raw.match(/(?:\*\*)?CONFIDENCE(?:\*\*)?\s*:\s*(\d{1,3})/i);
     const sourceNumbers = parseNumbers(sourceLine);
+    const exactExcerpt = (item) => {
+      const content = String(item?.content || '').trim();
+      if (content.length <= 900) return content;
+      const terms = String(clearQuestion || question).toLowerCase().match(/[a-z0-9]{4,}/g) || [];
+      const lower = content.toLowerCase();
+      const positions = terms.map((term) => lower.indexOf(term)).filter((position) => position >= 0);
+      const hit = positions.length ? Math.min(...positions) : 0;
+      const start = Math.max(0, hit - 180);
+      return `${start ? '…' : ''}${content.slice(start, start + 900).trim()}${start + 900 < content.length ? '…' : ''}`;
+    };
     const seen = new Set();
     let sources = [];
     for (const number of sourceNumbers) {
       const item = matches[number - 1];
       if (item && !seen.has(item.article_id)) {
         seen.add(item.article_id);
-        sources.push({ title: item.article_title, url: item.article_url, _aid: item.article_id });
+        sources.push({ title: item.article_title, url: item.article_url, excerpt: exactExcerpt(item), _aid: item.article_id });
       }
     }
     if (!sourceLine) {
       for (const item of matches) {
         if (!seen.has(item.article_id)) {
           seen.add(item.article_id);
-          sources.push({ title: item.article_title, url: item.article_url, _aid: item.article_id });
+          sources.push({ title: item.article_title, url: item.article_url, excerpt: exactExcerpt(item), _aid: item.article_id });
         }
         if (sources.length === 3) break;
       }
@@ -717,7 +751,7 @@ export default async function handler(req, res) {
       const r = okCalc[i];
       const aid = `calc:${r.calcType}`;
       if (!sources.some((s) => s._aid === aid)) {
-        sources.unshift({ title: r.title, url: '', _aid: aid });
+        sources.unshift({ title: r.title, url: '', excerpt: String(r.text || '').trim().slice(0, 900), _aid: aid });
       }
     }
 
@@ -728,7 +762,7 @@ export default async function handler(req, res) {
       if (!item) return null;
       const existing = sources.findIndex((s) => s._aid === item.article_id);
       if (existing >= 0) return existing + 1;
-      sources.push({ title: item.article_title, url: item.article_url, _aid: item.article_id });
+      sources.push({ title: item.article_title, url: item.article_url, excerpt: exactExcerpt(item), _aid: item.article_id });
       return sources.length;
     };
 
@@ -813,7 +847,7 @@ export default async function handler(req, res) {
     const usage = completion.usage || {};
     const inputTokens = Number(usage.prompt_tokens || usage.input_tokens || 0);
     const outputTokens = Number(usage.completion_tokens || usage.output_tokens || 0);
-    await logActivity({
+    const queryLogId = await logActivity({
       actorRole: access.role,
       sessionId: access.sessionId,
       userName: access.name,
@@ -840,7 +874,7 @@ export default async function handler(req, res) {
     });
 
     return res.status(200).json({
-      answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel,
+      answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel, queryLogId,
       confidenceReasons, selectedScope: { product: selectedProduct, model: selectedModel?.slug || 'all', label: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models` },
       ambiguous: isAmbiguous, interpretations, usedCalculator
     });
