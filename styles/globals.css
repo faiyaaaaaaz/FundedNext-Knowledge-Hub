@@ -352,6 +352,10 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .thinking-operations span { padding: 8px 10px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 9px; background: color-mix(in srgb, var(--surface) 75%, transparent); color: var(--muted); font-size: 10.5px; font-weight: 650; }
 .thinking-operations span i { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--violet); animation: thinkDot 1.2s ease-in-out infinite alternate; }
 .thinking-operations span:nth-child(2) i { animation-delay: .15s; }.thinking-operations span:nth-child(3) i { animation-delay: .3s; }.thinking-operations span:nth-child(4) i { animation-delay: .45s; }.thinking-operations span:nth-child(5) i { animation-delay: .6s; }.thinking-operations span:nth-child(6) i { animation-delay: .75s; }
+.thinking-current { margin-top: 16px; padding: 12px 14px; display: flex; align-items: center; gap: 10px; border: 1px solid color-mix(in srgb, var(--violet) 35%, var(--line)); border-radius: 11px; background: color-mix(in srgb, var(--violet-soft) 38%, var(--surface)); color: var(--ink); font-size: 12px; font-weight: 700; overflow: hidden; }
+.thinking-current > i { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--violet); box-shadow: 0 0 0 5px color-mix(in srgb, var(--violet) 12%, transparent); animation: thinkDot .7s ease-in-out infinite alternate; }
+.thinking-current span { animation: thinkingStageIn .24s ease both; }
+@keyframes thinkingStageIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
 @keyframes livePulse { 70% { box-shadow: 0 0 0 7px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
 @keyframes thinkDot { to { opacity: .28; transform: scale(.7); } }
 
