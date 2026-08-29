@@ -242,6 +242,7 @@ export default function Home() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [thinkingStep, setThinkingStep] = useState(0);
   const [openSources, setOpenSources] = useState({});
   const [openExcerpts, setOpenExcerpts] = useState({});
   const [feedbackSaving, setFeedbackSaving] = useState({});
@@ -366,7 +367,8 @@ export default function Home() {
     const questionId = `${Date.now()}-${Math.random()}`;
     if (showUser) setMessages((current) => [...current, { role: 'user', content: value, questionId }]);
     setScopeNotice(null);
-    setInput(''); setLoading(true);
+    setInput(''); setLoading(true); setThinkingStep(0);
+    thinkingRef.current = setInterval(() => setThinkingStep((current) => (current + 1) % THINKING_STEPS.length), 1250);
     let keepTemporaryScope = false;
     try {
       const response = await fetch('/api/search', { method: 'POST', headers: headers(session, true), body: JSON.stringify({ question: value, clarification: clarificationAnswer || undefined, scope: { product: scopeProduct, model: scopeModel } }) });
@@ -394,7 +396,7 @@ export default function Home() {
       }]);
     } catch (error) {
       setMessages((current) => [...current, { role: 'assistant', question: value, questionId, content: error.message, sources: [], error: true }]);
-    } finally { setLoading(false); loadStats(); if (!keepTemporaryScope) { setScopeProduct(savedScope.product); setScopeModel(savedScope.model); } }
+    } finally { clearInterval(thinkingRef.current); setLoading(false); loadStats(); }
   }
 
   async function rateAnswer(index, rating) {
@@ -592,7 +594,7 @@ export default function Home() {
               ? <div className="message user-message" key={index}><div className="message-label">You</div><div className="user-bubble">{message.content}</div></div>
               : <div className="message assistant-message" key={index}><div className="bot-avatar"><Logo /></div><div className={`assistant-bubble${message.error ? ' error-bubble' : ''}`}><div className="answer-head"><span>FundedNext assistant</span><div>{Number.isFinite(message.confidence) && <ConfidenceHealth score={message.confidence} label={message.confidenceLabel} reasons={message.confidenceReasons} />}<small>{message.fallback ? 'OpenAI backup' : message.provider === 'groq' ? 'Groq' : 'OpenAI'}</small>{message.fallback && <span className="fallback-flash" title="Every Groq attempt failed before this answer switched to GPT">⚡ Last-resort GPT</span>}{message.usedCalculator && <span className="calc-tag" title="This answer used trade-calculator logic">⚙ Calculator logic</span>}</div></div>{message.segments?.length ? <AttributedAnswer segments={message.segments} sources={message.sources} /> : <Answer text={message.content} />}<div className="answer-actions"><button onClick={() => copyAnswer(index, message.content)}>{copied === index ? '✓ Copied' : '⧉ Copy answer'}</button>{!message.error && message.queryLogId && <button className={message.feedback === 'helpful' ? 'feedback-selected' : ''} disabled={!!message.feedback || feedbackSaving[index]} onClick={() => rateAnswer(index, 'helpful')}>{message.feedback === 'helpful' ? '✓ Helpful' : '♡ Helpful'}</button>}{!message.error && message.queryLogId && <button className={message.feedback === 'great' ? 'feedback-selected great' : ''} disabled={!!message.feedback || feedbackSaving[index]} onClick={() => rateAnswer(index, 'great')}>{message.feedback === 'great' ? '★ Great answer' : '☆ Great answer'}</button>}<button className={message.disputed ? 'disputed' : ''} disabled={message.disputed || message.error} onClick={() => { setDisputeIndex(index); setDisputeReason(''); setDisputeError(''); }}>{message.disputed ? '✓ Answer disputed' : '⚑ Dispute answer'}</button></div>{message.feedback && <div className="feedback-thanks">Thanks — this optional rating was saved to the answer log.</div>}{message.sources?.length > 0 && <div className="sources"><button className="sources-toggle" onClick={() => setOpenSources((current) => ({ ...current, [index]: !current[index] }))}><span>◆</span>{message.sources.length} verified source{message.sources.length > 1 ? 's' : ''}<b>{openSources[index] ? '−' : '+'}</b></button>{openSources[index] && <div className="sources-list">{message.sources.map((source, sourceIndex) => <SourcePreview key={sourceIndex} source={source} number={sourceIndex + 1} open={!!openExcerpts[`${index}-${sourceIndex}`]} onToggle={() => setOpenExcerpts((current) => ({ ...current, [`${index}-${sourceIndex}`]: !current[`${index}-${sourceIndex}`] }))} />)}</div>}</div>}</div></div>
             )}
-            {loading && <div className="message assistant-message"><div className="bot-avatar thinking-avatar"><Logo /></div><div className="assistant-bubble thinking-card"><div className="thinking-head"><span className="knowledge-scan" aria-hidden="true"><i /><i /><i /><b /></span><div><b>Building a verified answer</b><small>Working only within {scopeProduct.toUpperCase()} · {selectedModelName}</small></div><span className="thinking-live"><i /> Live</span></div><div className="thinking-operations">{THINKING_STEPS.map((step) => <span key={step}><i />{step}</span>)}</div><div className="thinking-skeleton"><i /><i /><i /></div></div></div>}
+            {loading && <div className="message assistant-message"><div className="bot-avatar thinking-avatar"><Logo /></div><div className="assistant-bubble thinking-card"><div className="thinking-head"><span className="knowledge-scan" aria-hidden="true"><i /><i /><i /><b /></span><div><b>Building a verified answer</b><small>Working only within {scopeProduct.toUpperCase()} · {selectedModelName}</small></div><span className="thinking-live"><i /> Live</span></div><div className="thinking-current" aria-live="polite"><i /><span key={thinkingStep}>{THINKING_STEPS[thinkingStep]}</span></div><div className="thinking-skeleton"><i /><i /><i /></div></div></div>}
           </div>
           <div className="composer-wrap">
             <div className="scope-bar" aria-label="Knowledge scope"><div className="scope-heading"><span>Answer scope</span><small>The assistant cannot search outside this selection</small><button type="button" className={`scope-default${scopeIsDefault ? ' saved' : ''}`} disabled={scopeIsDefault} onClick={saveDefaultScope}>{scopeIsDefault ? '✓ My default' : '☆ Set as my default'}</button></div><ScopeSelect label="Product" value={scopeProduct} groups={productGroups} onChange={(next) => saveScope(next, 'all')} /><ScopeSelect label="Account model" value={scopeModel} groups={modelGroups} onChange={(next) => saveScope(scopeProduct, next)} className="scope-model" /></div>
