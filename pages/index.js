@@ -4,12 +4,12 @@ import Link from 'next/link';
 import { getSupabaseBrowser } from '../lib/supabaseBrowser';
 
 const THINKING_STEPS = [
-  'Reading your question',
-  'Searching the verified FAQ library',
-  'Matching the exact Account and product rules',
-  'Applying FundedNext brand language',
-  'Scoring the source confidence',
-  'Writing a client-ready reply'
+  'Understanding the question',
+  'Checking the selected scope',
+  'Searching verified FAQs',
+  'Applying brand knowledge',
+  'Preparing the answer',
+  'Verifying support'
 ];
 
 /* Theme-aware FN mark — letters inherit the ink colour, triangle stays violet. */
@@ -45,6 +45,15 @@ function formatStorage(bytes) {
 
 function Brand() {
   return <div className="brand"><span className="brand-mark"><Logo /></span><div><b>FundedNext</b><span>Support Assistant</span></div></div>;
+}
+
+function SourcePreview({ source, number, open, onToggle }) {
+  return <article className={`source-preview ${source.kind === 'calculator' ? 'src-calc' : ''} ${open ? 'open' : ''}`}>
+    <button type="button" className="source-preview-head" onClick={onToggle}>
+      <span className="src-num">{number}</span><span className="src-title"><b>{source.title}</b><small>{source.kind === 'calculator' ? 'Verified calculator evidence' : 'Verified FAQ evidence'}</small></span><span className="source-preview-action">{open ? 'Hide excerpt −' : 'View exact excerpt +'}</span>
+    </button>
+    {open && <div className="source-excerpt"><span>Relevant passage</span><p>{source.excerpt || 'The exact saved passage is unavailable for this older answer.'}</p>{source.url && <a href={source.url} target="_blank" rel="noreferrer">Open full article ↗</a>}</div>}
+  </article>;
 }
 
 /* Normalise exotic Unicode spaces to plain spaces so pasted text is clean. */
@@ -233,8 +242,9 @@ export default function Home() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [thinkingStep, setThinkingStep] = useState(0);
   const [openSources, setOpenSources] = useState({});
+  const [openExcerpts, setOpenExcerpts] = useState({});
+  const [feedbackSaving, setFeedbackSaving] = useState({});
   const [copied, setCopied] = useState(null);
   const [stats, setStats] = useState(null);
   const [statsLoading, setStatsLoading] = useState(true);
@@ -356,8 +366,7 @@ export default function Home() {
     const questionId = `${Date.now()}-${Math.random()}`;
     if (showUser) setMessages((current) => [...current, { role: 'user', content: value, questionId }]);
     setScopeNotice(null);
-    setInput(''); setLoading(true); setThinkingStep(0);
-    thinkingRef.current = setInterval(() => setThinkingStep((current) => Math.min(current + 1, THINKING_STEPS.length - 1)), 1300);
+    setInput(''); setLoading(true);
     let keepTemporaryScope = false;
     try {
       const response = await fetch('/api/search', { method: 'POST', headers: headers(session, true), body: JSON.stringify({ question: value, clarification: clarificationAnswer || undefined, scope: { product: scopeProduct, model: scopeModel } }) });
@@ -380,11 +389,28 @@ export default function Home() {
         usedCalculator: !!data.usedCalculator,
         provider: data.answerProvider, fallback: data.usedFallback,
         confidence: data.confidence, confidenceLabel: data.confidenceLabel, confidenceReasons: data.confidenceReasons || [],
-        selectedScope: data.selectedScope || { product: scopeProduct, model: scopeModel, label: selectedModelName }, disputed: false
+        selectedScope: data.selectedScope || { product: scopeProduct, model: scopeModel, label: selectedModelName },
+        queryLogId: data.queryLogId || null, feedback: null, disputed: false
       }]);
     } catch (error) {
       setMessages((current) => [...current, { role: 'assistant', question: value, questionId, content: error.message, sources: [], error: true }]);
-    } finally { clearInterval(thinkingRef.current); setLoading(false); loadStats(); if (!keepTemporaryScope) { setScopeProduct(savedScope.product); setScopeModel(savedScope.model); } }
+    } finally { setLoading(false); loadStats(); if (!keepTemporaryScope) { setScopeProduct(savedScope.product); setScopeModel(savedScope.model); } }
+  }
+
+  async function rateAnswer(index, rating) {
+    const message = messages[index];
+    if (!message?.queryLogId || message.feedback || feedbackSaving[index]) return;
+    setFeedbackSaving((current) => ({ ...current, [index]: true }));
+    try {
+      const response = await fetch('/api/feedback', { method: 'POST', headers: headers(session, true), body: JSON.stringify({ queryLogId: message.queryLogId, rating }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Feedback could not be saved.');
+      setMessages((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, feedback: rating } : item));
+    } catch (error) {
+      setScopeNotice({ title: 'Feedback was not saved', text: error.message });
+    } finally {
+      setFeedbackSaving((current) => ({ ...current, [index]: false }));
+    }
   }
 
   function answerClarification(answer) {
@@ -564,9 +590,9 @@ export default function Home() {
             {!messages.length && <div className="welcome-state"><div className="assistant-orb"><Logo /></div><span className="status-chip">Source-backed assistance</span><h1>How can I help today?</h1><p>Ask about a policy, Account, Performance Reward, trading rule, or platform.</p><div className="suggestion-grid">{['How does trailing drawdown work?', 'Explain Performance Reward eligibility', 'What causes an Account breach?'].map((question) => <button key={question} onClick={() => send(question)}>{question}<span>↗</span></button>)}</div></div>}
             {messages.map((message, index) => message.role === 'user'
               ? <div className="message user-message" key={index}><div className="message-label">You</div><div className="user-bubble">{message.content}</div></div>
-              : <div className="message assistant-message" key={index}><div className="bot-avatar"><Logo /></div><div className={`assistant-bubble${message.error ? ' error-bubble' : ''}`}><div className="answer-head"><span>FundedNext Assistant</span><div>{Number.isFinite(message.confidence) && <ConfidenceHealth score={message.confidence} label={message.confidenceLabel} reasons={message.confidenceReasons} />}<small>{message.fallback ? 'OpenAI backup' : message.provider === 'groq' ? 'Groq' : 'OpenAI'}</small>{message.fallback && <span className="fallback-flash" title="Groq was busy, so this answer switched to GPT">⚡ Switched to GPT</span>}{message.usedCalculator && <span className="calc-tag" title="This answer used trade-calculator logic">⚙ Calculator logic</span>}</div></div>{message.segments?.length ? <AttributedAnswer segments={message.segments} sources={message.sources} /> : <Answer text={message.content} />}<div className="answer-actions"><button onClick={() => copyAnswer(index, message.content)}>{copied === index ? '✓ Copied' : '⧉ Copy answer'}</button><button className={message.disputed ? 'disputed' : ''} disabled={message.disputed || message.error} onClick={() => { setDisputeIndex(index); setDisputeReason(''); setDisputeError(''); }}>{message.disputed ? '✓ Answer disputed' : '⚑ Dispute answer'}</button></div>{message.sources?.length > 0 && <div className="sources"><button className="sources-toggle" onClick={() => setOpenSources((current) => ({ ...current, [index]: !current[index] }))}><span>◆</span>{message.sources.length} verified source{message.sources.length > 1 ? 's' : ''}<b>{openSources[index] ? '−' : '+'}</b></button>{openSources[index] && <div className="sources-list">{message.sources.map((source, sourceIndex) => <a key={sourceIndex} href={source.url || undefined} target="_blank" rel="noreferrer" className={source.kind === 'calculator' ? 'src-calc' : ''}><span className="src-num">{sourceIndex + 1}</span><span className="src-title">{source.title}</span><small>{source.kind === 'calculator' ? '⚙ Calculator' : 'Open article ↗'}</small></a>)}</div>}</div>}</div></div>
+              : <div className="message assistant-message" key={index}><div className="bot-avatar"><Logo /></div><div className={`assistant-bubble${message.error ? ' error-bubble' : ''}`}><div className="answer-head"><span>FundedNext assistant</span><div>{Number.isFinite(message.confidence) && <ConfidenceHealth score={message.confidence} label={message.confidenceLabel} reasons={message.confidenceReasons} />}<small>{message.fallback ? 'OpenAI backup' : message.provider === 'groq' ? 'Groq' : 'OpenAI'}</small>{message.fallback && <span className="fallback-flash" title="Every Groq attempt failed before this answer switched to GPT">⚡ Last-resort GPT</span>}{message.usedCalculator && <span className="calc-tag" title="This answer used trade-calculator logic">⚙ Calculator logic</span>}</div></div>{message.segments?.length ? <AttributedAnswer segments={message.segments} sources={message.sources} /> : <Answer text={message.content} />}<div className="answer-actions"><button onClick={() => copyAnswer(index, message.content)}>{copied === index ? '✓ Copied' : '⧉ Copy answer'}</button>{!message.error && message.queryLogId && <button className={message.feedback === 'helpful' ? 'feedback-selected' : ''} disabled={!!message.feedback || feedbackSaving[index]} onClick={() => rateAnswer(index, 'helpful')}>{message.feedback === 'helpful' ? '✓ Helpful' : '♡ Helpful'}</button>}{!message.error && message.queryLogId && <button className={message.feedback === 'great' ? 'feedback-selected great' : ''} disabled={!!message.feedback || feedbackSaving[index]} onClick={() => rateAnswer(index, 'great')}>{message.feedback === 'great' ? '★ Great answer' : '☆ Great answer'}</button>}<button className={message.disputed ? 'disputed' : ''} disabled={message.disputed || message.error} onClick={() => { setDisputeIndex(index); setDisputeReason(''); setDisputeError(''); }}>{message.disputed ? '✓ Answer disputed' : '⚑ Dispute answer'}</button></div>{message.feedback && <div className="feedback-thanks">Thanks — this optional rating was saved to the answer log.</div>}{message.sources?.length > 0 && <div className="sources"><button className="sources-toggle" onClick={() => setOpenSources((current) => ({ ...current, [index]: !current[index] }))}><span>◆</span>{message.sources.length} verified source{message.sources.length > 1 ? 's' : ''}<b>{openSources[index] ? '−' : '+'}</b></button>{openSources[index] && <div className="sources-list">{message.sources.map((source, sourceIndex) => <SourcePreview key={sourceIndex} source={source} number={sourceIndex + 1} open={!!openExcerpts[`${index}-${sourceIndex}`]} onToggle={() => setOpenExcerpts((current) => ({ ...current, [`${index}-${sourceIndex}`]: !current[`${index}-${sourceIndex}`] }))} />)}</div>}</div>}</div></div>
             )}
-            {loading && <div className="message assistant-message"><div className="bot-avatar thinking-avatar"><Logo /></div><div className="assistant-bubble thinking-card"><div className="thinking-head"><span className="knowledge-scan" aria-hidden="true"><i /><i /><i /><b /></span><div><b>Building a verified answer</b><small>Locked to {scopeProduct.toUpperCase()} · {selectedModelName}</small></div><span className="thinking-count">{thinkingStep + 1}/{THINKING_STEPS.length}</span></div><div className="thinking-label"><span key={thinkingStep}>{THINKING_STEPS[thinkingStep]}</span></div><div className="thinking-skeleton"><i /><i /><i /></div><div className="thinking-progress">{THINKING_STEPS.map((step, i) => <i key={step} className={i < thinkingStep ? 'active' : i === thinkingStep ? 'active current' : ''} />)}</div></div></div>}
+            {loading && <div className="message assistant-message"><div className="bot-avatar thinking-avatar"><Logo /></div><div className="assistant-bubble thinking-card"><div className="thinking-head"><span className="knowledge-scan" aria-hidden="true"><i /><i /><i /><b /></span><div><b>Building a verified answer</b><small>Working only within {scopeProduct.toUpperCase()} · {selectedModelName}</small></div><span className="thinking-live"><i /> Live</span></div><div className="thinking-operations">{THINKING_STEPS.map((step) => <span key={step}><i />{step}</span>)}</div><div className="thinking-skeleton"><i /><i /><i /></div></div></div>}
           </div>
           <div className="composer-wrap">
             <div className="scope-bar" aria-label="Knowledge scope"><div className="scope-heading"><span>Answer scope</span><small>The assistant cannot search outside this selection</small><button type="button" className={`scope-default${scopeIsDefault ? ' saved' : ''}`} disabled={scopeIsDefault} onClick={saveDefaultScope}>{scopeIsDefault ? '✓ My default' : '☆ Set as my default'}</button></div><ScopeSelect label="Product" value={scopeProduct} groups={productGroups} onChange={(next) => saveScope(next, 'all')} /><ScopeSelect label="Account model" value={scopeModel} groups={modelGroups} onChange={(next) => saveScope(scopeProduct, next)} className="scope-model" /></div>
