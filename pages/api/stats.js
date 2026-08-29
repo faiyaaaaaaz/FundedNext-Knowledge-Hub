@@ -6,15 +6,19 @@ export default async function handler(req, res) {
     const access = await authenticateRequest(req);
     if (!access) return res.status(401).json({ error: 'Your session has ended.' });
     const sb = supabaseAdmin();
-    const [articles, queued, chunks, latest, disputes, keys, syncMarkers] = await Promise.all([
+    const [articles, queued, chunks, latest, disputes, keys, syncMarkers, databaseHealth] = await Promise.all([
       sb.from('articles').select('*', { count: 'exact', head: true }),
       sb.from('articles').select('*', { count: 'exact', head: true }).eq('needs_index', true),
       sb.from('chunks').select('*', { count: 'exact', head: true }),
       sb.from('articles').select('last_indexed_at').not('last_indexed_at', 'is', null).order('last_indexed_at', { ascending: false }).limit(1),
       sb.from('disputes').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
       getKeys(),
-      getLastSyncMarkers(sb)
+      getLastSyncMarkers(sb),
+      sb.rpc('get_database_health')
     ]);
+    const healthRow = Array.isArray(databaseHealth.data) ? databaseHealth.data[0] : databaseHealth.data;
+    const databaseBytes = Number(healthRow?.database_bytes || 0);
+    const databaseLimitBytes = Number(healthRow?.database_limit_bytes || 0);
     return res.status(200).json({
       totalArticles: articles.count || 0,
       queuedArticles: queued.count || 0,
@@ -27,6 +31,11 @@ export default async function handler(req, res) {
       answerProvider: keys.chatProvider,
       answerModel: keys.chatModel,
       automaticFallback: false,
+      storageHealth: !databaseHealth.error && databaseBytes > 0 && databaseLimitBytes > 0 ? {
+        databaseBytes,
+        databaseLimitBytes,
+        percentUsed: Math.min(100, Math.max(0, (databaseBytes / databaseLimitBytes) * 100))
+      } : null,
       healthy: !articles.error && !chunks.error && !queued.error
     });
   } catch (error) {
