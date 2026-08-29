@@ -29,6 +29,7 @@ function mapRow(row) {
     estimatedCost: Number(row.estimated_cost || 0), success: row.success !== false, product: meta.selectedProduct || '',
     accountModel: meta.selectedModel || '', scopeLabel: meta.selectedScopeLabel || '', confidence: meta.confidence ?? null,
     confidenceLabel: meta.confidenceLabel || '', sourceCount: Number(meta.sourceCount || 0), sources: Array.isArray(meta.sources) ? meta.sources : [],
+    feedback: meta.feedback || '', feedbackAt: meta.feedbackAt || '', feedbackBy: meta.feedbackBy || '',
     durationMs: Number(meta.durationMs || 0), fallback: !!meta.fallback, groqKeyLabel: meta.groqKeyLabel || '',
     questionTruncated: !!meta.questionTruncated, answerTruncated: !!meta.answerTruncated
   };
