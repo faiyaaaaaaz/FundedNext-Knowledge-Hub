@@ -289,12 +289,26 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .answer-actions button:hover:not(:disabled) { color: var(--violet); border-color: var(--violet-2); background: var(--surface); transform: translateY(-1px); }
 .answer-actions button:disabled { cursor: default; }
 .answer-actions button.disputed { color: var(--danger); background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 30%, var(--line)); }
+.answer-actions button.feedback-selected { color: var(--success); border-color: color-mix(in srgb, var(--success) 45%, var(--line)); background: color-mix(in srgb, var(--success) 10%, var(--surface)); }
+.answer-actions button.feedback-selected.great { color: #d99100; border-color: color-mix(in srgb, #d99100 45%, var(--line)); background: color-mix(in srgb, #ffd76a 14%, var(--surface)); }
+.feedback-thanks { margin-top: 10px; color: var(--success); font-size: 11.5px; font-weight: 650; }
 
 .sources { margin-top: 18px; padding-top: 16px; border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent); }
 .sources-toggle { width: 100%; padding: 0; border: 0; background: transparent; color: var(--muted); display: flex; align-items: center; gap: 9px; cursor: pointer; font: 700 11px/1 var(--display); letter-spacing: .08em; text-transform: uppercase; }
 .sources-toggle span { color: var(--violet); font-size: 9px; }
 .sources-toggle b { margin-left: auto; width: 20px; height: 20px; display: grid; place-items: center; border-radius: 6px; background: var(--violet-soft); font-size: 15px; color: var(--violet); }
 .sources-list { display: grid; gap: 8px; margin-top: 12px; animation: fade .25s ease both; }
+.source-preview { overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: linear-gradient(135deg, var(--surface-2), var(--surface)); transition: border-color .18s, box-shadow .18s, transform .18s; }
+.source-preview:hover, .source-preview.open { border-color: color-mix(in srgb, var(--violet) 42%, var(--line)); box-shadow: 0 12px 30px color-mix(in srgb, var(--violet) 10%, transparent); }
+.source-preview-head { width: 100%; padding: 13px; display: grid; grid-template-columns: 30px minmax(0,1fr) auto; align-items: center; gap: 11px; border: 0; background: transparent; color: var(--ink); text-align: left; cursor: pointer; }
+.source-preview-head .src-title { min-width: 0; display: grid; gap: 3px; }
+.source-preview-head .src-title b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.source-preview-head .src-title small { color: var(--muted); font-size: 10.5px; font-weight: 550; }
+.source-preview-action { color: var(--violet); font-size: 11px; font-weight: 750; white-space: nowrap; }
+.source-excerpt { margin: 0 13px 13px 54px; padding: 14px 15px; border: 1px solid color-mix(in srgb, var(--violet) 22%, var(--line)); border-radius: 11px; background: color-mix(in srgb, var(--violet-soft) 35%, var(--surface)); animation: fade .2s ease both; }
+.source-excerpt > span { display: block; margin-bottom: 7px; color: var(--violet); font-size: 10px; font-weight: 800; letter-spacing: .04em; }
+.source-excerpt p { margin: 0; color: var(--ink); font-size: 12.5px; line-height: 1.7; white-space: pre-wrap; }
+.source-excerpt a { display: inline-flex; margin-top: 11px; color: var(--violet); font-size: 11.5px; font-weight: 750; text-decoration: none; }
 .sources-list a { padding: 11px 13px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-2); text-decoration: none; transition: border-color .16s, transform .16s, background .16s; }
 .sources-list a:hover { border-color: var(--violet-2); background: var(--surface); transform: translateX(2px); }
 .sources-list span { font-size: 12.5px; font-weight: 550; }
@@ -332,6 +346,48 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 /* ---- Premium thinking state ---- */
 .thinking-avatar { animation: floaty 2.4s ease-in-out infinite; }
 .thinking-card { border-radius: 6px 18px 18px 18px; background: linear-gradient(120deg, var(--surface), color-mix(in srgb, var(--violet-soft) 55%, var(--surface))); }
+.thinking-live { display: inline-flex; align-items: center; gap: 5px; color: var(--success); font-size: 10.5px; font-weight: 750; }
+.thinking-live i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 45%, transparent); animation: livePulse 1.4s infinite; }
+.thinking-operations { margin-top: 16px; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+.thinking-operations span { padding: 8px 10px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 9px; background: color-mix(in srgb, var(--surface) 75%, transparent); color: var(--muted); font-size: 10.5px; font-weight: 650; }
+.thinking-operations span i { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--violet); animation: thinkDot 1.2s ease-in-out infinite alternate; }
+.thinking-operations span:nth-child(2) i { animation-delay: .15s; }.thinking-operations span:nth-child(3) i { animation-delay: .3s; }.thinking-operations span:nth-child(4) i { animation-delay: .45s; }.thinking-operations span:nth-child(5) i { animation-delay: .6s; }.thinking-operations span:nth-child(6) i { animation-delay: .75s; }
+@keyframes livePulse { 70% { box-shadow: 0 0 0 7px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+@keyframes thinkDot { to { opacity: .28; transform: scale(.7); } }
+
+/* Sentence case is the app-wide typographic rule. These labels retain their
+   authored wording instead of being visually forced to uppercase. */
+.eyebrow, .status-chip, .message-label, .metric-card > span, .model-card em,
+.app-select-label, .app-select-group-label, .scope-heading > span, .field-help,
+.admin-nav-label, .table-kicker, .source-excerpt > span, .login-foot,
+.confidence-label, .section-label, th { text-transform: none !important; letter-spacing: .02em !important; }
+
+@media (max-width: 720px) {
+  .app-shell { padding: 10px; }
+  .app-header { align-items: flex-start; gap: 10px; }
+  .header-actions { gap: 5px; justify-content: flex-end; }
+  .user-identity { display: none; }
+  .assistant-card, .insights-rail { border-radius: 18px; }
+  .chat-thread { padding: 18px 12px; }
+  .message.assistant-message { gap: 7px; }
+  .bot-avatar { width: 28px; height: 28px; }
+  .assistant-bubble { min-width: 0; padding: 14px; border-radius: 5px 15px 15px 15px; }
+  .answer-head { align-items: flex-start; gap: 8px; }
+  .answer-head > div { justify-content: flex-start; }
+  .answer-actions { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .answer-actions button { justify-content: center; min-width: 0; }
+  .source-preview-head { grid-template-columns: 28px minmax(0,1fr); }
+  .source-preview-action { grid-column: 2; }
+  .source-excerpt { margin-left: 12px; }
+  .thinking-operations { grid-template-columns: 1fr; }
+  .scope-bar { grid-template-columns: 1fr; }
+  .scope-heading, .scope-model { grid-column: auto; }
+  .composer-wrap { padding: 10px; }
+  .composer textarea { min-height: 62px; }
+  .insights-rail { width: 100%; }
+  .admin-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .admin-table { min-width: 720px; }
+}
 .thinking-head { display: flex; align-items: center; gap: 11px; }
 .knowledge-scan { width: 42px; height: 34px; flex: 0 0 auto; position: relative; perspective: 100px; }
 .knowledge-scan > i { position: absolute; left: 5px; width: 30px; height: 21px; border: 1px solid color-mix(in srgb, var(--violet) 52%, var(--line)); border-radius: 6px; background: color-mix(in srgb, var(--violet-soft) 72%, var(--surface)); box-shadow: 0 5px 14px color-mix(in srgb, var(--violet) 18%, transparent); animation: knowledgeCard 1.8s ease-in-out infinite; }
