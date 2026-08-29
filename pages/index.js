@@ -12,40 +12,6 @@ const THINKING_STEPS = [
   'Writing a client-ready reply'
 ];
 
-/* When Google/Supabase rejects a sign-in (e.g. a brand-new user when new
-   sign-ups are turned off, or a failing auth trigger), it does NOT return a
-   session — it redirects back with the reason in the URL (?error= / #error=).
-   The old code ignored that, so the button just span forever with no message.
-   These helpers read that reason, clear it from the URL, and translate it. */
-function readOAuthError() {
-  if (typeof window === 'undefined') return null;
-  try {
-    const url = new URL(window.location.href);
-    const hash = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
-    const code = url.searchParams.get('error_code') || hash.get('error_code') || '';
-    const rawError = url.searchParams.get('error') || hash.get('error') || '';
-    const desc = url.searchParams.get('error_description') || hash.get('error_description') || '';
-    if (!code && !rawError && !desc) return null;
-    // Remove the error from the address bar so a refresh doesn't re-show it.
-    window.history.replaceState({}, document.title, url.origin + url.pathname);
-    return { code: code.toLowerCase(), error: rawError.toLowerCase(), description: decodeURIComponent(desc.replace(/\+/g, ' ')) };
-  } catch { return null; }
-}
-
-function friendlyOAuthError(err) {
-  const d = (err.description || '').toLowerCase();
-  if (err.code === 'signup_disabled' || d.includes('signups not allowed') || d.includes('signup is disabled')) {
-    return 'New sign-ups are turned off for this workspace, so first-time accounts cannot be created. An Admin must enable them in Supabase → Authentication → Sign In / Providers → “Allow new users to sign up”.';
-  }
-  if (d.includes('database error saving new user')) {
-    return 'Your account could not be created because a Supabase database trigger failed on first sign-in. An Admin needs to fix the trigger on auth.users in Supabase.';
-  }
-  if (err.code === 'access_denied' || err.error === 'access_denied') {
-    return 'Google blocked this sign-in. If you are a new team member, an Admin needs to grant your account access.';
-  }
-  return err.description || 'Google sign-in did not complete. Please try again, or contact an Admin.';
-}
-
 /* Theme-aware FN mark — letters inherit the ink colour, triangle stays violet. */
 function Logo({ className = '' }) {
   return (
@@ -66,6 +32,15 @@ function GoogleG() {
       <path fill="#EA4335" d="M24 10.75c3.23 0 6.13 1.11 8.41 3.29l6.31-6.31C34.91 4.18 29.93 2 24 2 15.4 2 7.96 6.93 4.34 14.12l7.35 5.7c1.73-5.2 6.58-9.07 12.31-9.07z" />
     </svg>
   );
+}
+
+function DataLoader({ title = 'Loading workspace', detail = 'Requesting live data…' }) {
+  return <div className="real-loader" role="status" aria-live="polite"><span className="loader-orbit"><i /><i /><i /></span><div><b>{title}</b><small>{detail}</small></div><span className="loader-pulse"><i /><i /><i /></span></div>;
+}
+
+function formatStorage(bytes) {
+  const mb = Number(bytes || 0) / (1024 * 1024);
+  return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(mb >= 100 ? 0 : 1)} MB`;
 }
 
 function Brand() {
@@ -262,6 +237,7 @@ export default function Home() {
   const [openSources, setOpenSources] = useState({});
   const [copied, setCopied] = useState(null);
   const [stats, setStats] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
   const [syncState, setSyncState] = useState({ headline: 'Knowledge base', details: [] });
@@ -298,12 +274,13 @@ export default function Home() {
   }
 
   async function loadStats(token = session) {
-    if (!token) return;
+    if (!token) return setStatsLoading(false);
+    setStatsLoading(true);
     try {
       const response = await fetch('/api/stats', { headers: { 'x-app-session': token } });
       if (response.status === 401) return logout();
       if (response.ok) setStats(await response.json());
-    } catch {}
+    } catch {} finally { setStatsLoading(false); }
   }
 
   async function loadScopes(token = session) {
@@ -342,14 +319,9 @@ export default function Home() {
   async function completeGoogleLogin() {
     const client = getSupabaseBrowser();
     if (!client) return;
-    // If Google/Supabase redirected back with a rejection, show why instead of
-    // spinning forever. This is what new users hit when sign-ups are disabled.
-    const oauthError = readOAuthError();
-    if (oauthError) { setLoginError(friendlyOAuthError(oauthError)); setLoggingIn(false); return; }
     setLoggingIn(true);
     try {
-      const { data, error } = await client.auth.getSession();
-      if (error) throw new Error(error.message);
+      const { data } = await client.auth.getSession();
       if (!data.session?.access_token) return;
       const response = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ googleAccessToken: data.session.access_token }) });
       const result = await response.json();
@@ -602,7 +574,19 @@ export default function Home() {
             <div className="composer"><textarea value={input} placeholder={`Ask about ${selectedModelName}…`} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } }} /><button onClick={() => send()} disabled={!input.trim() || loading} aria-label="Send">↑</button></div><div className="composer-foot"><div className="composer-note">Review the confidence and verified source before sending the answer.</div><div className="developer-credit"><i />Developed by <span>Faiyaz Ahmed</span></div></div></div>
         </section>
 
-        <aside className="insights-rail"><div className="rail-head"><span className="live-dot" /><div><b>Knowledge health</b><small>{stats?.healthy ? 'All systems operational' : 'Checking status…'}</small></div></div><div className="metric-card model-card"><span>Answering model</span><strong>{stats?.answerProvider === 'groq' ? 'Groq' : 'OpenAI'}</strong><small>{stats?.answerModel || 'Checking model…'}</small><em>{role === 'admin' ? 'Automatic GPT fallback: on (admin only)' : 'Automatic fallback is off'}</em></div><div className="metric-card primary"><span>Published articles</span><strong>{stats?.totalArticles?.toLocaleString() ?? '—'}</strong><small>Total articles stored and available</small></div><div className="metric-grid"><div className="metric-card"><span>Indexed</span><strong>{stats?.indexedArticles?.toLocaleString() ?? '—'}</strong></div><div className="metric-card"><span>Queued</span><strong>{stats?.queuedArticles?.toLocaleString() ?? '—'}</strong></div></div><div className="metric-card"><span>Searchable sections</span><strong>{stats?.totalChunks?.toLocaleString() ?? '—'}</strong><small>Focused pieces used for retrieval</small></div><div className="metric-card update-time"><span>Last knowledge update</span><strong>{formatDhaka(stats?.lastUpdatedAt)}</strong>{stats?.lastSyncAt && <small className="sync-ago"><span className="live-dot tiny" />Auto-synced {timeAgo(stats.lastSyncAt)}{stats?.lastSyncSummary?.changed ? ` · ${stats.lastSyncSummary.changed} updated` : ' · no changes'}</small>}</div>{role === 'admin' && <div className="metric-card dispute-metric"><span>Pending disputes</span><strong>{stats?.pendingDisputes ?? '—'}</strong><Link href="/admin">Review in Admin →</Link></div>}<div className="rail-tip"><b>Confidence guide</b><p><span className="dot high" />85–100: strong direct support</p><p><span className="dot medium" />65–84: review suggested</p><p><span className="dot low" />Below 65: verify carefully</p></div></aside>
+        <aside className="insights-rail">
+          <div className="rail-head"><span className="live-dot" /><div><b>Knowledge health</b><small>{statsLoading ? 'Connecting to live knowledge…' : stats?.healthy ? 'All systems operational' : 'Status unavailable'}</small></div></div>
+          {statsLoading ? <DataLoader title="Checking knowledge health" detail="Connecting to Supabase and verifying the live index…" /> : <>
+            <div className="metric-card storage-health-card"><div className="storage-health-head"><span>Live database storage</span><strong>{stats?.storageHealth ? `${stats.storageHealth.percentUsed.toFixed(1)}%` : 'Setup required'}</strong></div>{stats?.storageHealth ? <><div className="storage-health-track"><i style={{ width: `${stats.storageHealth.percentUsed}%` }} /></div><small>{formatStorage(stats.storageHealth.databaseBytes)} used of {formatStorage(stats.storageHealth.databaseLimitBytes)} · measured live</small></> : <small>Run the supplied storage-health SQL once to enable an exact live reading.</small>}</div>
+            <div className="metric-card model-card"><span>Answering model</span><strong>{stats?.answerProvider === 'groq' ? 'Groq' : 'OpenAI'}</strong><small>{stats?.answerModel || 'Unavailable'}</small><em>{role === 'admin' ? 'Automatic GPT fallback: on (admin only)' : 'Automatic fallback is off'}</em></div>
+            <div className="metric-card primary"><span>Published articles</span><strong>{stats?.totalArticles?.toLocaleString() ?? '—'}</strong><small>Total articles stored and available</small></div>
+            <div className="metric-grid"><div className="metric-card"><span>Indexed</span><strong>{stats?.indexedArticles?.toLocaleString() ?? '—'}</strong></div><div className="metric-card"><span>Queued</span><strong>{stats?.queuedArticles?.toLocaleString() ?? '—'}</strong></div></div>
+            <div className="metric-card"><span>Searchable sections</span><strong>{stats?.totalChunks?.toLocaleString() ?? '—'}</strong><small>Focused pieces used for retrieval</small></div>
+            <div className="metric-card update-time"><span>Last knowledge update</span><strong>{formatDhaka(stats?.lastUpdatedAt)}</strong>{stats?.lastSyncAt && <small className="sync-ago"><span className="live-dot tiny" />Auto-synced {timeAgo(stats.lastSyncAt)}{stats?.lastSyncSummary?.changed ? ` · ${stats.lastSyncSummary.changed} updated` : ' · no changes'}</small>}</div>
+            {role === 'admin' && <div className="metric-card dispute-metric"><span>Pending disputes</span><strong>{stats?.pendingDisputes ?? '—'}</strong><Link href="/admin">Review in Admin →</Link></div>}
+            <div className="rail-tip"><b>Confidence guide</b><p><span className="dot high" />85–100: strong direct support</p><p><span className="dot medium" />65–84: review suggested</p><p><span className="dot low" />Below 65: verify carefully</p></div>
+          </>}
+        </aside>
       </div>
 
       {disputeIndex !== null && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDisputeIndex(null)}><div className="modal-card"><div className="modal-icon">⚑</div><h2>Dispute this answer?</h2><p>Explain exactly what appears incorrect or incomplete. Your reason is required and will be reviewed by an Admin.</p><label htmlFor="dispute-reason">Reason for dispute</label><textarea id="dispute-reason" value={disputeReason} onChange={(event) => setDisputeReason(event.target.value)} placeholder="Example: The Performance Reward cycle is outdated for the Stellar Instant Account…" autoFocus />{disputeError && <div className="inline-error">{disputeError}</div>}<div className="modal-actions"><button className="btn btn-secondary" onClick={() => setDisputeIndex(null)}>Cancel</button><button className="btn btn-danger" onClick={submitDispute} disabled={submittingDispute}>{submittingDispute ? 'Submitting…' : 'Submit dispute'}</button></div></div></div>}
