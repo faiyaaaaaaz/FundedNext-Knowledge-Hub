@@ -5,7 +5,8 @@ function filtersFrom(source = {}) {
     from: String(source.from || '').trim(), to: String(source.to || '').trim(),
     email: String(source.email || '').trim(), name: String(source.name || '').trim(),
     provider: String(source.provider || '').trim().toLowerCase(), model: String(source.model || '').trim().toLowerCase(),
-    scope: String(source.scope || '').trim().toLowerCase(), search: String(source.search || '').trim().toLowerCase()
+    scope: String(source.scope || '').trim().toLowerCase(), feedback: String(source.feedback || '').trim().toLowerCase(),
+    search: String(source.search || '').trim().toLowerCase()
   };
 }
 
@@ -38,6 +39,9 @@ function mapRow(row) {
 function matches(row, filters) {
   if (filters.scope && row.product !== filters.scope) return false;
   if (filters.model && !row.model.toLowerCase().includes(filters.model)) return false;
+  if (filters.feedback === 'any' && !row.feedback) return false;
+  if (filters.feedback === 'none' && row.feedback) return false;
+  if (['helpful', 'great'].includes(filters.feedback) && row.feedback !== filters.feedback) return false;
   return !filters.search || `${row.question} ${row.answer} ${row.scopeLabel} ${row.model}`.toLowerCase().includes(filters.search);
 }
 
