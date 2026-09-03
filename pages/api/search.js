@@ -838,7 +838,11 @@ export default async function handler(req, res) {
         if (!segments.some((s) => s.refs.length)) segments = null;
       }
     }
-    sources = sources.map(({ _aid, ...rest }) => ({ ...rest, kind: /^(kb|calc):/.test(_aid || '') ? 'calculator' : 'faq' }));
+    sources = sources.map(({ _aid, ...rest }) => {
+      const meta = noticeMetaByAid[_aid];
+      if (meta) return { ...rest, kind: 'notice', title: meta.title || rest.title, url: meta.source_url || rest.url, postedBy: meta.posted_by || null, postedAt: meta.posted_at || null };
+      return { ...rest, kind: /^(kb|calc):/.test(_aid || '') ? 'calculator' : 'faq' };
+    });
     let usedCalculator = sources.some((s) => s.kind === 'calculator');
 
     // ---- Grounding verification --------------------------------------------
@@ -912,13 +916,6 @@ export default async function handler(req, res) {
       }
     });
 
-    if (Object.keys(noticeMetaByAid).length) {
-      sources = sources.map((src) => {
-        const meta = noticeMetaByAid[src._aid];
-        if (!meta) return src;
-        return { ...src, kind: 'notice', title: meta.title || src.title, url: meta.source_url || src.url, postedBy: meta.posted_by || null, postedAt: meta.posted_at || null };
-      });
-    }
     return res.status(200).json({
       answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel, queryLogId,
       confidenceReasons, selectedScope: { product: selectedProduct, model: selectedModel?.slug || 'all', label: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models` },
