@@ -5,6 +5,7 @@ import {
   expandConcepts, clarifyQuery, correctTypos, runCalculators,
   getGroqKeys, verifyGrounding, getPublishedScopeCatalog, modelsMentioned, getArticleScopeOverrides
 } from '../../lib/server';
+import { retrieveNotices, noticesEnabledFlag } from '../../lib/notices';
 
 const STOP = new Set([
   'the','a','an','of','to','in','on','for','and','or','is','are','was','were','how','much','many',
@@ -545,6 +546,39 @@ export default async function handler(req, res) {
       }));
       matches = [...calcEvidence, ...matches].slice(0, 14);
     }
+
+    // ---- NOTICES LAYER (higher authority than FAQ) -------------------------
+    // Official CEx notices are injected as top-priority evidence so they render
+    // in the same verified-source UI, pass the same product/model scope filter,
+    // and OVERRIDE any older FAQ. Best-effort: never breaks the FAQ answer.
+    let noticeEscalations = [];
+    let hasNoticeEvidence = false;
+    try {
+      if (await noticesEnabledFlag(sb)) {
+        const { matches: nMatches, escalations } = await retrieveNotices(sb, {
+          openaiKey,
+          question: clearQuestion || question,
+          product: selectedProduct,
+          model: selectedModel?.slug || 'all',
+          limit: 6
+        });
+        if (nMatches && nMatches.length) {
+          hasNoticeEvidence = true;
+          noticeEscalations = escalations || [];
+          const noticeEvidence = nMatches.map((m) => ({
+            id: `notice-${m.article_id}`,
+            article_id: m.article_id,
+            article_title: m.article_title,
+            article_url: m.article_url,
+            content: m.content,
+            similarity: 1,
+            _scoped: true
+          }));
+          matches = [...noticeEvidence, ...matches].slice(0, 16);
+        }
+      }
+    } catch (e) { /* notices are best-effort */ }
+
     if (!matches.length) {
       return res.status(200).json({
         answer: SAFE_UNCONFIRMED, sources: [], answerProvider: chatProvider,
@@ -600,7 +634,10 @@ export default async function handler(req, res) {
     const empathyText = emotion === 'neutral'
       ? '\n\nTONE: Respond professionally and directly. Do not add a generic empathy sentence.'
       : `\n\nTONE: The client appears ${emotion}. Begin with one brief, natural, professional acknowledgement appropriate to that emotion, then answer directly. Do not say you detected an emotion. Do not over-apologize, admit fault, promise an outcome, or change any policy fact. Empathy affects tone only.`;
-    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText +
+    const noticesText = hasNoticeEvidence
+      ? '\n\nAUTHORITATIVE UPDATES: Some evidence items are official operational notices reflecting the LATEST policy. If any evidence conflicts, the notice OVERRIDES an older FAQ. Treat notice figures, dates, and conditions as current, and prefer them over any conflicting FAQ statement.'
+      : '';
+    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText + noticesText +
       '\n\nAfter the customer-ready answer, add three private final lines:\n' +
       'SOURCES: comma-separated evidence numbers actually used, or none\n' +
       'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim\n' +
@@ -876,7 +913,8 @@ export default async function handler(req, res) {
     return res.status(200).json({
       answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel, queryLogId,
       confidenceReasons, selectedScope: { product: selectedProduct, model: selectedModel?.slug || 'all', label: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models` },
-      ambiguous: isAmbiguous, interpretations, usedCalculator
+      ambiguous: isAmbiguous, interpretations, usedCalculator,
+      escalations: noticeEscalations
     });
   } catch (error) {
     if (access) await logActivity({
