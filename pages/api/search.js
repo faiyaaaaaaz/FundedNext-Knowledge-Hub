@@ -5,7 +5,7 @@ import {
   expandConcepts, clarifyQuery, correctTypos, runCalculators,
   getGroqKeys, verifyGrounding, getPublishedScopeCatalog, modelsMentioned, getArticleScopeOverrides
 } from '../../lib/server';
-import { retrieveNotices, noticesEnabledFlag } from '../../lib/notices';
+import { retrieveNotices, noticesAccess } from '../../lib/notices';
 
 const STOP = new Set([
   'the','a','an','of','to','in','on','for','and','or','is','are','was','were','how','much','many',
@@ -553,8 +553,9 @@ export default async function handler(req, res) {
     // and OVERRIDE any older FAQ. Best-effort: never breaks the FAQ answer.
     let noticeEscalations = [];
     let hasNoticeEvidence = false;
+    let noticeMetaByAid = {};
     try {
-      if (await noticesEnabledFlag(sb)) {
+      if (await noticesAccess(access, sb)) {
         const { matches: nMatches, escalations } = await retrieveNotices(sb, {
           openaiKey,
           question: clearQuestion || question,
@@ -565,6 +566,7 @@ export default async function handler(req, res) {
         if (nMatches && nMatches.length) {
           hasNoticeEvidence = true;
           noticeEscalations = escalations || [];
+          nMatches.forEach((m) => { if (m.meta) noticeMetaByAid[m.article_id] = m.meta; });
           const noticeEvidence = nMatches.map((m) => ({
             id: `notice-${m.article_id}`,
             article_id: m.article_id,
@@ -910,6 +912,13 @@ export default async function handler(req, res) {
       }
     });
 
+    if (Object.keys(noticeMetaByAid).length) {
+      sources = sources.map((src) => {
+        const meta = noticeMetaByAid[src._aid];
+        if (!meta) return src;
+        return { ...src, kind: 'notice', title: meta.title || src.title, url: meta.source_url || src.url, postedBy: meta.posted_by || null, postedAt: meta.posted_at || null };
+      });
+    }
     return res.status(200).json({
       answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel, queryLogId,
       confidenceReasons, selectedScope: { product: selectedProduct, model: selectedModel?.slug || 'all', label: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models` },
