@@ -6,7 +6,7 @@ export default async function handler(req, res) {
     const access = await authenticateRequest(req);
     if (!access) return res.status(401).json({ error: 'Your session has ended.' });
     const sb = supabaseAdmin();
-    const [articles, queued, chunks, latest, disputes, keys, syncMarkers, databaseHealth] = await Promise.all([
+    const [articles, queued, chunks, latest, disputes, keys, syncMarkers, databaseHealth, noticesUpdated] = await Promise.all([
       sb.from('articles').select('*', { count: 'exact', head: true }),
       sb.from('articles').select('*', { count: 'exact', head: true }).eq('needs_index', true),
       sb.from('chunks').select('*', { count: 'exact', head: true }),
@@ -14,7 +14,8 @@ export default async function handler(req, res) {
       sb.from('disputes').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
       getKeys(),
       getLastSyncMarkers(sb),
-      sb.rpc('get_database_health')
+      sb.rpc('get_database_health'),
+      sb.from('settings').select('value').eq('key', 'notices_indexed_at').maybeSingle()
     ]);
     const healthRow = Array.isArray(databaseHealth.data) ? databaseHealth.data[0] : databaseHealth.data;
     const databaseBytes = Number(healthRow?.database_bytes || 0);
@@ -25,6 +26,7 @@ export default async function handler(req, res) {
       indexedArticles: Math.max(0, (articles.count || 0) - (queued.count || 0)),
       totalChunks: chunks.count || 0,
       lastUpdatedAt: latest.data?.[0]?.last_indexed_at || null,
+      noticesUpdatedAt: noticesUpdated?.data?.value || null,
       lastSyncAt: syncMarkers.lastAutoSyncAt || null,
       lastSyncSummary: syncMarkers.lastSummary || null,
       pendingDisputes: access.role === 'admin' ? (disputes.count || 0) : undefined,
