@@ -313,6 +313,53 @@ export default function Admin() {
       setNotice('Notice updated.'); loadNotices();
     } catch (e) { setError(e.message); }
   };
+  // --- Paste-a-notice + notices access state/handlers ---
+  const [pasteText, setPasteText] = useState('');
+  const [pasteUrl, setPasteUrl] = useState('');
+  const [pastePoster, setPastePoster] = useState('');
+  const [pasteDate, setPasteDate] = useState('');
+  const [pasteProposed, setPasteProposed] = useState(null);
+  const [pasteBusy, setPasteBusy] = useState(false);
+  const [noticeAccessCfg, setNoticeAccessCfg] = useState(null);
+  const [newAccessEmail, setNewAccessEmail] = useState('');
+  const analyzePaste = async () => {
+    if (!pasteText.trim()) return setError('Paste the notice text first.');
+    setPasteBusy(true); setPasteProposed(null);
+    try {
+      const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'extract', text: pasteText, source_url: pasteUrl, posted_by: pastePoster, posted_at: pasteDate || undefined }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Analyze failed.');
+      setPasteProposed(d.proposed || []);
+    } catch (e) { setError(e.message); } finally { setPasteBusy(false); }
+  };
+  const savePaste = async () => {
+    if (!pasteProposed?.length) return;
+    setPasteBusy(true);
+    try {
+      const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'save-entries', entries: pasteProposed }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Save failed.');
+      setNotice('Saved ' + (d.saved || 0) + ' notice entries.');
+      setPasteText(''); setPasteUrl(''); setPastePoster(''); setPasteDate(''); setPasteProposed(null);
+      loadNotices();
+    } catch (e) { setError(e.message); } finally { setPasteBusy(false); }
+  };
+  const loadNoticeAccess = async () => {
+    try {
+      const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'access-get' }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Failed to load access.');
+      setNoticeAccessCfg(d.access);
+    } catch (e) { setError(e.message); }
+  };
+  const saveNoticeAccess = async (next) => {
+    try {
+      const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'access-set', ...next }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Save failed.');
+      setNoticeAccessCfg(d.access); setNotice('Notices access updated.');
+    } catch (e) { setError(e.message); }
+  };
 
   useEffect(() => {
     const savedSession = localStorage.getItem('appSession') || '';
@@ -846,6 +893,20 @@ export default function Admin() {
         {tab === 'access' && <div className="settings-stack">
           <section className="settings-card"><div className="settings-head"><div><h2>Google sign-in</h2><p>Access is permanently restricted to nextventures.io Google accounts.</p></div><span className={`state-pill ${status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'ready' : ''}`}>{status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'Configured' : 'Vercel setup needed'}</span></div><div className="permission-table"><div><span>Access rule</span><b>Required value</b><b>Status</b></div><div><span>Allowed domain</span><b>nextventures.io</b><b>Fixed</b></div><div><span>Admin list</span><b>ADMIN_GOOGLE_EMAILS</b><b>{status?.adminGoogleConfigured ? 'Configured' : 'Missing'}</b></div></div></section>
           <section className="settings-card"><div className="settings-head"><div><h2>Workspace roles</h2><p>Every user must authenticate with Google. Admin rights come only from the Vercel Admin email list.</p></div><span className="state-pill ready">Google only</span></div><div className="permission-table"><div><span>Requirement</span><b>Agent</b><b>Admin</b></div><div><span>@nextventures.io Google account</span><b>Required</b><b>Required</b></div><div><span>Listed in ADMIN_GOOGLE_EMAILS</span><b>No</b><b>Required</b></div></div></section>
+          <section className="settings-card">
+            <div className="settings-head"><div><h2>Notices access (experimental)</h2><p>Controls who can use the notices layer in the assistant. Off for everyone by default except the people you list here.</p></div>{noticeAccessCfg && <span className="state-pill ready">{noticeAccessCfg.enabled ? 'Enabled' : 'Globally off'}</span>}</div>
+            {!noticeAccessCfg ? <button className="btn btn-secondary" onClick={loadNoticeAccess}>Load notices access</button> : <>
+              <div className="settings-head"><div><h3>All @nextventures.io users</h3><p>When on, every signed-in nextventures.io account can use notices. Off by default.</p></div><label className="toggle"><input type="checkbox" checked={!!noticeAccessCfg.domainAll} onChange={(e) => saveNoticeAccess({ domainAll: e.target.checked })} /><i /></label></div>
+              <label style={{ marginTop: 10, display: 'block' }}>Allowed emails</label>
+              <div className="sync-log-list">{(noticeAccessCfg.emails || []).map((em) => <div key={em} className="sync-log"><div className="sync-log-row" style={{ cursor: 'default' }}>
+                <span className="sync-badge success">allowed</span><span className="sync-log-main"><b>{em}</b></span>
+                <button className="btn btn-secondary" style={{ padding: '6px 10px' }} onClick={() => saveNoticeAccess({ emails: (noticeAccessCfg.emails || []).filter((x) => x !== em) })}>Revoke</button>
+              </div></div>)}{!(noticeAccessCfg.emails || []).length && <div className="empty-admin">No specific emails allowed yet.</div>}</div>
+              <div className="autosync-grid" style={{ marginTop: 12 }}><div className="field-block"><label>Add an email</label><input value={newAccessEmail} onChange={(e) => setNewAccessEmail(e.target.value)} placeholder="someone@nextventures.io" /></div></div>
+              <div className="autosync-actions"><button className="btn btn-primary" onClick={() => { const em = newAccessEmail.trim().toLowerCase(); if (!em) return setError('Enter an email.'); saveNoticeAccess({ emails: Array.from(new Set([...(noticeAccessCfg.emails || []), em])) }); setNewAccessEmail(''); }}>Add email</button></div>
+            </>}
+          </section>
+
           <section className="settings-card danger-card"><div className="settings-head"><div><h2>Sign everyone out</h2><p>Ends every active session across the workspace. All users — agents and admins — will have to sign in with Google again. Your own session will end too.</p></div></div><button className="btn btn-danger" disabled={saving} onClick={signEveryoneOut}>Sign everyone out</button></section>
         </div>}
 
@@ -1027,6 +1088,27 @@ export default function Admin() {
               <button className="btn btn-secondary" disabled={noticeBusy} onClick={loadNotices}>Refresh list</button>
             </div>
             {noticeMsg && <p className="field-help" style={{ color: '#5fd08a' }}>{noticeMsg}</p>}
+          </section>
+          <section className="settings-card">
+            <div className="settings-head"><div><h2>Paste a notice</h2><p>Paste a notice (and its thread clarifications) copied from ClickUp. The AI structures it and shows what will be saved before you confirm. Contradictions update automatically by topic.</p></div></div>
+            <div className="autosync-grid">
+              <div className="field-block"><label>ClickUp notice link</label><input value={pasteUrl} onChange={(e) => setPasteUrl(e.target.value)} placeholder="https://app.clickup.com/…/t/…" /></div>
+              <div className="field-block"><label>Posted by</label><input value={pastePoster} onChange={(e) => setPastePoster(e.target.value)} placeholder="e.g. Preya Hossain" /></div>
+              <div className="field-block"><label>Date (YYYY-MM-DD)</label><input value={pasteDate} onChange={(e) => setPasteDate(e.target.value)} placeholder="2026-09-01" /></div>
+            </div>
+            <label style={{ marginTop: 12, display: 'block' }}>Notice text (and thread clarifications)</label>
+            <textarea className="prompt-area" value={pasteText} onChange={(e) => setPasteText(e.target.value)} placeholder="Paste the full notice here…" />
+            <div className="autosync-actions" style={{ marginTop: 12 }}>
+              <button className="btn btn-secondary" disabled={pasteBusy || !pasteText.trim()} onClick={analyzePaste}>{pasteBusy ? 'Working…' : 'Analyze with AI'}</button>
+            </div>
+            {pasteProposed && <div className="sync-log-list" style={{ marginTop: 12 }}>
+              {pasteProposed.length === 0 && <div className="empty-admin">The AI did not find a durable, customer-facing fact to save.</div>}
+              {pasteProposed.map((p, i) => <div key={i} className="sync-log"><div className="sync-log-row" style={{ cursor: 'default' }}>
+                <span className="sync-badge success">{p.change_type}</span>
+                <span className="sync-log-main"><b>{p.title}</b><small>{p.category} · {p.product}/{p.model} · {p.topic_key}{p.requires_escalation ? ' · escalation' : ''}</small><small style={{ opacity: 0.75 }}>{p.answer_text}</small></span>
+              </div></div>)}
+              {pasteProposed.length > 0 && <div className="autosync-actions" style={{ marginTop: 10 }}><button className="btn btn-primary" disabled={pasteBusy} onClick={savePaste}>Confirm & save {pasteProposed.length} {pasteProposed.length === 1 ? 'entry' : 'entries'}</button></div>}
+            </div>}
           </section>
           <section className="settings-card">
             <div className="settings-head"><div><h2>Stored notices</h2><p>Active notices feed the assistant. Superseded and expired ones are kept for history. Use Expire to switch off a time-bound offer the moment it ends.</p></div>{noticeList.length ? <span className="state-pill ready">{noticeList.filter((n) => n.status === 'active').length} active</span> : null}</div>
