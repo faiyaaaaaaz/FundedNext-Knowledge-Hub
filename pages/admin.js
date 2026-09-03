@@ -270,6 +270,49 @@ export default function Admin() {
   const [newLev, setNewLev] = useState({ stepKey: '', marketType: 'Currency', phase: 'any', leverage: '' });
   const [groqKeys, setGroqKeys] = useState(null);
   const [newGroqKey, setNewGroqKey] = useState({ label: '', key: '' });
+  // --- Notices tab state + handlers ---
+  const [noticeFile, setNoticeFile] = useState(null);
+  const [noticeMsg, setNoticeMsg] = useState('');
+  const [noticeBusy, setNoticeBusy] = useState(false);
+  const [noticeList, setNoticeList] = useState([]);
+  const loadNotices = async () => {
+    try {
+      const r = await fetch('/api/notices', { headers: headers() });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Failed to load notices.');
+      setNoticeList(d.notices || []);
+    } catch (e) { setError(e.message); }
+  };
+  const importNoticeFile = async () => {
+    if (!noticeFile) return setError('Choose the combined RAG .json file first.');
+    setNoticeBusy(true); setNoticeMsg('');
+    try {
+      const text = await noticeFile.text();
+      JSON.parse(text);
+      const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'import', rag: text }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Import failed.');
+      setNoticeMsg('Imported ' + d.imported + ' \u00b7 reconciled ' + d.reconciled + ' \u00b7 indexed ' + d.indexed + '.');
+      loadNotices();
+    } catch (e) { setError(e.message); } finally { setNoticeBusy(false); }
+  };
+  const reindexNoticesNow = async () => {
+    setNoticeBusy(true); setNoticeMsg('');
+    try {
+      const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'reindex' }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Reindex failed.');
+      setNoticeMsg('Re-indexed ' + d.indexed + ' active notices.');
+    } catch (e) { setError(e.message); } finally { setNoticeBusy(false); }
+  };
+  const setNoticeStatusNow = async (entry_id, status) => {
+    try {
+      const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'set-status', entry_id, status }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Update failed.');
+      setNotice('Notice updated.'); loadNotices();
+    } catch (e) { setError(e.message); }
+  };
 
   useEffect(() => {
     const savedSession = localStorage.getItem('appSession') || '';
@@ -771,7 +814,7 @@ export default function Admin() {
   const navigation = [
     ['access', '⌁', 'Team access'], ['ai', '✦', 'AI & model'], ['branding', 'Aa', 'Brand Language'],
     ['disputes', '⚑', 'Disputes'], ['snippets', '⌘', 'Snippets'], ['knowledge', '▤', 'Knowledge'], ['querylogs', '◧', 'Query & answer logs'], ['calcdata', '∑', 'Calculator data'], ['activity', '◫', 'Activity logs'],
-    ['autosync', '↻', 'Automatic sync'], ['groqkeys', '⚿', 'Groq keys'], ['keys', '◇', 'API vault']
+    ['autosync', '↻', 'Automatic sync'], ['groqkeys', '⚿', 'Groq keys'], ['notices', '❖', 'Notices'], ['keys', '◇', 'API vault']
   ];
   const titles = Object.fromEntries(navigation.map(([id,, title]) => [id, title]));
   const models = provider === 'groq' ? GROQ_MODELS : OPENAI_MODELS;
@@ -971,6 +1014,30 @@ export default function Admin() {
             </div>
             <div className="autosync-actions"><button className="btn btn-primary" onClick={() => { if (!newLev.stepKey || !newLev.leverage) return setError('Enter an account key and leverage.'); saveLeverage(newLev, 'Leverage row added.'); setNewLev({ stepKey: '', marketType: 'Currency', phase: 'any', leverage: '' }); }}>Add leverage row</button></div>
             <p className="field-help">The account key is matched from the customer's wording — use "instant" for Stellar Instant, "1-step", "2-step", "lite". Use phase "any" when Challenge and Funded share the same leverage.</p>
+          </section>
+        </div>}
+
+        {tab === 'notices' && <div className="settings-stack">
+          <section className="settings-card">
+            <div className="settings-head"><div><h2>Upload notices</h2><p>Upload the combined notices RAG file. This imports every entry, resolves supersession (most-recent-wins), and indexes the active ones so the assistant answers from them with priority over FAQs.</p></div></div>
+            <input type="file" accept="application/json,.json" onChange={(e) => { setNoticeFile(e.target.files?.[0] || null); setNoticeMsg(''); }} />
+            <div className="autosync-actions" style={{ marginTop: 12 }}>
+              <button className="btn btn-primary" disabled={noticeBusy || !noticeFile} onClick={importNoticeFile}>{noticeBusy ? 'Working\u2026' : 'Upload & load'}</button>
+              <button className="btn btn-secondary" disabled={noticeBusy} onClick={reindexNoticesNow}>Re-index only</button>
+              <button className="btn btn-secondary" disabled={noticeBusy} onClick={loadNotices}>Refresh list</button>
+            </div>
+            {noticeMsg && <p className="field-help" style={{ color: '#5fd08a' }}>{noticeMsg}</p>}
+          </section>
+          <section className="settings-card">
+            <div className="settings-head"><div><h2>Stored notices</h2><p>Active notices feed the assistant. Superseded and expired ones are kept for history. Use Expire to switch off a time-bound offer the moment it ends.</p></div>{noticeList.length ? <span className="state-pill ready">{noticeList.filter((n) => n.status === 'active').length} active</span> : null}</div>
+            <div className="sync-log-list">{noticeList.map((n) => <div key={n.entry_id} className={`sync-log ${n.status === 'active' ? '' : 'skipped'}`}><div className="sync-log-row" style={{ cursor: 'default' }}>
+              <span className={`sync-badge ${n.status === 'active' ? 'success' : 'skipped'}`}>{n.status}</span>
+              <span className="sync-log-main"><b>{n.title}</b><small>{n.category} · {n.product}/{n.model} · {String(n.posted_at || '').slice(0, 10)}{n.requires_escalation ? ' \u00b7 escalation' : ''}</small></span>
+              {n.source_url && <a className="btn btn-secondary" style={{ padding: '6px 10px' }} href={n.source_url} target="_blank" rel="noreferrer">Open</a>}
+              {n.status === 'active'
+                ? <button className="btn btn-secondary" style={{ padding: '6px 10px' }} onClick={() => setNoticeStatusNow(n.entry_id, 'expired')}>Expire</button>
+                : <button className="btn btn-secondary" style={{ padding: '6px 10px' }} onClick={() => setNoticeStatusNow(n.entry_id, 'active')}>Reactivate</button>}
+            </div></div>)}{!noticeList.length && <div className="empty-admin">No notices loaded yet. Upload the file above, or click Refresh list.</div>}</div>
           </section>
         </div>}
 
