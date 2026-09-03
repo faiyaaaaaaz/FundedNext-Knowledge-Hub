@@ -6,7 +6,8 @@
 import { authenticateRequest, supabaseAdmin, getKeys } from '../../lib/server';
 import {
   isNoticeLabUser, importNoticesRag, reconcileNotices, reindexNotices,
-  listNotices, setNoticeStatus, saveNoticeEntry
+  listNotices, setNoticeStatus, saveNoticeEntry,
+  getNoticesAccessConfig, setNoticesAccessConfig, extractNoticeFromText
 } from '../../lib/notices';
 
 export const config = { maxDuration: 120 };
@@ -51,12 +52,31 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
-      if (body.action === 'save-entry') {
-        await saveNoticeEntry(body.entry, sb);
+      if (body.action === 'save-entry' || body.action === 'save-entries') {
+        const entries = body.action === 'save-entries' ? (body.entries || []) : [body.entry];
+        for (const entry of entries) { if (entry) await saveNoticeEntry(entry, sb); }
         await reconcileNotices(sb);
         const { openaiKey } = await getKeys();
         await reindexNotices(sb, { openaiKey });
-        return res.status(200).json({ ok: true });
+        return res.status(200).json({ ok: true, saved: entries.filter(Boolean).length });
+      }
+
+      if (body.action === 'extract') {
+        const { openaiKey, chatModel } = await getKeys();
+        const proposed = await extractNoticeFromText({
+          text: body.text, source_url: body.source_url, posted_by: body.posted_by, posted_at: body.posted_at
+        }, { openaiKey, chatModel });
+        return res.status(200).json({ ok: true, proposed });
+      }
+
+      if (body.action === 'access-get') {
+        return res.status(200).json({ ok: true, access: await getNoticesAccessConfig(sb) });
+      }
+
+      if (body.action === 'access-set') {
+        if (access.role !== 'admin') return res.status(403).json({ error: 'Only an admin can change notices access.' });
+        await setNoticesAccessConfig({ domainAll: body.domainAll, emails: body.emails }, sb);
+        return res.status(200).json({ ok: true, access: await getNoticesAccessConfig(sb) });
       }
 
       return res.status(400).json({ error: 'Unknown action.' });
