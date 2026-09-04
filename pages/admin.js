@@ -275,12 +275,16 @@ export default function Admin() {
   const [noticeMsg, setNoticeMsg] = useState('');
   const [noticeBusy, setNoticeBusy] = useState(false);
   const [noticeList, setNoticeList] = useState([]);
+  const [noticeIndexedAt, setNoticeIndexedAt] = useState(null);
+  const [noticeSearch, setNoticeSearch] = useState('');
+  const [noticeStatusFilter, setNoticeStatusFilter] = useState('all');
   const loadNotices = async () => {
     try {
       const r = await fetch('/api/notices', { headers: headers() });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Failed to load notices.');
       setNoticeList(d.notices || []);
+      setNoticeIndexedAt(d.indexedAt || null);
     } catch (e) { setError(e.message); }
   };
   const importNoticeFile = async () => {
@@ -374,7 +378,7 @@ export default function Admin() {
 
   useEffect(() => {
     if (!session || role !== 'admin') return;
-    const loaders = { branding: loadTerms, disputes: loadDisputes, snippets: loadSnippets, activity: loadActivity, autosync: loadAutoSync, knowledge: loadKnowledge, querylogs: loadQueryLogs, calcdata: loadCalc, groqkeys: loadGroqKeys };
+    const loaders = { branding: loadTerms, disputes: loadDisputes, snippets: loadSnippets, activity: loadActivity, autosync: loadAutoSync, knowledge: loadKnowledge, querylogs: loadQueryLogs, calcdata: loadCalc, groqkeys: loadGroqKeys, notices: loadNotices };
     const loader = loaders[tab];
     if (loader) {
       const activeTab = tab;
@@ -881,6 +885,21 @@ export default function Admin() {
     return out;
   })();
   const pageIsLoading = loadingTab === tab || (settingsLoading && ['access', 'ai', 'keys'].includes(tab));
+  const latestNotice = noticeList.reduce((latest, item) => {
+    if (!item?.posted_at) return latest;
+    return !latest || new Date(item.posted_at) > new Date(latest.posted_at) ? item : latest;
+  }, null);
+  const noticeCounts = noticeList.reduce((counts, item) => {
+    const key = ['active', 'superseded', 'expired'].includes(item.status) ? item.status : 'other';
+    counts[key] = (counts[key] || 0) + 1;
+    return counts;
+  }, { active: 0, superseded: 0, expired: 0, other: 0 });
+  const visibleNotices = noticeList.filter((item) => {
+    if (noticeStatusFilter !== 'all' && item.status !== noticeStatusFilter) return false;
+    const needle = noticeSearch.trim().toLowerCase();
+    if (!needle) return true;
+    return `${item.title || ''} ${item.posted_by || ''} ${item.category || ''} ${item.topic_key || ''}`.toLowerCase().includes(needle);
+  });
 
   return (
     <main className="admin-shell">
@@ -1080,6 +1099,15 @@ export default function Admin() {
 
         {tab === 'notices' && <div className="settings-stack">
           <section className="settings-card">
+            <div className="settings-head"><div><h2>Coverage status</h2><p>This shows exactly where your stored ClickUp coverage currently ends.</p></div><button className="btn btn-secondary" disabled={noticeBusy} onClick={loadNotices}>Refresh</button></div>
+            {latestNotice ? <div className="notice-coverage-grid">
+              <div className="notice-latest-card"><span className="eyebrow">Latest notice covered</span><h3>{latestNotice.title}</h3><p><b>{latestNotice.posted_by || 'Poster not recorded'}</b> · {formatDate(latestNotice.posted_at)}</p><small>{latestNotice.category} · {latestNotice.product}/{latestNotice.model}</small>{latestNotice.source_url && <a href={latestNotice.source_url} target="_blank" rel="noreferrer">Open this notice in ClickUp ↗</a>}</div>
+              <div className="notice-stat"><span>Total stored</span><strong>{noticeList.length}</strong></div>
+              <div className="notice-stat"><span>Active</span><strong>{noticeCounts.active}</strong></div>
+              <div className="notice-stat"><span>Last searchable refresh</span><strong className="notice-stat-date">{noticeIndexedAt ? formatDate(noticeIndexedAt) : 'Not recorded'}</strong></div>
+            </div> : <div className="empty-admin">No notices could be loaded. If notices were previously uploaded, refresh once and check the error message above.</div>}
+          </section>
+          <section className="settings-card">
             <div className="settings-head"><div><h2>Upload notices</h2><p>Upload the combined notices RAG file. This imports every entry, resolves supersession (most-recent-wins), and indexes the active ones so the assistant answers from them with priority over FAQs.</p></div></div>
             <input type="file" accept="application/json,.json" onChange={(e) => { setNoticeFile(e.target.files?.[0] || null); setNoticeMsg(''); }} />
             <div className="autosync-actions" style={{ marginTop: 12 }}>
@@ -1111,15 +1139,16 @@ export default function Admin() {
             </div>}
           </section>
           <section className="settings-card">
-            <div className="settings-head"><div><h2>Stored notices</h2><p>Active notices feed the assistant. Superseded and expired ones are kept for history. Use Expire to switch off a time-bound offer the moment it ends.</p></div>{noticeList.length ? <span className="state-pill ready">{noticeList.filter((n) => n.status === 'active').length} active</span> : null}</div>
-            <div className="sync-log-list">{noticeList.map((n) => <div key={n.entry_id} className={`sync-log ${n.status === 'active' ? '' : 'skipped'}`}><div className="sync-log-row" style={{ cursor: 'default' }}>
+            <div className="settings-head"><div><h2>Stored notices</h2><p>Search by title, poster, category, or topic. Active notices feed the assistant; older states remain available for history.</p></div>{noticeList.length ? <span className="state-pill ready">{noticeCounts.active} active</span> : null}</div>
+            <div className="notice-list-tools"><input type="search" value={noticeSearch} onChange={(e) => setNoticeSearch(e.target.value)} placeholder="Search notices or poster…" /><select value={noticeStatusFilter} onChange={(e) => setNoticeStatusFilter(e.target.value)}><option value="all">All statuses ({noticeList.length})</option><option value="active">Active ({noticeCounts.active})</option><option value="superseded">Superseded ({noticeCounts.superseded})</option><option value="expired">Expired ({noticeCounts.expired})</option></select></div>
+            <div className="sync-log-list">{visibleNotices.map((n) => <div key={n.entry_id} className={`sync-log ${n.status === 'active' ? '' : 'skipped'}`}><div className="sync-log-row" style={{ cursor: 'default' }}>
               <span className={`sync-badge ${n.status === 'active' ? 'success' : 'skipped'}`}>{n.status}</span>
-              <span className="sync-log-main"><b>{n.title}</b><small>{n.category} · {n.product}/{n.model} · {String(n.posted_at || '').slice(0, 10)}{n.requires_escalation ? ' \u00b7 escalation' : ''}</small></span>
+              <span className="sync-log-main"><b>{n.title}</b><small>{n.posted_by || 'Poster not recorded'} · {formatDate(n.posted_at)}</small><small>{n.category} · {n.product}/{n.model} · {n.topic_key}{n.requires_escalation ? ' \u00b7 escalation' : ''}</small></span>
               {n.source_url && <a className="btn btn-secondary" style={{ padding: '6px 10px' }} href={n.source_url} target="_blank" rel="noreferrer">Open</a>}
               {n.status === 'active'
                 ? <button className="btn btn-secondary" style={{ padding: '6px 10px' }} onClick={() => setNoticeStatusNow(n.entry_id, 'expired')}>Expire</button>
                 : <button className="btn btn-secondary" style={{ padding: '6px 10px' }} onClick={() => setNoticeStatusNow(n.entry_id, 'active')}>Reactivate</button>}
-            </div></div>)}{!noticeList.length && <div className="empty-admin">No notices loaded yet. Upload the file above, or click Refresh list.</div>}</div>
+            </div></div>)}{!visibleNotices.length && <div className="empty-admin">{noticeList.length ? 'No notices match this search and status.' : 'No notices loaded yet.'}</div>}</div>
           </section>
         </div>}
 
