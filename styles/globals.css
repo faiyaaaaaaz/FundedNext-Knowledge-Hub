@@ -626,6 +626,10 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .notice-list-tools { display: grid; grid-template-columns: 1fr 220px; gap: 10px; margin-bottom: 14px; }
 .notice-list-tools input, .notice-list-tools select { width: 100%; }
 .notice-analyze-btn { display: inline-flex; align-items: center; gap: 8px; }
+.notice-refresh-btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
+.notice-date-shortcuts { display: flex; gap: 7px; margin-top: 7px; }
+.notice-date-shortcuts button { padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--muted); cursor: pointer; font-size: 11px; font-weight: 700; }
+.notice-date-shortcuts button:hover { border-color: var(--violet-2); color: var(--violet); }
 .notice-spinner { width: 14px; height: 14px; border: 2px solid color-mix(in srgb, var(--violet) 28%, transparent); border-top-color: var(--violet); border-radius: 50%; animation: notice-spin .75s linear infinite; }
 .notice-ai-progress { margin-top: 12px; min-height: 62px; padding: 13px 15px; display: grid; grid-template-columns: 28px 1fr; gap: 11px; align-items: center; position: relative; overflow: hidden; border: 1px solid color-mix(in srgb, var(--violet) 30%, var(--line)); border-radius: 13px; background: color-mix(in srgb, var(--violet-soft) 35%, var(--surface)); }
 .notice-ai-progress .notice-progress-icon { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 9px; background: var(--violet-soft); color: var(--violet); font-weight: 800; }
