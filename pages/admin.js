@@ -54,6 +54,17 @@ function isoOf(y, m0, d) { return `${y}-${pad(m0 + 1)}-${pad(d)}`; }
 function dhakaTodayIso() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 }
+function dhakaDateTimeInput(dayOffset = 0) {
+  const date = new Date(Date.now() + dayOffset * 86400000);
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Dhaka', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+  }).formatToParts(date).filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+}
+function dhakaInputToIso(value) {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(String(value || '')) ? `${value}:00+06:00` : value;
+}
 function shiftIso(iso, days) {
   const [y, m, d] = iso.split('-').map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d + days));
@@ -270,6 +281,112 @@ export default function Admin() {
   const [newLev, setNewLev] = useState({ stepKey: '', marketType: 'Currency', phase: 'any', leverage: '' });
   const [groqKeys, setGroqKeys] = useState(null);
   const [newGroqKey, setNewGroqKey] = useState({ label: '', key: '' });
+  // --- Notices tab state + handlers ---
+  const [noticeFile, setNoticeFile] = useState(null);
+  const [noticeMsg, setNoticeMsg] = useState('');
+  const [noticeBusy, setNoticeBusy] = useState(false);
+  const [noticeRefreshing, setNoticeRefreshing] = useState(false);
+  const [noticeList, setNoticeList] = useState([]);
+  const [noticeIndexedAt, setNoticeIndexedAt] = useState(null);
+  const [noticeSearch, setNoticeSearch] = useState('');
+  const [noticeStatusFilter, setNoticeStatusFilter] = useState('all');
+  const loadNotices = async (announce = false) => {
+    if (announce) { setNoticeRefreshing(true); setNotice(''); setError(''); }
+    try {
+      const r = await fetch('/api/notices', { headers: headers() });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Failed to load notices.');
+      setNoticeList(d.notices || []);
+      setNoticeIndexedAt(d.indexedAt || null);
+      if (announce) setNotice(`Notices refreshed · ${(d.notices || []).length} stored.`);
+    } catch (e) { setError(e.message); } finally { if (announce) setNoticeRefreshing(false); }
+  };
+  const importNoticeFile = async () => {
+    if (!noticeFile) return setError('Choose the combined RAG .json file first.');
+    setNoticeBusy(true); setNoticeMsg('');
+    try {
+      const text = await noticeFile.text();
+      JSON.parse(text);
+      const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'import', rag: text }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Import failed.');
+      setNoticeMsg('Imported ' + d.imported + ' \u00b7 reconciled ' + d.reconciled + ' \u00b7 indexed ' + d.indexed + '.');
+      await loadNotices();
+    } catch (e) { setError(e.message); } finally { setNoticeBusy(false); }
+  };
+  const reindexNoticesNow = async () => {
+    setNoticeBusy(true); setNoticeMsg('');
+    try {
+      const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'reindex' }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Reindex failed.');
+      setNoticeMsg('Re-indexed ' + d.indexed + ' active notices.');
+      await loadNotices();
+    } catch (e) { setError(e.message); } finally { setNoticeBusy(false); }
+  };
+  const setNoticeStatusNow = async (entry_id, status) => {
+    try {
+      const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'set-status', entry_id, status }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Update failed.');
+      setNotice('Notice updated.'); await loadNotices();
+    } catch (e) { setError(e.message); }
+  };
+  // --- Paste-a-notice + notices access state/handlers ---
+  const [pasteText, setPasteText] = useState('');
+  const [pasteUrl, setPasteUrl] = useState('');
+  const [pastePoster, setPastePoster] = useState('');
+  const [pasteDate, setPasteDate] = useState(() => dhakaDateTimeInput());
+  const [pasteProposed, setPasteProposed] = useState(null);
+  const [pasteBusy, setPasteBusy] = useState(false);
+  const [pasteStage, setPasteStage] = useState('');
+  const [noticeAccessCfg, setNoticeAccessCfg] = useState(null);
+  const [newAccessEmail, setNewAccessEmail] = useState('');
+  const analyzePaste = async () => {
+    if (!pasteText.trim()) return setError('Paste the notice text first.');
+    setPasteBusy(true); setPasteProposed(null); setPasteStage('Reading the notice…'); setError('');
+    const stageTimers = [
+      setTimeout(() => setPasteStage('Separating the notice into facts…'), 1200),
+      setTimeout(() => setPasteStage('Checking product, model, and topic…'), 3000),
+      setTimeout(() => setPasteStage('Preparing your review…'), 5200)
+    ];
+    try {
+      const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'extract', text: pasteText, source_url: pasteUrl, posted_by: pastePoster, posted_at: dhakaInputToIso(pasteDate) || undefined }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Analyze failed.');
+      if (!d.proposed?.length) throw new Error('The notice could not be structured. Please check the pasted text and try again.');
+      setPasteStage('Ready for your review');
+      setPasteProposed(d.proposed);
+    } catch (e) { setPasteStage(''); setError(e.message); } finally { stageTimers.forEach(clearTimeout); setPasteBusy(false); }
+  };
+  const savePaste = async () => {
+    if (!pasteProposed?.length) return;
+    setPasteBusy(true);
+    try {
+      const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'save-entries', entries: pasteProposed }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Save failed.');
+      setNotice('Saved ' + (d.saved || 0) + ' notice entries.');
+      setPasteText(''); setPasteUrl(''); setPastePoster(''); setPasteDate(dhakaDateTimeInput()); setPasteProposed(null); setPasteStage('');
+      await loadNotices();
+    } catch (e) { setError(e.message); } finally { setPasteBusy(false); }
+  };
+  const loadNoticeAccess = async () => {
+    try {
+      const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'access-get' }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Failed to load access.');
+      setNoticeAccessCfg(d.access);
+    } catch (e) { setError(e.message); }
+  };
+  const saveNoticeAccess = async (next) => {
+    try {
+      const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'access-set', ...next }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Save failed.');
+      setNoticeAccessCfg(d.access); setNotice('Notices access updated.');
+    } catch (e) { setError(e.message); }
+  };
 
   useEffect(() => {
     const savedSession = localStorage.getItem('appSession') || '';
@@ -284,7 +401,7 @@ export default function Admin() {
 
   useEffect(() => {
     if (!session || role !== 'admin') return;
-    const loaders = { branding: loadTerms, disputes: loadDisputes, snippets: loadSnippets, activity: loadActivity, autosync: loadAutoSync, knowledge: loadKnowledge, querylogs: loadQueryLogs, calcdata: loadCalc, groqkeys: loadGroqKeys };
+    const loaders = { branding: loadTerms, disputes: loadDisputes, snippets: loadSnippets, activity: loadActivity, autosync: loadAutoSync, knowledge: loadKnowledge, querylogs: loadQueryLogs, calcdata: loadCalc, groqkeys: loadGroqKeys, notices: loadNotices };
     const loader = loaders[tab];
     if (loader) {
       const activeTab = tab;
@@ -771,7 +888,7 @@ export default function Admin() {
   const navigation = [
     ['access', '⌁', 'Team access'], ['ai', '✦', 'AI & model'], ['branding', 'Aa', 'Brand Language'],
     ['disputes', '⚑', 'Disputes'], ['snippets', '⌘', 'Snippets'], ['knowledge', '▤', 'Knowledge'], ['querylogs', '◧', 'Query & answer logs'], ['calcdata', '∑', 'Calculator data'], ['activity', '◫', 'Activity logs'],
-    ['autosync', '↻', 'Automatic sync'], ['groqkeys', '⚿', 'Groq keys'], ['keys', '◇', 'API vault']
+    ['autosync', '↻', 'Automatic sync'], ['groqkeys', '⚿', 'Groq keys'], ['notices', '❖', 'Notices'], ['keys', '◇', 'API vault']
   ];
   const titles = Object.fromEntries(navigation.map(([id,, title]) => [id, title]));
   const models = provider === 'groq' ? GROQ_MODELS : OPENAI_MODELS;
@@ -791,6 +908,21 @@ export default function Admin() {
     return out;
   })();
   const pageIsLoading = loadingTab === tab || (settingsLoading && ['access', 'ai', 'keys'].includes(tab));
+  const latestNotice = noticeList.reduce((latest, item) => {
+    if (!item?.posted_at) return latest;
+    return !latest || new Date(item.posted_at) > new Date(latest.posted_at) ? item : latest;
+  }, null);
+  const noticeCounts = noticeList.reduce((counts, item) => {
+    const key = ['active', 'superseded', 'expired'].includes(item.status) ? item.status : 'other';
+    counts[key] = (counts[key] || 0) + 1;
+    return counts;
+  }, { active: 0, superseded: 0, expired: 0, other: 0 });
+  const visibleNotices = noticeList.filter((item) => {
+    if (noticeStatusFilter !== 'all' && item.status !== noticeStatusFilter) return false;
+    const needle = noticeSearch.trim().toLowerCase();
+    if (!needle) return true;
+    return `${item.title || ''} ${item.posted_by || ''} ${item.category || ''} ${item.topic_key || ''}`.toLowerCase().includes(needle);
+  });
 
   return (
     <main className="admin-shell">
@@ -803,6 +935,20 @@ export default function Admin() {
         {tab === 'access' && <div className="settings-stack">
           <section className="settings-card"><div className="settings-head"><div><h2>Google sign-in</h2><p>Access is permanently restricted to nextventures.io Google accounts.</p></div><span className={`state-pill ${status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'ready' : ''}`}>{status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'Configured' : 'Vercel setup needed'}</span></div><div className="permission-table"><div><span>Access rule</span><b>Required value</b><b>Status</b></div><div><span>Allowed domain</span><b>nextventures.io</b><b>Fixed</b></div><div><span>Admin list</span><b>ADMIN_GOOGLE_EMAILS</b><b>{status?.adminGoogleConfigured ? 'Configured' : 'Missing'}</b></div></div></section>
           <section className="settings-card"><div className="settings-head"><div><h2>Workspace roles</h2><p>Every user must authenticate with Google. Admin rights come only from the Vercel Admin email list.</p></div><span className="state-pill ready">Google only</span></div><div className="permission-table"><div><span>Requirement</span><b>Agent</b><b>Admin</b></div><div><span>@nextventures.io Google account</span><b>Required</b><b>Required</b></div><div><span>Listed in ADMIN_GOOGLE_EMAILS</span><b>No</b><b>Required</b></div></div></section>
+          <section className="settings-card">
+            <div className="settings-head"><div><h2>Notices access (experimental)</h2><p>Controls who can use the notices layer in the assistant. Off for everyone by default except the people you list here.</p></div>{noticeAccessCfg && <span className="state-pill ready">{noticeAccessCfg.enabled ? 'Enabled' : 'Globally off'}</span>}</div>
+            {!noticeAccessCfg ? <button className="btn btn-secondary" onClick={loadNoticeAccess}>Load notices access</button> : <>
+              <div className="settings-head"><div><h3>All @nextventures.io users</h3><p>When on, every signed-in nextventures.io account can use notices. Off by default.</p></div><label className="toggle"><input type="checkbox" checked={!!noticeAccessCfg.domainAll} onChange={(e) => saveNoticeAccess({ domainAll: e.target.checked })} /><i /></label></div>
+              <label style={{ marginTop: 10, display: 'block' }}>Allowed emails</label>
+              <div className="sync-log-list">{(noticeAccessCfg.emails || []).map((em) => <div key={em} className="sync-log"><div className="sync-log-row" style={{ cursor: 'default' }}>
+                <span className="sync-badge success">allowed</span><span className="sync-log-main"><b>{em}</b></span>
+                <button className="btn btn-secondary" style={{ padding: '6px 10px' }} onClick={() => saveNoticeAccess({ emails: (noticeAccessCfg.emails || []).filter((x) => x !== em) })}>Revoke</button>
+              </div></div>)}{!(noticeAccessCfg.emails || []).length && <div className="empty-admin">No specific emails allowed yet.</div>}</div>
+              <div className="autosync-grid" style={{ marginTop: 12 }}><div className="field-block"><label>Add an email</label><input value={newAccessEmail} onChange={(e) => setNewAccessEmail(e.target.value)} placeholder="someone@nextventures.io" /></div></div>
+              <div className="autosync-actions"><button className="btn btn-primary" onClick={() => { const em = newAccessEmail.trim().toLowerCase(); if (!em) return setError('Enter an email.'); saveNoticeAccess({ emails: Array.from(new Set([...(noticeAccessCfg.emails || []), em])) }); setNewAccessEmail(''); }}>Add email</button></div>
+            </>}
+          </section>
+
           <section className="settings-card danger-card"><div className="settings-head"><div><h2>Sign everyone out</h2><p>Ends every active session across the workspace. All users — agents and admins — will have to sign in with Google again. Your own session will end too.</p></div></div><button className="btn btn-danger" disabled={saving} onClick={signEveryoneOut}>Sign everyone out</button></section>
         </div>}
 
@@ -864,6 +1010,15 @@ export default function Admin() {
                   {log.feedback && <div className={`query-feedback-detail ${log.feedback}`}><span>{feedbackLabel}</span><div><b>Answer feedback received</b><small>Submitted by {log.feedbackBy || log.userName || log.userEmail || 'the agent'} · {formatDate(log.feedbackAt || log.createdAt)}</small></div></div>}
                   <div className="query-log-facts"><span>Product<b>{log.product ? log.product.toUpperCase() : 'Legacy record'}</b></span><span>Account model<b>{log.scopeLabel || log.accountModel || 'Not recorded'}</b></span><span>Answer model<b>{log.model || 'Not recorded'}</b></span><span>Confidence<b>{log.confidence == null ? 'Not recorded' : `${log.confidence}% · ${log.confidenceLabel}`}</b></span><span>Answer feedback<b>{feedbackLabel || 'No feedback received'}</b></span><span>Question words<b>{log.questionWordCount.toLocaleString()}</b></span><span>Answer words<b>{log.answerWordCount.toLocaleString()}</b></span><span>Tokens<b>{log.inputTokens.toLocaleString()} in · ${log.outputTokens.toLocaleString()} out</b></span><span>Response time<b>{log.durationMs ? `${(log.durationMs / 1000).toFixed(1)}s` : 'Not recorded'}</b></span></div>
                   <div className="query-log-copy"><label>Complete query</label><div>{log.question || 'Not retained in this older record.'}</div><label>Complete answer</label><div>{log.answer || 'Not retained in this older record.'}</div></div>
+                  {log.interpretation && <div className="interpretation-trail">
+                    <div className="interpretation-title"><div><span className="eyebrow">Interpretation and evidence trail</span><h3>How this answer was produced</h3></div><span className={`state-pill ${log.interpretation.helperUsed ? 'ready' : ''}`}>{log.interpretation.helperUsed ? 'AI interpretation used' : 'Rule-based interpretation'}</span></div>
+                    <div className="interpretation-summary"><span>Cleaned meaning<b>{log.interpretation.cleaned || log.question}</b></span><span>Detected scope<b>{log.interpretation.selectedProduct?.toUpperCase()} · {log.interpretation.selectedModelLabel}</b><small>Chosen from {log.interpretation.scopeSource === 'selector' ? 'the Agent selector' : log.interpretation.scopeSource === 'question' ? 'the question wording' : 'the full product family'}</small></span></div>
+                    <div className="interpretation-section"><label>Questions extracted ({log.interpretation.topics?.length || 0})</label><ol>{(log.interpretation.topics || []).map((topic, index) => <li key={index}>{topic.question}</li>)}</ol></div>
+                    <div className="interpretation-section"><label>Searches created ({log.interpretation.searchQueries?.length || 0})</label><div className="interpretation-chips">{(log.interpretation.searchQueries || []).map((query, index) => <span key={index}>{query}</span>)}</div></div>
+                    {log.evidenceTrail && <><div className="interpretation-section"><label>Evidence selected for the answering AI ({log.evidenceTrail.selectedForAnswer?.length || 0})</label><div className="evidence-audit-list accepted">{(log.evidenceTrail.selectedForAnswer || []).map((item, index) => <div key={`${item.id}-${index}`}><span>{item.position}</span><div><b>{item.title || item.id}</b><small>{item.kind} · similarity {(Number(item.similarity || 0) * 100).toFixed(1)}%{item.exactScope ? ' · exact Account match' : ''}</small></div>{item.url && <a href={item.url} target="_blank" rel="noreferrer">Open ↗</a>}</div>)}</div></div>
+                    <div className="interpretation-section"><label>Evidence rejected before answering ({log.evidenceTrail.rejected?.length || 0})</label>{log.evidenceTrail.rejected?.length ? <div className="evidence-audit-list rejected">{log.evidenceTrail.rejected.map((item, index) => <div key={`${item.id}-${index}`}><span>×</span><div><b>{item.title || item.id}</b><small>{item.reason}</small></div>{item.url && <a href={item.url} target="_blank" rel="noreferrer">Inspect ↗</a>}</div>)}</div> : <p className="interpretation-empty">No candidate evidence was rejected.</p>}</div></>}
+                    {log.processing && <div className="interpretation-processing"><span>Corrective retry<b>{log.processing.partialAnswerRetryAttempted ? (log.processing.partialAnswerRetrySucceeded ? 'Used successfully' : 'Attempted; refusal retained') : 'Not needed'}</b></span><span>Provider fallback<b>{log.processing.fallback ? 'Used' : 'Not used'}</b></span><span>Grounding score<b>{log.processing.groundingScore == null ? 'Not available' : `${log.processing.groundingScore}%`}</b></span></div>}
+                  </div>}
                   {log.sources?.length > 0 && <div className="query-log-sources"><label>Sources used ({log.sourceCount})</label>{log.sources.map((source, index) => <a key={`${source.url}-${index}`} href={source.url || undefined} target="_blank" rel="noreferrer">{source.title || 'Untitled source'}<span>Open ↗</span></a>)}</div>}
                   <button type="button" className="query-collapse" onClick={() => setExpandedQueryLog(null)}>Collapse details ↑</button>
                 </div>}
@@ -971,6 +1126,62 @@ export default function Admin() {
             </div>
             <div className="autosync-actions"><button className="btn btn-primary" onClick={() => { if (!newLev.stepKey || !newLev.leverage) return setError('Enter an account key and leverage.'); saveLeverage(newLev, 'Leverage row added.'); setNewLev({ stepKey: '', marketType: 'Currency', phase: 'any', leverage: '' }); }}>Add leverage row</button></div>
             <p className="field-help">The account key is matched from the customer's wording — use "instant" for Stellar Instant, "1-step", "2-step", "lite". Use phase "any" when Challenge and Funded share the same leverage.</p>
+          </section>
+        </div>}
+
+        {tab === 'notices' && <div className="settings-stack">
+          <section className="settings-card">
+            <div className="settings-head"><div><h2>Coverage status</h2><p>This shows exactly where your stored ClickUp coverage currently ends.</p></div><button className="btn btn-secondary notice-refresh-btn" disabled={noticeBusy || noticeRefreshing} onClick={() => loadNotices(true)}>{noticeRefreshing ? <><span className="notice-spinner" />Refreshing…</> : 'Refresh'}</button></div>
+            {latestNotice ? <div className="notice-coverage-grid">
+              <div className="notice-latest-card"><span className="eyebrow">Latest notice covered</span><h3>{latestNotice.title}</h3><p><b>{latestNotice.posted_by || 'Poster not recorded'}</b> · {formatDate(latestNotice.posted_at)}</p><small>{latestNotice.category} · {latestNotice.product}/{latestNotice.model}</small>{latestNotice.source_url && <a href={latestNotice.source_url} target="_blank" rel="noreferrer">Open this notice in ClickUp ↗</a>}</div>
+              <div className="notice-stat"><span>Total stored</span><strong>{noticeList.length}</strong></div>
+              <div className="notice-stat"><span>Active</span><strong>{noticeCounts.active}</strong></div>
+              <div className="notice-stat"><span>Last searchable refresh</span><strong className="notice-stat-date">{noticeIndexedAt ? formatDate(noticeIndexedAt) : 'Not recorded'}</strong></div>
+            </div> : <div className="empty-admin">No notices could be loaded. If notices were previously uploaded, refresh once and check the error message above.</div>}
+          </section>
+          <section className="settings-card">
+            <div className="settings-head"><div><h2>Upload notices</h2><p>Upload the combined notices RAG file. This imports every entry, resolves supersession (most-recent-wins), and indexes the active ones so the assistant answers from them with priority over FAQs.</p></div></div>
+            <input type="file" accept="application/json,.json" onChange={(e) => { setNoticeFile(e.target.files?.[0] || null); setNoticeMsg(''); }} />
+            <div className="autosync-actions" style={{ marginTop: 12 }}>
+              <button className="btn btn-primary" disabled={noticeBusy || !noticeFile} onClick={importNoticeFile}>{noticeBusy ? 'Working\u2026' : 'Upload & load'}</button>
+              <button className="btn btn-secondary" disabled={noticeBusy} onClick={reindexNoticesNow}>Re-index only</button>
+              <button className="btn btn-secondary notice-refresh-btn" disabled={noticeBusy || noticeRefreshing} onClick={() => loadNotices(true)}>{noticeRefreshing ? <><span className="notice-spinner" />Refreshing…</> : 'Refresh list'}</button>
+            </div>
+            {noticeMsg && <p className="field-help" style={{ color: '#5fd08a' }}>{noticeMsg}</p>}
+          </section>
+          <section className="settings-card">
+            <div className="settings-head"><div><h2>Paste a notice</h2><p>Paste a notice (and its thread clarifications) copied from ClickUp. The AI structures it and shows what will be saved before you confirm. Contradictions update automatically by topic.</p></div></div>
+            <div className="autosync-grid">
+              <div className="field-block"><label>ClickUp notice link</label><input value={pasteUrl} onChange={(e) => setPasteUrl(e.target.value)} placeholder="https://app.clickup.com/…/t/…" /></div>
+              <div className="field-block"><label>Posted by</label><input value={pastePoster} onChange={(e) => setPastePoster(e.target.value)} placeholder="e.g. Preya Hossain" /></div>
+              <div className="field-block"><label>Posted date and time (GMT+6)</label><input type="datetime-local" value={pasteDate} onChange={(e) => setPasteDate(e.target.value)} /><div className="notice-date-shortcuts"><button type="button" onClick={() => setPasteDate(dhakaDateTimeInput())}>Now</button><button type="button" onClick={() => setPasteDate(dhakaDateTimeInput(-1))}>Yesterday</button></div></div>
+            </div>
+            <label style={{ marginTop: 12, display: 'block' }}>Notice text (and thread clarifications)</label>
+            <textarea className="prompt-area" value={pasteText} onChange={(e) => setPasteText(e.target.value)} placeholder="Paste the full notice here…" />
+            <div className="autosync-actions" style={{ marginTop: 12 }}>
+              <button className="btn btn-secondary notice-analyze-btn" disabled={pasteBusy || !pasteText.trim()} onClick={analyzePaste}>{pasteBusy ? <><span className="notice-spinner" />Working…</> : 'Analyze with AI'}</button>
+            </div>
+            {pasteStage && <div className={`notice-ai-progress ${pasteBusy ? 'working' : 'ready'}`} role="status" aria-live="polite"><span className="notice-progress-icon">{pasteBusy ? '✦' : '✓'}</span><div><b>{pasteStage}</b><small>{pasteBusy ? 'Keep this page open. Nothing has been saved yet.' : 'Review every fact below before saving.'}</small></div><i /></div>}
+            {pasteProposed && <div className="sync-log-list" style={{ marginTop: 12 }}>
+              {pasteProposed.length === 0 && <div className="empty-admin">The AI did not find a durable, customer-facing fact to save.</div>}
+              {pasteProposed.map((p, i) => <div key={i} className="sync-log"><div className="sync-log-row" style={{ cursor: 'default' }}>
+                <span className="sync-badge success">{p.change_type}</span>
+                <span className="sync-log-main"><b>{p.title}</b><small>{p.category} · {p.product}/{p.model} · {p.topic_key}{p.requires_escalation ? ' · escalation' : ''}</small><small style={{ opacity: 0.75 }}>{p.answer_text}</small></span>
+              </div></div>)}
+              {pasteProposed.length > 0 && <div className="autosync-actions" style={{ marginTop: 10 }}><button className="btn btn-primary" disabled={pasteBusy} onClick={savePaste}>Confirm & save {pasteProposed.length} {pasteProposed.length === 1 ? 'entry' : 'entries'}</button></div>}
+            </div>}
+          </section>
+          <section className="settings-card">
+            <div className="settings-head"><div><h2>Stored notices</h2><p>Search by title, poster, category, or topic. Active notices feed the assistant; older states remain available for history.</p></div>{noticeList.length ? <span className="state-pill ready">{noticeCounts.active} active</span> : null}</div>
+            <div className="notice-list-tools"><input type="search" value={noticeSearch} onChange={(e) => setNoticeSearch(e.target.value)} placeholder="Search notices or poster…" /><select value={noticeStatusFilter} onChange={(e) => setNoticeStatusFilter(e.target.value)}><option value="all">All statuses ({noticeList.length})</option><option value="active">Active ({noticeCounts.active})</option><option value="superseded">Superseded ({noticeCounts.superseded})</option><option value="expired">Expired ({noticeCounts.expired})</option></select></div>
+            <div className="sync-log-list">{visibleNotices.map((n) => <div key={n.entry_id} className={`sync-log ${n.status === 'active' ? '' : 'skipped'}`}><div className="sync-log-row" style={{ cursor: 'default' }}>
+              <span className={`sync-badge ${n.status === 'active' ? 'success' : 'skipped'}`}>{n.status}</span>
+              <span className="sync-log-main"><b>{n.title}</b><small>{n.posted_by || 'Poster not recorded'} · {formatDate(n.posted_at)}</small><small>{n.category} · {n.product}/{n.model} · {n.topic_key}{n.requires_escalation ? ' \u00b7 escalation' : ''}</small></span>
+              {n.source_url && <a className="btn btn-secondary" style={{ padding: '6px 10px' }} href={n.source_url} target="_blank" rel="noreferrer">Open</a>}
+              {n.status === 'active'
+                ? <button className="btn btn-secondary" style={{ padding: '6px 10px' }} onClick={() => setNoticeStatusNow(n.entry_id, 'expired')}>Expire</button>
+                : <button className="btn btn-secondary" style={{ padding: '6px 10px' }} onClick={() => setNoticeStatusNow(n.entry_id, 'active')}>Reactivate</button>}
+            </div></div>)}{!visibleNotices.length && <div className="empty-admin">{noticeList.length ? 'No notices match this search and status.' : 'No notices loaded yet.'}</div>}</div>
           </section>
         </div>}
 

@@ -32,7 +32,11 @@ function mapRow(row) {
     confidenceLabel: meta.confidenceLabel || '', sourceCount: Number(meta.sourceCount || 0), sources: Array.isArray(meta.sources) ? meta.sources : [],
     feedback: meta.feedback || '', feedbackAt: meta.feedbackAt || '', feedbackBy: meta.feedbackBy || '',
     durationMs: Number(meta.durationMs || 0), fallback: !!meta.fallback, groqKeyLabel: meta.groqKeyLabel || '',
-    questionTruncated: !!meta.questionTruncated, answerTruncated: !!meta.answerTruncated
+    questionTruncated: !!meta.questionTruncated, answerTruncated: !!meta.answerTruncated,
+    interpretation: meta.interpretation && typeof meta.interpretation === 'object' ? meta.interpretation : null,
+    evidenceTrail: meta.evidenceTrail && typeof meta.evidenceTrail === 'object' ? meta.evidenceTrail : null,
+    processing: meta.processing && typeof meta.processing === 'object' ? meta.processing : null,
+    refusalReason: meta.refusalReason || '', grounding: meta.grounding ?? null
   };
 }
 

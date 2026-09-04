@@ -50,9 +50,9 @@ function Brand() {
 function SourcePreview({ source, number, open, onToggle }) {
   return <article className={`source-preview ${source.kind === 'calculator' ? 'src-calc' : ''} ${open ? 'open' : ''}`}>
     <button type="button" className="source-preview-head" onClick={onToggle}>
-      <span className="src-num">{number}</span><span className="src-title"><b>{source.title}</b><small>{source.kind === 'calculator' ? 'Verified calculator evidence' : 'Verified FAQ evidence'}</small></span><span className="source-preview-action">{open ? 'Hide excerpt −' : 'View exact excerpt +'}</span>
+      <span className="src-num">{number}</span><span className="src-title"><b>{source.title}</b><small>{source.kind === 'calculator' ? 'Verified calculator evidence' : source.kind === 'notice' ? ('Notice' + (source.postedBy ? ' · ' + source.postedBy : '') + (source.postedAt ? ' · ' + String(source.postedAt).slice(0, 10) : '')) : 'Verified FAQ evidence'}</small></span><span className="source-preview-action">{open ? 'Hide excerpt −' : 'View exact excerpt +'}</span>
     </button>
-    {open && <div className="source-excerpt"><span>Relevant passage</span><p>{source.excerpt || 'The exact saved passage is unavailable for this older answer.'}</p>{source.url && <a href={source.url} target="_blank" rel="noreferrer">Open full article ↗</a>}</div>}
+    {open && <div className="source-excerpt"><span>Relevant passage</span><p>{source.excerpt || 'The exact saved passage is unavailable for this older answer.'}</p>{source.url && <a href={source.url} target="_blank" rel="noreferrer">{source.kind === 'notice' ? 'Open notice in ClickUp ↗' : 'Open full article ↗'}</a>}</div>}
   </article>;
 }
 
@@ -121,7 +121,7 @@ function SourceCites({ refs, sources }) {
           <a key={n} className={`seg-cite${source.kind === 'calculator' ? ' calc' : ''}`} data-n={n} href={source.url || undefined} target="_blank" rel="noreferrer"
             aria-label={`${source.kind === 'calculator' ? 'Calculator reference' : 'Source'} ${n}: ${source.title}`}>
             <span className="seg-cite-pop" aria-hidden="true">
-              <b>{source.kind === 'calculator' ? '⚙ Calculator' : `Source ${n}`}</b><span>{source.title}</span><em>{source.kind === 'calculator' ? 'Reference' : 'Open article ↗'}</em>
+              <b>{source.kind === 'calculator' ? '⚙ Calculator' : `Source ${n}`}</b><span>{source.title}</span><em>{source.kind === 'calculator' ? 'Reference' : source.kind === 'notice' ? 'Open notice ↗' : 'Open article ↗'}</em>
             </span>
           </a>
         );
@@ -616,6 +616,7 @@ export default function Home() {
             <div className="metric-grid"><div className="metric-card"><span>Indexed</span><strong>{stats?.indexedArticles?.toLocaleString() ?? '—'}</strong></div><div className="metric-card"><span>Queued</span><strong>{stats?.queuedArticles?.toLocaleString() ?? '—'}</strong></div></div>
             <div className="metric-card"><span>Searchable sections</span><strong>{stats?.totalChunks?.toLocaleString() ?? '—'}</strong><small>Focused pieces used for retrieval</small></div>
             <div className="metric-card update-time"><span>Last knowledge update</span><strong>{formatDhaka(stats?.lastUpdatedAt)}</strong>{stats?.lastSyncAt && <small className="sync-ago"><span className="live-dot tiny" />Auto-synced {timeAgo(stats.lastSyncAt)}{stats?.lastSyncSummary?.changed ? ` · ${stats.lastSyncSummary.changed} updated` : ' · no changes'}</small>}</div>
+            <div className="metric-card update-time"><span>Last notices update</span><strong>{stats?.noticesUpdatedAt ? formatDhaka(stats.noticesUpdatedAt) : 'Not loaded yet'}</strong><small>Manual updates only</small></div>
             {role === 'admin' && <div className="metric-card dispute-metric"><span>Pending disputes</span><strong>{stats?.pendingDisputes ?? '—'}</strong><Link href="/admin">Review in Admin →</Link></div>}
             <div className="rail-tip"><b>Confidence guide</b><p><span className="dot high" />85–100: strong direct support</p><p><span className="dot medium" />65–84: review suggested</p><p><span className="dot low" />Below 65: verify carefully</p></div>
           </>}

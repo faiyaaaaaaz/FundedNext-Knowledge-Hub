@@ -5,6 +5,7 @@ import {
   expandConcepts, clarifyQuery, correctTypos, runCalculators,
   getGroqKeys, verifyGrounding, getPublishedScopeCatalog, modelsMentioned, getArticleScopeOverrides
 } from '../../lib/server';
+import { retrieveNotices, noticesAccess } from '../../lib/notices';
 
 const STOP = new Set([
   'the','a','an','of','to','in','on','for','and','or','is','are','was','were','how','much','many',
@@ -28,7 +29,8 @@ const CORE_GUARDRAILS =
   '- Never guess or generalize with typically, generally, usually, or likely.\n' +
   '- Use plain text only. Do not use Markdown, bold text, italics, headings, asterisks, underscores, or decorative symbols.\n' +
   '- Keep paragraphs short and separated by one blank line. Use simple numbered steps only when a sequence is genuinely needed.\n' +
-  `- If direct evidence is insufficient, reply exactly: "${SAFE_UNCONFIRMED}"\n` +
+  '- For a multi-part question, answer every part supported by direct evidence and say only that the specific unsupported part needs checking.\n' +
+  `- Reply exactly "${SAFE_UNCONFIRMED}" only when direct evidence supports none of the requested parts.\n` +
   '- Factual numbers, dates, percentages, time periods, and conditions must be directly supported by the selected FAQ evidence.';
 
 function keywords(question) {
@@ -38,7 +40,12 @@ function keywords(question) {
 
 function detectScope(question) {
   const normalized = String(question).toLowerCase().replace(/[–—]/g, '-');
-  return ACCOUNT_SCOPES.find((scope) => normalized.includes(scope)) || null;
+  const aliases = [
+    { scope: 'stellar 1-step', phrases: ['stellar 1-step', 'stellar 1 step', 'stellar one-step', 'stellar one step', 'stellar phase 1', 'stellar phase one'] },
+    { scope: 'stellar 2-step', phrases: ['stellar 2-step', 'stellar 2 step', 'stellar two-step', 'stellar two step', 'stellar phase 2', 'stellar phase two'] }
+  ];
+  const aliased = aliases.find((item) => item.phrases.some((phrase) => normalized.includes(phrase)));
+  return aliased?.scope || ACCOUNT_SCOPES.find((scope) => normalized.includes(scope)) || null;
 }
 
 function hasOtherScope(text, target) {
@@ -109,11 +116,21 @@ function wordCount(text) {
   return (String(text).trim().match(/\S+/g) || []).length;
 }
 
+function explicitQuestionParts(text) {
+  const parts = String(text || '').match(/[^?]+\?/g) || [];
+  return parts.map((part) => part.replace(/^\s*(?:good\s+(?:morning|afternoon|evening)[,.]?\s*)/i, '').trim())
+    .filter((part) => part.length > 8)
+    .slice(0, 8);
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   const started = Date.now();
   let access;
   let usedGroqKeyLabel = null;
+  let usedGroqKey = null;
+  let partialAnswerRetryAttempted = false;
+  let partialAnswerRetrySucceeded = false;
   try {
     access = await authenticateRequest(req);
     if (!access) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
@@ -167,10 +184,10 @@ export default async function handler(req, res) {
     const articleScopeOverrides = await getArticleScopeOverrides(sb);
     const selectedProduct = ['cfd', 'futures', 'both'].includes(req.body?.scope?.product) ? req.body.scope.product : 'cfd';
     const selectedModelSlug = String(req.body?.scope?.model || 'all');
-    const selectedModel = selectedModelSlug === 'all' ? null : scopeCatalog.models.find((item) =>
+    const selectedModelFromUi = selectedModelSlug === 'all' ? null : scopeCatalog.models.find((item) =>
       item.slug === selectedModelSlug && item.status !== 'review' && (selectedProduct === 'both' || item.product === selectedProduct)
     );
-    if (selectedModelSlug !== 'all' && !selectedModel) {
+    if (selectedModelSlug !== 'all' && !selectedModelFromUi) {
       return res.status(200).json({
         scopeNotice: true,
         noticeTitle: 'The selected Account model is not available',
@@ -178,14 +195,18 @@ export default async function handler(req, res) {
       });
     }
     const questionModels = modelsMentioned(question, scopeCatalog.models);
-    const conflictingModel = selectedModel && questionModels.find((item) => item.slug !== selectedModel.slug);
+    const conflictingModel = selectedModelFromUi && questionModels.find((item) => item.slug !== selectedModelFromUi.slug);
     if (conflictingModel) {
       return res.status(200).json({
         scopeNotice: true,
         noticeTitle: 'Your question and selected scope do not match',
-        notice: `The selector is set to ${selectedModel.name}, but the question mentions ${conflictingModel.name}. Change the selector if you want an answer about ${conflictingModel.name}.`
+        notice: `The selector is set to ${selectedModelFromUi.name}, but the question mentions ${conflictingModel.name}. Change the selector if you want an answer about ${conflictingModel.name}.`
       });
     }
+    // When the selector covers all models but the customer clearly names one,
+    // use that model throughout retrieval, notice lookup, and confidence checks.
+    const inferredModel = selectedModelSlug === 'all' && questionModels.length === 1 ? questionModels[0] : null;
+    const selectedModel = selectedModelFromUi || inferredModel;
     const scope = selectedModel ? selectedModel.aliases[0] : detectScope(question);
     const allocationQuestion = /\b(?:maximum|max|total|aggregate)?\s*allocation\b/i.test(question);
     const personalAllocation = allocationQuestion && /\b(?:my|i|me|mine|for me)\b/i.test(question);
@@ -310,7 +331,13 @@ export default async function handler(req, res) {
       });
     }
 
-    const topicPlan = clarity?.topics?.length ? clarity.topics : [{ question: clearQuestion, queries: clarity?.queries || [] }];
+    // Question marks provide a stable, non-AI way to preserve every part of a
+    // pasted customer message. Prefer these explicit parts over an occasionally
+    // incomplete helper-model split.
+    const statedParts = explicitQuestionParts(question);
+    const topicPlan = statedParts.length > 1
+      ? statedParts.map((part) => ({ question: part, queries: [] }))
+      : (clarity?.topics?.length ? clarity.topics : [{ question: clearQuestion, queries: clarity?.queries || [] }]);
     const isAmbiguous = !!clarity?.ambiguous || distinctMeanings.length >= 2 || payoutUmbrella || topicPlan.length > 1;
 
     const DEFAULT_PAYOUT_INTERPRETATIONS = [
@@ -363,6 +390,21 @@ export default async function handler(req, res) {
       ...umbrellaExpansions,
       ...concepts.expansions
     ].map((t) => String(t || '').trim()).filter(Boolean))].slice(0, 20);
+    const interpretationLog = {
+      original: question,
+      cleaned: clearQuestion,
+      helperUsed: !!clarity,
+      ambiguous: isAmbiguous,
+      interpretations: interpretations.slice(0, 8),
+      detectedModels: questionModels.map((item) => ({ slug: item.slug, name: item.name, product: item.product })),
+      selectedProduct,
+      selectedModel: selectedModel?.slug || 'all',
+      selectedModelLabel: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models`,
+      scopeSource: selectedModelFromUi ? 'selector' : inferredModel ? 'question' : 'all_models',
+      topics: topicPlan.map((topic) => ({ question: topic.question, queries: topic.queries || [] })).slice(0, 8),
+      conceptGroups: concepts.groups.slice(0, 12),
+      searchQueries: embedTexts
+    };
 
     const vectors = await openaiEmbed(openaiKey, embedTexts);
     const combined = new Map();
@@ -399,6 +441,8 @@ export default async function handler(req, res) {
     // restricted strategies, merging, scale-up, etc.). An article that names
     // only another model is rejected. Multi-model comparison articles remain
     // eligible only when they include the selected model.
+    const candidateCountBeforeScope = candidates.length;
+    const rejectedEvidence = [];
     candidates = candidates.filter((item) => {
       const blob = `${item.article_title || ''}\n${item.content || ''}`;
       const override = articleScopeOverrides[String(item.article_id || '')];
@@ -413,15 +457,33 @@ export default async function handler(req, res) {
       // Product isolation is determined only by the authoritative help-centre
       // domain or an explicit Admin assignment. Words inside an article can
       // never move CFD evidence into Futures (or the reverse).
-      if (!internalKnowledge && selectedProduct !== 'both' && sourceProduct !== selectedProduct) return false;
+      if (!internalKnowledge && selectedProduct !== 'both' && sourceProduct !== selectedProduct) {
+        rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: `Wrong product: ${sourceProduct || 'unknown'} evidence for ${selectedProduct}`, similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
+        return false;
+      }
       if (!selectedModel) return true;
-      if (override) return override.model === 'all' || override.model === selectedModel.slug;
+      const normalizedTitle = String(item.article_title || '').toLowerCase().replace(/[–—]/g, '-');
+      if (selectedModel.slug === 'stellar-1-step' && /\b(?:2-step|2 step|two-step|two step)\b/.test(normalizedTitle) && !/\b(?:stellar\s+)?(?:1-step|1 step|one-step|one step)\b/.test(normalizedTitle)) {
+        rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: 'FAQ title says 2-Step; question requires Stellar 1-Step', similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
+        return false;
+      }
+      if (selectedModel.slug === 'stellar-2-step' && /\b(?:1-step|1 step|one-step|one step)\b/.test(normalizedTitle) && !/\b(?:stellar\s+)?(?:2-step|2 step|two-step|two step)\b/.test(normalizedTitle)) {
+        rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: 'FAQ title says 1-Step; question requires Stellar 2-Step', similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
+        return false;
+      }
+      if (override) {
+        const accepted = override.model === 'all' || override.model === selectedModel.slug;
+        if (!accepted) rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: `Admin scope says ${override.model}; question requires ${selectedModel.slug}`, similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
+        return accepted;
+      }
       const namedInFamily = mentioned.filter((model) => model.product === selectedModel.product);
       // No Account model from this product is named, so this is a
       // product-wide policy article. The authoritative source-domain check
       // above has already proved that it belongs to the selected product.
       if (!namedInFamily.length) return true;
-      return namedInFamily.some((model) => model.slug === selectedModel.slug);
+      const accepted = namedInFamily.some((model) => model.slug === selectedModel.slug);
+      if (!accepted) rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: `Evidence names ${namedInFamily.map((model) => model.slug).join(', ')}; question requires ${selectedModel.slug}`, similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
+      return accepted;
     });
 
     if (!candidates.length) {
@@ -431,7 +493,7 @@ export default async function handler(req, res) {
         actorRole: access.role, sessionId: access.sessionId, userName: access.name, userEmail: access.email,
         authProvider: access.authProvider, questionWordCount: wordCount(question), eventType: 'query', success: true,
         model: `No answer · Scope: ${selectedProduct.toUpperCase()}/${selectedModel?.name || 'All models'}`,
-        metadata: { question, questionPreview: question.slice(0, 180), selectedProduct, selectedModel: selectedModel?.slug || 'all', selectedScopeLabel: target, sourceCount: 0, reason: 'No evidence inside selected product scope', durationMs: Date.now() - started, questionTruncated: false, answerTruncated: false }
+        metadata: { question, questionPreview: question.slice(0, 180), selectedProduct, selectedModel: selectedModel?.slug || 'all', selectedScopeLabel: target, sourceCount: 0, reason: 'No evidence inside selected product scope', interpretation: interpretationLog, evidenceTrail: { candidateCountBeforeScope, acceptedCandidateCount: 0, rejected: rejectedEvidence.slice(0, 30), selectedForAnswer: [] }, durationMs: Date.now() - started, questionTruncated: false, answerTruncated: false }
       });
       return res.status(200).json({
         scopeNotice: true,
@@ -545,6 +607,44 @@ export default async function handler(req, res) {
       }));
       matches = [...calcEvidence, ...matches].slice(0, 14);
     }
+
+    // ---- NOTICES LAYER (higher authority than FAQ) -------------------------
+    // Official CEx notices are injected as top-priority evidence so they render
+    // in the same verified-source UI, pass the same product/model scope filter,
+    // and OVERRIDE any older FAQ. Best-effort: never breaks the FAQ answer.
+    let noticeEscalations = [];
+    let noticeRejections = [];
+    let hasNoticeEvidence = false;
+    let noticeMetaByAid = {};
+    try {
+      if (await noticesAccess(access, sb)) {
+        const { matches: nMatches, escalations, rejected: nRejected } = await retrieveNotices(sb, {
+          openaiKey,
+          question: clearQuestion || question,
+          product: selectedProduct,
+          model: selectedModel?.slug || 'all',
+          limit: 3
+        });
+        noticeRejections = nRejected || [];
+        if (nMatches && nMatches.length) {
+          hasNoticeEvidence = true;
+          noticeEscalations = escalations || [];
+          nMatches.forEach((m) => { if (m.meta) noticeMetaByAid[m.article_id] = m.meta; });
+          const noticeEvidence = nMatches.map((m) => ({
+            id: `notice-${m.article_id}`,
+            article_id: m.article_id,
+            article_title: m.article_title,
+            article_url: m.article_url,
+            content: m.content,
+            similarity: Number(m.similarity || 0),
+            _rank: 40 + (Number(m.similarity || 0) * 8),
+            _scoped: m.meta?.model === selectedModel?.slug
+          }));
+          matches = [...noticeEvidence, ...matches].slice(0, 16);
+        }
+      }
+    } catch (e) { /* notices are best-effort */ }
+
     if (!matches.length) {
       return res.status(200).json({
         answer: SAFE_UNCONFIRMED, sources: [], answerProvider: chatProvider,
@@ -600,7 +700,10 @@ export default async function handler(req, res) {
     const empathyText = emotion === 'neutral'
       ? '\n\nTONE: Respond professionally and directly. Do not add a generic empathy sentence.'
       : `\n\nTONE: The client appears ${emotion}. Begin with one brief, natural, professional acknowledgement appropriate to that emotion, then answer directly. Do not say you detected an emotion. Do not over-apologize, admit fault, promise an outcome, or change any policy fact. Empathy affects tone only.`;
-    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText +
+    const noticesText = hasNoticeEvidence
+      ? '\n\nAUTHORITATIVE UPDATES: Some evidence items are official operational notices reflecting the LATEST policy. If any evidence conflicts, the notice OVERRIDES an older FAQ. Treat notice figures, dates, and conditions as current, and prefer them over any conflicting FAQ statement.'
+      : '';
+    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText + noticesText +
       '\n\nAfter the customer-ready answer, add three private final lines:\n' +
       'SOURCES: comma-separated evidence numbers actually used, or none\n' +
       'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim\n' +
@@ -616,9 +719,25 @@ export default async function handler(req, res) {
     // normal Groq attempt fails. It keeps the highest-ranked scoped evidence and
     // all calculator evidence, avoiding an unnecessary provider switch when a
     // long prompt exceeds a model or gateway limit.
-    const recoveryMatches = matches.filter((item, index) => index < 7 || String(item.article_id || '').startsWith('calc:'));
-    const recoveryContext = recoveryMatches.map((item, index) =>
-      `[${index + 1}] ${item.article_title}\nURL: ${item.article_url}\n${String(item.content || '').slice(0, 4200)}`
+    const recoveryById = new Map();
+    const addRecovery = (item) => { if (item) recoveryById.set(String(item.id), item); };
+    matches.filter((item) => String(item.article_id || '').startsWith('calc:')).forEach(addRecovery);
+    for (const topic of topicPlan) {
+      const topicTerms = keywords(topic.question);
+      const best = [...matches].sort((a, b) => {
+        const score = (item) => {
+          const title = String(item.article_title || '').toLowerCase();
+          const content = String(item.content || '').toLowerCase();
+          return topicTerms.reduce((sum, term) => sum + (title.includes(term) ? 4 : content.includes(term) ? 1 : 0), 0) + Number(item.similarity || 0);
+        };
+        return score(b) - score(a);
+      })[0];
+      addRecovery(best);
+    }
+    for (const item of matches) { if (recoveryById.size >= 10) break; addRecovery(item); }
+    const recoveryMatches = [...recoveryById.values()];
+    const recoveryContext = recoveryMatches.map((item) =>
+      `[${matches.indexOf(item) + 1}] ${item.article_title}\nURL: ${item.article_url}\n${String(item.content || '').slice(0, 4200)}`
     ).join('\n\n---\n\n');
     const recoveryMessages = [
       { role: 'system', content: system },
@@ -635,7 +754,7 @@ export default async function handler(req, res) {
         const fallbackPool = groqPool.length ? groqPool : (groqPrimary ? [{ key: groqPrimary }] : []);
         let fallbackError = null;
         for (const item of fallbackPool) {
-          try { const result = await openaiChatDetailed(item.key, fallbackModel, messages, 'https://api.groq.com/openai/v1'); usedGroqKeyLabel = item.label || `Key ${item.id}`; return result; }
+          try { const result = await openaiChatDetailed(item.key, fallbackModel, messages, 'https://api.groq.com/openai/v1'); usedGroqKey = item.key; usedGroqKeyLabel = item.label || `Key ${item.id}`; return result; }
           catch (e) { fallbackError = e; }
         }
         if (fallbackError) throw fallbackError;
@@ -658,6 +777,7 @@ export default async function handler(req, res) {
         for (const idx of order) {
           try {
             completion = await openaiChatDetailed(pool[idx].key, chatModel, messages, 'https://api.groq.com/openai/v1');
+            usedGroqKey = pool[idx].key;
             usedGroqKeyLabel = pool[idx].label || `Key ${pool[idx].id}`;
             answerProvider = 'groq';
             break;
@@ -670,6 +790,7 @@ export default async function handler(req, res) {
         for (const idx of order) {
           try {
             completion = await openaiChatDetailed(pool[idx].key, chatModel, recoveryMessages, 'https://api.groq.com/openai/v1');
+            usedGroqKey = pool[idx].key;
             usedGroqKeyLabel = pool[idx].label || `Key ${pool[idx].id}`;
             answerProvider = 'groq';
             break;
@@ -712,7 +833,37 @@ export default async function handler(req, res) {
       }
     }
 
-    const raw = completion.content;
+    let raw = completion.content;
+    // Correct the occasional whole-answer refusal when at least part of a
+    // multi-part question has evidence. Genuine no-evidence cases are not retried.
+    if (cleanAnswer(raw) === SAFE_UNCONFIRMED && matches.length) {
+      partialAnswerRetryAttempted = true;
+      const retrySystem = system +
+        '\n\nREQUIRED PARTIAL-ANSWER RECOVERY: The first draft refused despite relevant evidence. ' +
+        'Ignore that draft. Inspect each numbered question independently. State every answer directly supported by the evidence. ' +
+        'For an unsupported question, write only "This specific detail needs to be confirmed." ' +
+        'Finding no evidence for one question must never erase answers to the others. ' +
+        'Use the full refusal sentence only if the evidence answers zero questions.';
+      const retryQuestion =
+        `Customer questions:\n${topicPlan.map((topic, index) => `${index + 1}. ${topic.question}`).join('\n')}\n\n` +
+        `FAQ evidence:\n${recoveryContext || context}`;
+      const retryKey = answerProvider === 'groq' ? usedGroqKey : openaiKey;
+      const retryModel = usedFallback ? fallbackModel : chatModel;
+      const retryBaseUrl = answerProvider === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1';
+      if (retryKey) {
+        try {
+          const retried = await openaiChatDetailed(retryKey, retryModel, [
+            { role: 'system', content: retrySystem },
+            { role: 'user', content: retryQuestion }
+          ], retryBaseUrl);
+          if (cleanAnswer(retried.content) !== SAFE_UNCONFIRMED) {
+            completion = retried;
+            raw = retried.content;
+            partialAnswerRetrySucceeded = true;
+          }
+        } catch { /* keep the safe first response if correction fails */ }
+      }
+    }
     const sourceLine = raw.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
     const confidenceLine = raw.match(/(?:\*\*)?CONFIDENCE(?:\*\*)?\s*:\s*(\d{1,3})/i);
     const sourceNumbers = parseNumbers(sourceLine);
@@ -774,8 +925,14 @@ export default async function handler(req, res) {
     let answer = cleanAnswer(applyBrandingReplacements(cleanAnswer(raw), brandRules));
     // An exact computation must not be thrown away as "unconfirmed".
     if (okCalc.length) confidence = Math.max(confidence, 74);
-    // Only fall back to the safe message when the model itself is very unsure.
-    if (confidence < 30 && !okCalc.length) answer = SAFE_UNCONFIRMED;
+    // Do not discard a useful, sourced partial answer merely because the writing
+    // model assigned itself a low confidence score. A full refusal is justified
+    // only when it cited no evidence at all; unsupported parts remain explicit.
+    if (confidence < 30 && !okCalc.length && !sourceNumbers.length) answer = SAFE_UNCONFIRMED;
+    if (answer === SAFE_UNCONFIRMED) {
+      confidence = Math.min(confidence, 22);
+      confidenceLabel = 'Needs verification';
+    }
 
     // Per-paragraph attribution: map each answer paragraph to the source(s) that
     // support it, so the UI can show which FAQ backs which part. Fully optional —
@@ -799,7 +956,11 @@ export default async function handler(req, res) {
         if (!segments.some((s) => s.refs.length)) segments = null;
       }
     }
-    sources = sources.map(({ _aid, ...rest }) => ({ ...rest, kind: /^(kb|calc):/.test(_aid || '') ? 'calculator' : 'faq' }));
+    sources = sources.map(({ _aid, ...rest }) => {
+      const meta = noticeMetaByAid[_aid];
+      if (meta) return { ...rest, kind: 'notice', title: meta.title || rest.title, url: meta.source_url || rest.url, postedBy: meta.posted_by || null, postedAt: meta.posted_at || null };
+      return { ...rest, kind: /^(kb|calc):/.test(_aid || '') ? 'calculator' : 'faq' };
+    });
     let usedCalculator = sources.some((s) => s.kind === 'calculator');
 
     // ---- Grounding verification --------------------------------------------
@@ -866,6 +1027,18 @@ export default async function handler(req, res) {
         selectedScopeLabel: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models`,
         fallback: usedFallback, grounding: groundingScore, durationMs: Date.now() - started,
         smart: !!clarity, ambiguous: isAmbiguous, groqKeyLabel: usedGroqKeyLabel,
+        scopeSource: selectedModelFromUi ? 'selector' : inferredModel ? 'question' : 'all_models',
+        refusalReason: answer === SAFE_UNCONFIRMED ? (sourceNumbers.length ? 'answer_model_refused_despite_citations' : 'no_cited_evidence') : null,
+        interpretation: interpretationLog,
+        evidenceTrail: {
+          candidateCountBeforeScope,
+          acceptedCandidateCount: candidates.length,
+          rejected: [...rejectedEvidence, ...noticeRejections].slice(0, 40),
+          selectedForAnswer: matches.slice(0, 20).map((item, index) => ({ position: index + 1, id: item.article_id, title: item.article_title, url: item.article_url, kind: noticeMetaByAid[item.article_id] ? 'notice' : String(item.article_id || '').startsWith('kb:') ? 'internal' : 'faq', similarity: Number(item.similarity || 0), rank: Number(item._rank || 0), exactScope: !!item._scoped })),
+          finalSourceNumbers: sourceNumbers,
+          finalSources: sources.slice(0, 12).map((source) => ({ title: source.title, url: source.url, kind: source.kind }))
+        },
+        processing: { partialAnswerRetryAttempted, partialAnswerRetrySucceeded, fallback: usedFallback, groundingScore },
         question, questionPreview: question.slice(0, 180),
         answer: String(answer || ''), answerPreview: String(answer || '').slice(0, 240),
         answerWordCount: wordCount(answer), answerTruncated: false, questionTruncated: false,
@@ -876,7 +1049,8 @@ export default async function handler(req, res) {
     return res.status(200).json({
       answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel, queryLogId,
       confidenceReasons, selectedScope: { product: selectedProduct, model: selectedModel?.slug || 'all', label: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models` },
-      ambiguous: isAmbiguous, interpretations, usedCalculator
+      ambiguous: isAmbiguous, interpretations, usedCalculator,
+      escalations: noticeEscalations
     });
   } catch (error) {
     if (access) await logActivity({
