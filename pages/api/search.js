@@ -71,6 +71,8 @@ function cleanAnswer(raw) {
     .replace(/^\s*(?:\*\*)?SOURCES(?:\*\*)?\s*:.*$/gim, '')
     .replace(/^\s*(?:\*\*)?CONFIDENCE(?:\*\*)?\s*:.*$/gim, '')
     .replace(/^\s*(?:\*\*)?SEGMENTS?(?:\*\*)?\s*:.*$/gim, '')
+    .replace(/^\s*(?:\*\*)?COVERAGE(?:\*\*)?\s*:.*$/gim, '')
+    .replace(/^\s*(?:\*\*)?NOTICE_CONFLICT(?:\*\*)?\s*:.*$/gim, '')
     .replace(/\s*\((?:Excerpt|Source)\s*\d+\)/gi, '')
     .replace(/\b(?:Excerpt|Source)\s*\d+\b/gi, '')
     .replace(/[\[{(]?\d+†L\d+(?:\s*[-–]\s*L?\d+)?[\]})]?/g, '')
@@ -704,10 +706,12 @@ export default async function handler(req, res) {
       ? '\n\nAUTHORITATIVE UPDATES: Some evidence items are official operational notices reflecting the LATEST policy. If any evidence conflicts, the notice OVERRIDES an older FAQ. Treat notice figures, dates, and conditions as current, and prefer them over any conflicting FAQ statement.'
       : '';
     const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText + noticesText +
-      '\n\nAfter the customer-ready answer, add three private final lines:\n' +
+      `\n\nAfter the customer-ready answer, add five private final lines. COVERAGE must contain exactly ${topicPlan.length} comma-separated values, one for each customer question in order:\n` +
       'SOURCES: comma-separated evidence numbers actually used, or none\n' +
       'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim\n' +
-      'SEGMENTS: for each paragraph of your answer, in the same order and separated by semicolons, list the evidence numbers that support that paragraph. Example for three paragraphs: 2 ; 1,2 ; 1. Write a dash for a paragraph that has no supporting evidence.';
+      'SEGMENTS: for each paragraph of your answer, in the same order and separated by semicolons, list the evidence numbers that support that paragraph. Example for three paragraphs: 2 ; 1,2 ; 1. Write a dash for a paragraph that has no supporting evidence.\n' +
+      'COVERAGE: use only answered, partial, or not_confirmed for each question. Mark answered only when the answer directly resolves that question from cited evidence; partial when only part is resolved; not_confirmed when it is not resolved.\n' +
+      'NOTICE_CONFLICT: yes only if a supplied CEx Notice and FAQ state incompatible rules about the same requested topic; otherwise no.';
     const askedText = clearQuestion && clearQuestion !== question
       ? `Customer question: ${question}\n(Interpreted as: ${clearQuestion})`
       : `Customer question: ${question}`;
@@ -866,6 +870,8 @@ export default async function handler(req, res) {
     }
     const sourceLine = raw.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
     const confidenceLine = raw.match(/(?:\*\*)?CONFIDENCE(?:\*\*)?\s*:\s*(\d{1,3})/i);
+    const coverageLine = raw.match(/(?:\*\*)?COVERAGE(?:\*\*)?\s*:\s*([^\n]*)/i);
+    const noticeConflictLine = raw.match(/(?:\*\*)?NOTICE_CONFLICT(?:\*\*)?\s*:\s*(yes|no)/i);
     const sourceNumbers = parseNumbers(sourceLine);
     const exactExcerpt = (item) => {
       const content = String(item?.content || '').trim();
@@ -923,6 +929,18 @@ export default async function handler(req, res) {
     let confidence = Math.min(modelConfidence, evidenceCap);
     let confidenceLabel = confidence >= 85 ? 'High confidence' : confidence >= 65 ? 'Review suggested' : 'Needs verification';
     let answer = cleanAnswer(applyBrandingReplacements(cleanAnswer(raw), brandRules));
+    const validCoverage = new Set(['answered', 'partial', 'not_confirmed']);
+    let coverageStatuses = String(coverageLine?.[1] || '').toLowerCase().split(',').map((item) => item.trim().replace(/[ -]+/g, '_')).filter((item) => validCoverage.has(item));
+    if (coverageStatuses.length !== topicPlan.length) {
+      const fallbackStatus = answer === SAFE_UNCONFIRMED ? 'not_confirmed' : (sources.length ? 'answered' : 'not_confirmed');
+      coverageStatuses = topicPlan.map(() => fallbackStatus);
+    }
+    const questionCoverage = topicPlan.map((topic, index) => ({ question: topic.question, status: coverageStatuses[index] }));
+    const answeredCount = questionCoverage.filter((item) => item.status === 'answered').length;
+    const partialCount = questionCoverage.filter((item) => item.status === 'partial').length;
+    const notConfirmedCount = questionCoverage.filter((item) => item.status === 'not_confirmed').length;
+    const coverageSummary = { total: questionCoverage.length, answered: answeredCount, partial: partialCount, notConfirmed: notConfirmedCount };
+    const noticeConflictDetected = hasNoticeEvidence && /^yes$/i.test(noticeConflictLine?.[1] || '');
     // An exact computation must not be thrown away as "unconfirmed".
     if (okCalc.length) confidence = Math.max(confidence, 74);
     // Do not discard a useful, sourced partial answer merely because the writing
@@ -1039,6 +1057,8 @@ export default async function handler(req, res) {
           finalSources: sources.slice(0, 12).map((source) => ({ title: source.title, url: source.url, kind: source.kind }))
         },
         processing: { partialAnswerRetryAttempted, partialAnswerRetrySucceeded, fallback: usedFallback, groundingScore },
+        questionCoverage, coverageSummary,
+        noticeConflict: noticeConflictDetected ? { detected: true, resolution: 'A relevant CEx Notice overrode incompatible FAQ information.', noticeSources: sources.filter((source) => source.kind === 'notice').map((source) => source.title), faqSources: sources.filter((source) => source.kind === 'faq').map((source) => source.title) } : { detected: false },
         question, questionPreview: question.slice(0, 180),
         answer: String(answer || ''), answerPreview: String(answer || '').slice(0, 240),
         answerWordCount: wordCount(answer), answerTruncated: false, questionTruncated: false,
@@ -1050,6 +1070,8 @@ export default async function handler(req, res) {
       answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel, queryLogId,
       confidenceReasons, selectedScope: { product: selectedProduct, model: selectedModel?.slug || 'all', label: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models` },
       ambiguous: isAmbiguous, interpretations, usedCalculator,
+      questionCoverage, coverageSummary,
+      noticeConflict: noticeConflictDetected,
       escalations: noticeEscalations
     });
   } catch (error) {
