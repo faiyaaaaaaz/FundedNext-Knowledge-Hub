@@ -257,6 +257,10 @@ export default function Home() {
   const [disputeReason, setDisputeReason] = useState('');
   const [disputeError, setDisputeError] = useState('');
   const [submittingDispute, setSubmittingDispute] = useState(false);
+  const [workspaceEntry, setWorkspaceEntry] = useState(null);
+  const [entryChecking, setEntryChecking] = useState(false);
+  const [acknowledging, setAcknowledging] = useState(false);
+  const [acknowledgementError, setAcknowledgementError] = useState('');
   const threadRef = useRef(null);
   const timerRef = useRef(null);
   const cancelRef = useRef(false);
@@ -275,6 +279,22 @@ export default function Home() {
     setTheme(savedTheme); document.documentElement.setAttribute('data-theme', savedTheme);
     return () => { timerRef.current && clearInterval(timerRef.current); thinkingRef.current && clearInterval(thinkingRef.current); };
   }, []);
+
+  useEffect(() => {
+    if (!session) { setWorkspaceEntry(null); return; }
+    loadWorkspaceEntry(session);
+  }, [session]);
+
+  async function loadWorkspaceEntry(token = session) {
+    setEntryChecking(true); setAcknowledgementError('');
+    try {
+      const response = await fetch('/api/workspace-entry', { headers: { 'x-app-session': token } });
+      const data = await response.json();
+      if (response.status === 401) { logout(); return; }
+      if (!response.ok) throw new Error(data.error || 'The daily acknowledgement could not be loaded.');
+      setWorkspaceEntry(data.required ? data : null);
+    } catch (error) { setAcknowledgementError(error.message); } finally { setEntryChecking(false); }
+  }
 
   useEffect(() => {
     if (threadRef.current) threadRef.current.scrollTop = threadRef.current.scrollHeight;
@@ -361,6 +381,18 @@ export default function Home() {
     setTheme(next); localStorage.setItem('theme', next); document.documentElement.setAttribute('data-theme', next);
   }
 
+  async function acknowledgeWorkspace() {
+    if (!workspaceEntry || acknowledging) return;
+    setAcknowledging(true); setAcknowledgementError('');
+    try {
+      const response = await fetch('/api/workspace-entry', { method: 'POST', headers: headers(session, true), body: JSON.stringify({ releaseVersion: workspaceEntry.release.version }) });
+      const data = await response.json();
+      if (response.status === 401) { logout(); return; }
+      if (!response.ok) throw new Error(data.error || 'The acknowledgement could not be recorded.');
+      setWorkspaceEntry(null);
+    } catch (error) { setAcknowledgementError(error.message); } finally { setAcknowledging(false); }
+  }
+
   async function send(question = input.trim(), clarificationAnswer = '', showUser = true) {
     const value = String(question).trim();
     if (!value || loading) return;
@@ -391,6 +423,7 @@ export default function Home() {
         usedCalculator: !!data.usedCalculator,
         provider: data.answerProvider, fallback: data.usedFallback,
         confidence: data.confidence, confidenceLabel: data.confidenceLabel, confidenceReasons: data.confidenceReasons || [],
+        questionCoverage: data.questionCoverage || [], coverageSummary: data.coverageSummary || null, noticeConflict: !!data.noticeConflict,
         selectedScope: data.selectedScope || { product: scopeProduct, model: scopeModel, label: selectedModelName },
         queryLogId: data.queryLogId || null, feedback: null, disputed: false
       }]);
@@ -597,7 +630,7 @@ export default function Home() {
             {!messages.length && <div className="welcome-state"><div className="assistant-orb"><Logo /></div><span className="status-chip">Source-backed assistance</span><h1>How can I help today?</h1><p>Ask about a policy, Account, Performance Reward, trading rule, or platform.</p><div className="suggestion-grid">{['How does trailing drawdown work?', 'Explain Performance Reward eligibility', 'What causes an Account breach?'].map((question) => <button key={question} onClick={() => send(question)}>{question}<span>↗</span></button>)}</div></div>}
             {messages.map((message, index) => message.role === 'user'
               ? <div className="message user-message" key={index}><div className="message-label">You</div><div className="user-bubble">{message.content}</div></div>
-              : <div className="message assistant-message" key={index}><div className="bot-avatar"><Logo /></div><div className={`assistant-bubble${message.error ? ' error-bubble' : ''}`}><div className="answer-head"><span>FundedNext assistant</span><div>{Number.isFinite(message.confidence) && <ConfidenceHealth score={message.confidence} label={message.confidenceLabel} reasons={message.confidenceReasons} />}<small>{message.fallback ? 'OpenAI backup' : message.provider === 'groq' ? 'Groq' : 'OpenAI'}</small>{message.fallback && <span className="fallback-flash" title="Every Groq attempt failed before this answer switched to GPT">⚡ Last-resort GPT</span>}{message.usedCalculator && <span className="calc-tag" title="This answer used trade-calculator logic">⚙ Calculator logic</span>}</div></div>{message.segments?.length ? <AttributedAnswer segments={message.segments} sources={message.sources} /> : <Answer text={message.content} />}<div className="answer-actions"><button onClick={() => copyAnswer(index, message.content)}>{copied === index ? '✓ Copied' : '⧉ Copy answer'}</button>{!message.error && message.queryLogId && <button className={message.feedback === 'helpful' ? 'feedback-selected' : ''} disabled={!!message.feedback || feedbackSaving[index]} onClick={() => rateAnswer(index, 'helpful')}>{message.feedback === 'helpful' ? '✓ Helpful' : '♡ Helpful'}</button>}{!message.error && message.queryLogId && <button className={message.feedback === 'great' ? 'feedback-selected great' : ''} disabled={!!message.feedback || feedbackSaving[index]} onClick={() => rateAnswer(index, 'great')}>{message.feedback === 'great' ? '★ Great answer' : '☆ Great answer'}</button>}<button className={message.disputed ? 'disputed' : ''} disabled={message.disputed || message.error} onClick={() => { setDisputeIndex(index); setDisputeReason(''); setDisputeError(''); }}>{message.disputed ? '✓ Answer disputed' : '⚑ Dispute answer'}</button></div>{message.feedback && <div className="feedback-thanks">Thanks — this optional rating was saved to the answer log.</div>}{message.sources?.length > 0 && <div className="sources"><button className="sources-toggle" onClick={() => setOpenSources((current) => ({ ...current, [index]: !current[index] }))}><span>◆</span>{message.sources.length} verified source{message.sources.length > 1 ? 's' : ''}<b>{openSources[index] ? '−' : '+'}</b></button>{openSources[index] && <div className="sources-list">{message.sources.map((source, sourceIndex) => <SourcePreview key={sourceIndex} source={source} number={sourceIndex + 1} open={!!openExcerpts[`${index}-${sourceIndex}`]} onToggle={() => setOpenExcerpts((current) => ({ ...current, [`${index}-${sourceIndex}`]: !current[`${index}-${sourceIndex}`] }))} />)}</div>}</div>}</div></div>
+              : <div className="message assistant-message" key={index}><div className="bot-avatar"><Logo /></div><div className={`assistant-bubble${message.error ? ' error-bubble' : ''}`}><div className="answer-head"><span>FundedNext assistant</span><div>{Number.isFinite(message.confidence) && <ConfidenceHealth score={message.confidence} label={message.confidenceLabel} reasons={message.confidenceReasons} />}<small>{message.fallback ? 'OpenAI backup' : message.provider === 'groq' ? 'Groq' : 'OpenAI'}</small>{message.fallback && <span className="fallback-flash" title="Every Groq attempt failed before this answer switched to GPT">⚡ Last-resort GPT</span>}{message.usedCalculator && <span className="calc-tag" title="This answer used trade-calculator logic">⚙ Calculator logic</span>}</div></div>{message.coverageSummary?.total > 1 && <div className="coverage-summary"><b>{message.coverageSummary.answered} of {message.coverageSummary.total} questions fully answered</b>{message.coverageSummary.partial > 0 && <span>{message.coverageSummary.partial} partially answered</span>}{message.coverageSummary.notConfirmed > 0 && <span className="needs-check">{message.coverageSummary.notConfirmed} requires manual confirmation</span>}</div>}{message.noticeConflict && <div className="notice-override"><b>CEx Notice applied</b><span>A relevant Notice was treated as higher authority than older FAQ information.</span></div>}{message.segments?.length ? <AttributedAnswer segments={message.segments} sources={message.sources} /> : <Answer text={message.content} />}<div className="answer-actions"><button onClick={() => copyAnswer(index, message.content)}>{copied === index ? '✓ Copied' : '⧉ Copy answer'}</button>{!message.error && message.queryLogId && <button className={message.feedback === 'helpful' ? 'feedback-selected' : ''} disabled={!!message.feedback || feedbackSaving[index]} onClick={() => rateAnswer(index, 'helpful')}>{message.feedback === 'helpful' ? '✓ Helpful' : '♡ Helpful'}</button>}{!message.error && message.queryLogId && <button className={message.feedback === 'great' ? 'feedback-selected great' : ''} disabled={!!message.feedback || feedbackSaving[index]} onClick={() => rateAnswer(index, 'great')}>{message.feedback === 'great' ? '✓ Great answer' : '☆ Great answer'}</button>}<button className={message.disputed ? 'disputed' : ''} disabled={message.disputed || message.error} onClick={() => { setDisputeIndex(index); setDisputeReason(''); setDisputeError(''); }}>{message.disputed ? '✓ Answer disputed' : '⚑ Dispute answer'}</button></div>{message.feedback && <div className="feedback-thanks">Thanks — this optional rating was saved to the answer log.</div>}{message.sources?.length > 0 && <div className="sources"><button className="sources-toggle" onClick={() => setOpenSources((current) => ({ ...current, [index]: !current[index] }))}><span>◆</span>{message.sources.length} verified source{message.sources.length > 1 ? 's' : ''}<b>{openSources[index] ? '−' : '+'}</b></button>{openSources[index] && <div className="sources-list">{message.sources.map((source, sourceIndex) => <SourcePreview key={sourceIndex} source={source} number={sourceIndex + 1} open={!!openExcerpts[`${index}-${sourceIndex}`]} onToggle={() => setOpenExcerpts((current) => ({ ...current, [`${index}-${sourceIndex}`]: !current[`${index}-${sourceIndex}`] }))} />)}</div>}</div>}</div></div>
             )}
             {loading && <div className="message assistant-message"><div className="bot-avatar thinking-avatar"><Logo /></div><div className="assistant-bubble thinking-card"><div className="thinking-head"><span className="knowledge-scan" aria-hidden="true"><i /><i /><i /><b /></span><div><b>Building a verified answer</b><small>Working only within {scopeProduct.toUpperCase()} · {selectedModelName}</small></div><span className="thinking-live"><i /> Live</span></div><div className="thinking-current" aria-live="polite"><i /><span key={thinkingStep}>{THINKING_STEPS[thinkingStep]}</span></div><div className="thinking-skeleton"><i /><i /><i /></div></div></div>}
           </div>
@@ -624,6 +657,7 @@ export default function Home() {
       </div>
 
       {disputeIndex !== null && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDisputeIndex(null)}><div className="modal-card"><div className="modal-icon">⚑</div><h2>Dispute this answer?</h2><p>Explain exactly what appears incorrect or incomplete. Your reason is required and will be reviewed by an Admin.</p><label htmlFor="dispute-reason">Reason for dispute</label><textarea id="dispute-reason" value={disputeReason} onChange={(event) => setDisputeReason(event.target.value)} placeholder="Example: The Performance Reward cycle is outdated for the Stellar Instant Account…" autoFocus />{disputeError && <div className="inline-error">{disputeError}</div>}<div className="modal-actions"><button className="btn btn-secondary" onClick={() => setDisputeIndex(null)}>Cancel</button><button className="btn btn-danger" onClick={submitDispute} disabled={submittingDispute}>{submittingDispute ? 'Submitting…' : 'Submit dispute'}</button></div></div></div>}
+      {session && (entryChecking || workspaceEntry || acknowledgementError) && <div className="entry-gate" role="presentation"><section className="entry-card" role="dialog" aria-modal="true" aria-labelledby="entry-title"><div className="entry-brand"><Logo /><span>Daily review acknowledgement</span></div>{entryChecking && !workspaceEntry ? <><h2 id="entry-title">Checking today’s acknowledgement…</h2><DataLoader title="Loading access notice" detail="Checking your acknowledgement record…" /></> : acknowledgementError && !workspaceEntry ? <><h2 id="entry-title">Acknowledgement unavailable</h2><div className="inline-error">{acknowledgementError}</div><button className="btn btn-primary entry-ack" onClick={() => loadWorkspaceEntry()} disabled={entryChecking}>{entryChecking ? 'Trying again…' : 'Try again'}</button></> : <>{workspaceEntry.showRelease && <><span className="eyebrow">New release</span><h2 id="entry-title">{workspaceEntry.release.title}</h2><ul className="release-list">{workspaceEntry.release.changes.map((change) => <li key={change}>{change}</li>)}</ul></>} {!workspaceEntry.showRelease && <h2 id="entry-title">Before you continue</h2>}<div className="qc-warning"><b>Review responsibility</b><p>{workspaceEntry.disclaimer}</p></div>{acknowledgementError && <div className="inline-error">{acknowledgementError}</div>}<button className="btn btn-primary entry-ack" onClick={acknowledgeWorkspace} disabled={acknowledging}>{acknowledging ? 'Recording acknowledgement…' : 'I understand — continue'}</button><small>Your name, email, date, time, and acknowledgement version will be recorded.</small></>}</section></div>}
       {clarification && <div className="clarify-backdrop" role="presentation"><section className="clarify-dialog" role="dialog" aria-modal="true" aria-labelledby="clarify-title"><div className="clarify-icon">?</div><span className="eyebrow">One detail needed</span><h2 id="clarify-title">{clarification.question}</h2><p>{clarification.reason || 'This detail determines which FAQ rule applies. Select the option that matches the customer’s situation.'}</p><div className="clarify-choices">{clarification.choices.map((choice) => <button key={choice.value || choice} onClick={() => answerClarification(choice)}><span className="clarify-choice-copy"><b>{choice.label || choice}</b>{choice.description && <small>{choice.description}</small>}</span><span className="clarify-arrow">→</span></button>)}</div><div className="clarify-other"><label htmlFor="clarify-other">None of these? Add the exact missing detail</label><div><input id="clarify-other" value={clarificationOther} onChange={(e) => setClarificationOther(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && answerClarification(clarificationOther)} placeholder="Type the customer’s Account model or intent…" autoFocus /><button className="btn btn-primary" disabled={!clarificationOther.trim()} onClick={() => answerClarification(clarificationOther)}>Use this detail</button></div></div><button className="clarify-cancel" onClick={() => { setClarification(null); setClarificationOther(''); }}>Cancel</button></section></div>}
     </main>
   );
