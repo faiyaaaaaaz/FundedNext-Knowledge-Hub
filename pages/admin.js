@@ -48,6 +48,47 @@ function initials(name, email) {
   return base.slice(0, 2).toUpperCase();
 }
 
+function activityEventLabel(value) {
+  return ({ workspace_acknowledgement: 'Daily acknowledgement', query: 'Assistant query', login: 'Sign in', logout: 'Sign out', sync: 'Knowledge sync', feedback: 'Answer feedback' })[value] || String(value || 'Activity').replace(/_/g, ' ');
+}
+
+function ActivityLogCard({ log, expanded, onToggle }) {
+  const metadata = log.metadata && typeof log.metadata === 'object' ? log.metadata : {};
+  const acknowledgement = log.event_type === 'workspace_acknowledgement';
+  const question = metadata.question || metadata.questionPreview || '';
+  const answer = metadata.answer || metadata.answerPreview || '';
+  const sources = Array.isArray(metadata.sources) ? metadata.sources : [];
+  const cost = log.estimated_cost == null ? '—' : `$${Number(log.estimated_cost).toFixed(6)}`;
+  return <article className={`activity-log-card${expanded ? ' expanded' : ''}`}>
+    <button type="button" className="activity-log-summary" onClick={onToggle} aria-expanded={expanded}>
+      <span className={`activity-event-icon ${log.success ? 'success' : 'failed'}`}>{acknowledgement ? '✓' : log.event_type === 'query' ? 'Q' : '•'}</span>
+      <span className="activity-log-main"><b>{activityEventLabel(log.event_type)}</b><small>{formatDate(log.created_at)}</small></span>
+      <span className="activity-log-person"><b>{log.user_name || (log.actor_role === 'admin' ? 'Master Admin' : 'Unknown user')}</b><small>{log.user_email || 'Email not recorded'}</small></span>
+      <span className={`activity-result ${log.success ? 'good' : 'bad'}`}>{log.success ? 'Successful' : 'Failed'}</span>
+      <span className="activity-expand">{expanded ? 'Hide details −' : 'View all details +'}</span>
+    </button>
+    {expanded && <div className="activity-log-details">
+      <div className="activity-detail-grid">
+        <span><small>Event ID</small><b>{log.id || '—'}</b></span>
+        <span><small>Role</small><b>{log.actor_role || '—'}</b></span>
+        <span><small>Session ID</small><b>{log.session_id || '—'}</b></span>
+        <span><small>Authentication</small><b>{log.auth_provider || '—'}</b></span>
+        <span><small>Provider</small><b>{log.provider || '—'}</b></span>
+        <span><small>Model and scope</small><b>{log.model || '—'}</b></span>
+        <span><small>Question words</small><b>{log.question_word_count ?? '—'}</b></span>
+        <span><small>Input tokens</small><b>{log.input_tokens ?? '—'}</b></span>
+        <span><small>Output tokens</small><b>{log.output_tokens ?? '—'}</b></span>
+        <span><small>Estimated cost</small><b>{cost}</b></span>
+      </div>
+      {acknowledgement && <section className="activity-agreement"><span>Recorded agreement</span><h4>Disclaimer agreed to</h4><p>{metadata.disclaimer || 'Disclaimer text was not retained for this older record.'}</p><div><b>Acknowledgement version</b><em>{metadata.acknowledgementVersion || '—'}</em><b>Release version</b><em>{metadata.releaseVersion || '—'}</em><b>Recorded day</b><em>{metadata.day ? `${metadata.day} (GMT+6)` : '—'}</em></div></section>}
+      {question && <section className="activity-content-block"><span>Complete question</span><p>{question}</p></section>}
+      {answer && <section className="activity-content-block"><span>Complete answer</span><p>{answer}</p></section>}
+      {sources.length > 0 && <section className="activity-source-list"><span>Recorded sources</span>{sources.map((source, index) => <div key={`${source.url || source.title}-${index}`}><b>{index + 1}. {source.title || 'Untitled source'}</b>{source.url && <a href={source.url} target="_blank" rel="noreferrer">Open source ↗</a>}</div>)}</section>}
+      <details className="activity-raw"><summary>View complete stored metadata</summary><pre>{JSON.stringify(metadata, null, 2)}</pre></details>
+    </div>}
+  </article>;
+}
+
 /* ---------- date helpers (GMT+6) ---------- */
 function pad(n) { return String(n).padStart(2, '0'); }
 function isoOf(y, m0, d) { return `${y}-${pad(m0 + 1)}-${pad(d)}`; }
@@ -245,6 +286,7 @@ export default function Admin() {
   const [activityFrom, setActivityFrom] = useState('');
   const [activityTo, setActivityTo] = useState('');
   const [activityPage, setActivityPage] = useState(1);
+  const [expandedActivityLog, setExpandedActivityLog] = useState(null);
   const [queryLogs, setQueryLogs] = useState(null);
   const [queryFilters, setQueryFilters] = useState({ from: '', to: '', name: '', email: '', provider: '', model: '', scope: '', feedback: '', search: '' });
   const [expandedQueryLog, setExpandedQueryLog] = useState(null);
@@ -971,7 +1013,7 @@ export default function Admin() {
 
         {tab === 'snippets' && <div className="settings-stack"><section className="settings-card"><div className="settings-head"><div><h2>Corrective snippets</h2><p>Approved instructions are automatically applied when their trigger words match a future question.</p></div><span className="state-pill ready">{snippets.filter((item) => item.active).length} active</span></div><div className="snippet-list">{snippets.map((snippet) => <article key={snippet.id} className={!snippet.active ? 'inactive' : ''}><div className="snippet-head"><div><span>#{snippet.id}</span><h3>{snippet.title}</h3></div><label className="toggle"><input type="checkbox" checked={snippet.active} onChange={(e) => updateSnippet(snippet, { active: e.target.checked })} /><i /></label></div><label>Triggers</label><p className="trigger-text">{snippet.trigger_terms}</p><label>Instruction</label><textarea defaultValue={snippet.instruction} onBlur={(e) => e.target.value !== snippet.instruction && updateSnippet(snippet, { instruction: e.target.value })} /><div className="snippet-foot"><small>Created {formatDate(snippet.created_at)}</small><button className="mini-action danger-text" onClick={() => deleteSnippet(snippet.id)}>Delete</button></div></article>)}{!snippets.length && <div className="empty-admin">Approved disputes will appear here after you generate their snippets.</div>}</div></section></div>}
 
-        {tab === 'activity' && <div className="settings-stack"><section className="settings-card activity-filters"><div className="settings-head"><div><h2>Filter activity</h2><p>Dates are interpreted in GMT+6.</p></div><DateRangeFilter from={activityFrom} to={activityTo} onApply={applyDateRange} /></div><div className="field-action"><input type="search" value={activityEmail} onChange={(e) => setActivityEmail(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && loadActivity()} placeholder="Search a teammate’s email address" /><div className="row"><button className="btn btn-primary" onClick={() => loadActivity()}>Search</button><button className="btn btn-secondary" onClick={clearActivityFilters}>Clear</button></div></div></section>{activity && <><div className="activity-kpis">{[['Users', activity.summary.users], ['Queries', activity.summary.queries], ['Question words', activity.summary.questionWords.toLocaleString()], ['Input tokens', activity.summary.inputTokens.toLocaleString()], ['Output tokens', activity.summary.outputTokens.toLocaleString()], ['Estimated cost', `$${activity.summary.estimatedCost.toFixed(4)}`]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><section className="settings-card"><div className="settings-head"><div><h2>Activity results</h2><p className="activity-count">{activityLogs.length} event{activityLogs.length === 1 ? '' : 's'} match the current filters.</p></div></div><div className="activity-table detailed"><div><b>Time</b><b>Google user</b><b>Email</b><b>Event</b><b>Words</b><b>Input</b><b>Output</b><b>Model</b><b>Status</b></div>{pageLogs.map((log) => <div key={log.id}><span data-label="Time">{formatDate(log.created_at)}</span><span data-label="User">{log.user_name || (log.actor_role === 'admin' ? 'Master Admin' : 'Legacy Agent')}</span><span data-label="Email" title={log.user_email || ''}>{log.user_email || '—'}</span><span data-label="Event">{log.event_type}</span><span data-label="Words">{log.question_word_count || 0}</span><span data-label="Input">{log.input_tokens || 0}</span><span data-label="Output">{log.output_tokens || 0}</span><span data-label="Model" title={log.model || ''}>{log.provider || '—'}{log.model ? ` · ${log.model}` : ''}</span><span data-label="Status" className={log.success ? 'good' : 'bad'}>{log.success ? 'Success' : 'Failed'}</span></div>)}{!pageLogs.length && <div className="empty-admin">No activity for this filter.</div>}</div>{totalPages > 1 && <div className="pager"><button disabled={activityPage === 1} onClick={() => setActivityPage((p) => Math.max(1, p - 1))}>‹ Prev</button>{pageNumbers.map((p, i) => p === '…' ? <span key={`e${i}`} className="pager-info">…</span> : <button key={p} className={p === activityPage ? 'current' : ''} onClick={() => setActivityPage(p)}>{p}</button>)}<button disabled={activityPage === totalPages} onClick={() => setActivityPage((p) => Math.min(totalPages, p + 1))}>Next ›</button></div>}</section></>}</div>}
+        {tab === 'activity' && <div className="settings-stack"><section className="settings-card activity-filters"><div className="settings-head"><div><h2>Filter activity</h2><p>Dates are interpreted in GMT+6.</p></div><DateRangeFilter from={activityFrom} to={activityTo} onApply={applyDateRange} /></div><div className="field-action"><input type="search" value={activityEmail} onChange={(e) => setActivityEmail(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && loadActivity()} placeholder="Search a teammate’s email address" /><div className="row"><button className="btn btn-primary" onClick={() => loadActivity()}>Search</button><button className="btn btn-secondary" onClick={clearActivityFilters}>Clear</button></div></div></section>{activity && <><div className="activity-kpis">{[['Users', activity.summary.users], ['Queries', activity.summary.queries], ['Question words', activity.summary.questionWords.toLocaleString()], ['Input tokens', activity.summary.inputTokens.toLocaleString()], ['Output tokens', activity.summary.outputTokens.toLocaleString()], ['Estimated cost', `$${activity.summary.estimatedCost.toFixed(4)}`]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><section className="settings-card"><div className="settings-head"><div><h2>Activity results</h2><p className="activity-count">{activityLogs.length} event{activityLogs.length === 1 ? '' : 's'} match the current filters.</p></div></div><div className="activity-log-list">{pageLogs.map((log) => <ActivityLogCard key={log.id} log={log} expanded={expandedActivityLog === log.id} onToggle={() => setExpandedActivityLog(expandedActivityLog === log.id ? null : log.id)} />)}{!pageLogs.length && <div className="empty-admin">No activity for this filter.</div>}</div>{totalPages > 1 && <div className="pager"><button disabled={activityPage === 1} onClick={() => setActivityPage((p) => Math.max(1, p - 1))}>‹ Prev</button>{pageNumbers.map((p, i) => p === '…' ? <span key={`e${i}`} className="pager-info">…</span> : <button key={p} className={p === activityPage ? 'current' : ''} onClick={() => setActivityPage(p)}>{p}</button>)}<button disabled={activityPage === totalPages} onClick={() => setActivityPage((p) => Math.min(totalPages, p + 1))}>Next ›</button></div>}</section></>}</div>}
 
         {tab === 'querylogs' && <div className="settings-stack query-log-page">
           <section className="settings-card answer-feedback-panel"><div className="settings-head"><div><h2>Answer feedback received</h2><p>Optional ratings connected to the exact recorded question and answer.</p></div><button className="btn btn-secondary" disabled={queryLogsBusy} onClick={() => loadQueryLogs()}>{queryLogsBusy ? 'Refreshing…' : 'Refresh feedback'}</button></div><div className="answer-feedback-list">{(queryLogs?.logs || []).filter((log) => log.feedback).map((log) => <button type="button" key={`feedback-${log.id}`} className={`answer-feedback-record ${log.feedback}`} onClick={() => openQueryLog(log.id)}><span className="answer-feedback-rating">{log.feedback === 'great' ? '★ Great answer' : '♥ Helpful'}</span><span className="answer-feedback-question"><b>{log.question || 'Question text unavailable'}</b><small>{log.answer || 'Answer text unavailable'}</small></span><span className="answer-feedback-person"><b>{log.userName || log.feedbackBy || 'Unknown agent'}</b><small>{formatDate(log.feedbackAt || log.createdAt)}</small></span><i>View answer →</i></button>)}{!queryLogsBusy && !(queryLogs?.logs || []).some((log) => log.feedback) && <div className="empty-admin">No rated answers match the current filters.</div>}</div></section>
