@@ -116,6 +116,13 @@ function wordCount(text) {
   return (String(text).trim().match(/\S+/g) || []).length;
 }
 
+function explicitQuestionParts(text) {
+  const parts = String(text || '').match(/[^?]+\?/g) || [];
+  return parts.map((part) => part.replace(/^\s*(?:good\s+(?:morning|afternoon|evening)[,.]?\s*)/i, '').trim())
+    .filter((part) => part.length > 8)
+    .slice(0, 8);
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   const started = Date.now();
@@ -322,7 +329,13 @@ export default async function handler(req, res) {
       });
     }
 
-    const topicPlan = clarity?.topics?.length ? clarity.topics : [{ question: clearQuestion, queries: clarity?.queries || [] }];
+    // Question marks provide a stable, non-AI way to preserve every part of a
+    // pasted customer message. Prefer these explicit parts over an occasionally
+    // incomplete helper-model split.
+    const statedParts = explicitQuestionParts(question);
+    const topicPlan = statedParts.length > 1
+      ? statedParts.map((part) => ({ question: part, queries: [] }))
+      : (clarity?.topics?.length ? clarity.topics : [{ question: clearQuestion, queries: clarity?.queries || [] }]);
     const isAmbiguous = !!clarity?.ambiguous || distinctMeanings.length >= 2 || payoutUmbrella || topicPlan.length > 1;
 
     const DEFAULT_PAYOUT_INTERPRETATIONS = [
@@ -768,21 +781,23 @@ export default async function handler(req, res) {
     // Correct the occasional whole-answer refusal when at least part of a
     // multi-part question has evidence. Genuine no-evidence cases are not retried.
     if (cleanAnswer(raw) === SAFE_UNCONFIRMED && matches.length) {
-      const retryInstruction =
-        'Your previous draft incorrectly refused the entire question even though evidence was supplied. ' +
-        'Write a new customer-ready answer now. Answer each supported part in the original order. ' +
-        'For any unsupported part, say only that specific detail needs to be confirmed. ' +
-        'Do not use the full refusal sentence unless none of the evidence supports any requested part. ' +
-        'End with SOURCES, CONFIDENCE, and SEGMENTS exactly as previously instructed.';
+      const retrySystem = system +
+        '\n\nREQUIRED PARTIAL-ANSWER RECOVERY: The first draft refused despite relevant evidence. ' +
+        'Ignore that draft. Inspect each numbered question independently. State every answer directly supported by the evidence. ' +
+        'For an unsupported question, write only "This specific detail needs to be confirmed." ' +
+        'Finding no evidence for one question must never erase answers to the others. ' +
+        'Use the full refusal sentence only if the evidence answers zero questions.';
+      const retryQuestion =
+        `Customer questions:\n${topicPlan.map((topic, index) => `${index + 1}. ${topic.question}`).join('\n')}\n\n` +
+        `FAQ evidence:\n${context}`;
       const retryKey = answerProvider === 'groq' ? usedGroqKey : openaiKey;
       const retryModel = usedFallback ? fallbackModel : chatModel;
       const retryBaseUrl = answerProvider === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1';
       if (retryKey) {
         try {
           const retried = await openaiChatDetailed(retryKey, retryModel, [
-            ...messages,
-            { role: 'assistant', content: raw },
-            { role: 'user', content: retryInstruction }
+            { role: 'system', content: retrySystem },
+            { role: 'user', content: retryQuestion }
           ], retryBaseUrl);
           if (cleanAnswer(retried.content) !== SAFE_UNCONFIRMED) {
             completion = retried;
