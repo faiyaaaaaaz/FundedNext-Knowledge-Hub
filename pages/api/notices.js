@@ -21,7 +21,11 @@ export default async function handler(req, res) {
     const sb = supabaseAdmin();
 
     if (req.method === 'GET') {
-      return res.status(200).json({ notices: await listNotices(sb) });
+      const [notices, indexedRow] = await Promise.all([
+        listNotices(sb),
+        sb.from('settings').select('value').eq('key', 'notices_indexed_at').maybeSingle()
+      ]);
+      return res.status(200).json({ notices, indexedAt: indexedRow?.data?.value || null });
     }
 
     if (req.method === 'POST') {
