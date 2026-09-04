@@ -29,7 +29,8 @@ const CORE_GUARDRAILS =
   '- Never guess or generalize with typically, generally, usually, or likely.\n' +
   '- Use plain text only. Do not use Markdown, bold text, italics, headings, asterisks, underscores, or decorative symbols.\n' +
   '- Keep paragraphs short and separated by one blank line. Use simple numbered steps only when a sequence is genuinely needed.\n' +
-  `- If direct evidence is insufficient, reply exactly: "${SAFE_UNCONFIRMED}"\n` +
+  '- For a multi-part question, answer every part supported by direct evidence and say only that the specific unsupported part needs checking.\n' +
+  `- Reply exactly "${SAFE_UNCONFIRMED}" only when direct evidence supports none of the requested parts.\n` +
   '- Factual numbers, dates, percentages, time periods, and conditions must be directly supported by the selected FAQ evidence.';
 
 function keywords(question) {
@@ -39,7 +40,12 @@ function keywords(question) {
 
 function detectScope(question) {
   const normalized = String(question).toLowerCase().replace(/[–—]/g, '-');
-  return ACCOUNT_SCOPES.find((scope) => normalized.includes(scope)) || null;
+  const aliases = [
+    { scope: 'stellar 1-step', phrases: ['stellar 1-step', 'stellar 1 step', 'stellar one-step', 'stellar one step', 'stellar phase 1', 'stellar phase one'] },
+    { scope: 'stellar 2-step', phrases: ['stellar 2-step', 'stellar 2 step', 'stellar two-step', 'stellar two step', 'stellar phase 2', 'stellar phase two'] }
+  ];
+  const aliased = aliases.find((item) => item.phrases.some((phrase) => normalized.includes(phrase)));
+  return aliased?.scope || ACCOUNT_SCOPES.find((scope) => normalized.includes(scope)) || null;
 }
 
 function hasOtherScope(text, target) {
@@ -168,10 +174,10 @@ export default async function handler(req, res) {
     const articleScopeOverrides = await getArticleScopeOverrides(sb);
     const selectedProduct = ['cfd', 'futures', 'both'].includes(req.body?.scope?.product) ? req.body.scope.product : 'cfd';
     const selectedModelSlug = String(req.body?.scope?.model || 'all');
-    const selectedModel = selectedModelSlug === 'all' ? null : scopeCatalog.models.find((item) =>
+    const selectedModelFromUi = selectedModelSlug === 'all' ? null : scopeCatalog.models.find((item) =>
       item.slug === selectedModelSlug && item.status !== 'review' && (selectedProduct === 'both' || item.product === selectedProduct)
     );
-    if (selectedModelSlug !== 'all' && !selectedModel) {
+    if (selectedModelSlug !== 'all' && !selectedModelFromUi) {
       return res.status(200).json({
         scopeNotice: true,
         noticeTitle: 'The selected Account model is not available',
@@ -179,14 +185,18 @@ export default async function handler(req, res) {
       });
     }
     const questionModels = modelsMentioned(question, scopeCatalog.models);
-    const conflictingModel = selectedModel && questionModels.find((item) => item.slug !== selectedModel.slug);
+    const conflictingModel = selectedModelFromUi && questionModels.find((item) => item.slug !== selectedModelFromUi.slug);
     if (conflictingModel) {
       return res.status(200).json({
         scopeNotice: true,
         noticeTitle: 'Your question and selected scope do not match',
-        notice: `The selector is set to ${selectedModel.name}, but the question mentions ${conflictingModel.name}. Change the selector if you want an answer about ${conflictingModel.name}.`
+        notice: `The selector is set to ${selectedModelFromUi.name}, but the question mentions ${conflictingModel.name}. Change the selector if you want an answer about ${conflictingModel.name}.`
       });
     }
+    // When the selector covers all models but the customer clearly names one,
+    // use that model throughout retrieval, notice lookup, and confidence checks.
+    const inferredModel = selectedModelSlug === 'all' && questionModels.length === 1 ? questionModels[0] : null;
+    const selectedModel = selectedModelFromUi || inferredModel;
     const scope = selectedModel ? selectedModel.aliases[0] : detectScope(question);
     const allocationQuestion = /\b(?:maximum|max|total|aggregate)?\s*allocation\b/i.test(question);
     const personalAllocation = allocationQuestion && /\b(?:my|i|me|mine|for me)\b/i.test(question);
@@ -813,8 +823,10 @@ export default async function handler(req, res) {
     let answer = cleanAnswer(applyBrandingReplacements(cleanAnswer(raw), brandRules));
     // An exact computation must not be thrown away as "unconfirmed".
     if (okCalc.length) confidence = Math.max(confidence, 74);
-    // Only fall back to the safe message when the model itself is very unsure.
-    if (confidence < 30 && !okCalc.length) answer = SAFE_UNCONFIRMED;
+    // Do not discard a useful, sourced partial answer merely because the writing
+    // model assigned itself a low confidence score. A full refusal is justified
+    // only when it cited no evidence at all; unsupported parts remain explicit.
+    if (confidence < 30 && !okCalc.length && !sourceNumbers.length) answer = SAFE_UNCONFIRMED;
 
     // Per-paragraph attribution: map each answer paragraph to the source(s) that
     // support it, so the UI can show which FAQ backs which part. Fully optional —
@@ -909,6 +921,8 @@ export default async function handler(req, res) {
         selectedScopeLabel: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models`,
         fallback: usedFallback, grounding: groundingScore, durationMs: Date.now() - started,
         smart: !!clarity, ambiguous: isAmbiguous, groqKeyLabel: usedGroqKeyLabel,
+        scopeSource: selectedModelFromUi ? 'selector' : inferredModel ? 'question' : 'all_models',
+        refusalReason: answer === SAFE_UNCONFIRMED ? (sourceNumbers.length ? 'answer_model_refused_despite_citations' : 'no_cited_evidence') : null,
         question, questionPreview: question.slice(0, 180),
         answer: String(answer || ''), answerPreview: String(answer || '').slice(0, 240),
         answerWordCount: wordCount(answer), answerTruncated: false, questionTruncated: false,
