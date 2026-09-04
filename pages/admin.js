@@ -324,17 +324,25 @@ export default function Admin() {
   const [pasteDate, setPasteDate] = useState('');
   const [pasteProposed, setPasteProposed] = useState(null);
   const [pasteBusy, setPasteBusy] = useState(false);
+  const [pasteStage, setPasteStage] = useState('');
   const [noticeAccessCfg, setNoticeAccessCfg] = useState(null);
   const [newAccessEmail, setNewAccessEmail] = useState('');
   const analyzePaste = async () => {
     if (!pasteText.trim()) return setError('Paste the notice text first.');
-    setPasteBusy(true); setPasteProposed(null);
+    setPasteBusy(true); setPasteProposed(null); setPasteStage('Reading the notice…'); setError('');
+    const stageTimers = [
+      setTimeout(() => setPasteStage('Separating the notice into facts…'), 1200),
+      setTimeout(() => setPasteStage('Checking product, model, and topic…'), 3000),
+      setTimeout(() => setPasteStage('Preparing your review…'), 5200)
+    ];
     try {
       const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'extract', text: pasteText, source_url: pasteUrl, posted_by: pastePoster, posted_at: pasteDate || undefined }) });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Analyze failed.');
-      setPasteProposed(d.proposed || []);
-    } catch (e) { setError(e.message); } finally { setPasteBusy(false); }
+      if (!d.proposed?.length) throw new Error('The notice could not be structured. Please check the pasted text and try again.');
+      setPasteStage('Ready for your review');
+      setPasteProposed(d.proposed);
+    } catch (e) { setPasteStage(''); setError(e.message); } finally { stageTimers.forEach(clearTimeout); setPasteBusy(false); }
   };
   const savePaste = async () => {
     if (!pasteProposed?.length) return;
@@ -1127,8 +1135,9 @@ export default function Admin() {
             <label style={{ marginTop: 12, display: 'block' }}>Notice text (and thread clarifications)</label>
             <textarea className="prompt-area" value={pasteText} onChange={(e) => setPasteText(e.target.value)} placeholder="Paste the full notice here…" />
             <div className="autosync-actions" style={{ marginTop: 12 }}>
-              <button className="btn btn-secondary" disabled={pasteBusy || !pasteText.trim()} onClick={analyzePaste}>{pasteBusy ? 'Working…' : 'Analyze with AI'}</button>
+              <button className="btn btn-secondary notice-analyze-btn" disabled={pasteBusy || !pasteText.trim()} onClick={analyzePaste}>{pasteBusy ? <><span className="notice-spinner" />Working…</> : 'Analyze with AI'}</button>
             </div>
+            {pasteStage && <div className={`notice-ai-progress ${pasteBusy ? 'working' : 'ready'}`} role="status" aria-live="polite"><span className="notice-progress-icon">{pasteBusy ? '✦' : '✓'}</span><div><b>{pasteStage}</b><small>{pasteBusy ? 'Keep this page open. Nothing has been saved yet.' : 'Review every fact below before saving.'}</small></div><i /></div>}
             {pasteProposed && <div className="sync-log-list" style={{ marginTop: 12 }}>
               {pasteProposed.length === 0 && <div className="empty-admin">The AI did not find a durable, customer-facing fact to save.</div>}
               {pasteProposed.map((p, i) => <div key={i} className="sync-log"><div className="sync-log-row" style={{ cursor: 'default' }}>
