@@ -121,6 +121,7 @@ export default async function handler(req, res) {
   const started = Date.now();
   let access;
   let usedGroqKeyLabel = null;
+  let usedGroqKey = null;
   try {
     access = await authenticateRequest(req);
     if (!access) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
@@ -684,7 +685,7 @@ export default async function handler(req, res) {
         const fallbackPool = groqPool.length ? groqPool : (groqPrimary ? [{ key: groqPrimary }] : []);
         let fallbackError = null;
         for (const item of fallbackPool) {
-          try { const result = await openaiChatDetailed(item.key, fallbackModel, messages, 'https://api.groq.com/openai/v1'); usedGroqKeyLabel = item.label || `Key ${item.id}`; return result; }
+          try { const result = await openaiChatDetailed(item.key, fallbackModel, messages, 'https://api.groq.com/openai/v1'); usedGroqKey = item.key; usedGroqKeyLabel = item.label || `Key ${item.id}`; return result; }
           catch (e) { fallbackError = e; }
         }
         if (fallbackError) throw fallbackError;
@@ -707,6 +708,7 @@ export default async function handler(req, res) {
         for (const idx of order) {
           try {
             completion = await openaiChatDetailed(pool[idx].key, chatModel, messages, 'https://api.groq.com/openai/v1');
+            usedGroqKey = pool[idx].key;
             usedGroqKeyLabel = pool[idx].label || `Key ${pool[idx].id}`;
             answerProvider = 'groq';
             break;
@@ -719,6 +721,7 @@ export default async function handler(req, res) {
         for (const idx of order) {
           try {
             completion = await openaiChatDetailed(pool[idx].key, chatModel, recoveryMessages, 'https://api.groq.com/openai/v1');
+            usedGroqKey = pool[idx].key;
             usedGroqKeyLabel = pool[idx].label || `Key ${pool[idx].id}`;
             answerProvider = 'groq';
             break;
@@ -761,7 +764,33 @@ export default async function handler(req, res) {
       }
     }
 
-    const raw = completion.content;
+    let raw = completion.content;
+    // Correct the occasional whole-answer refusal when at least part of a
+    // multi-part question has evidence. Genuine no-evidence cases are not retried.
+    if (cleanAnswer(raw) === SAFE_UNCONFIRMED && matches.length) {
+      const retryInstruction =
+        'Your previous draft incorrectly refused the entire question even though evidence was supplied. ' +
+        'Write a new customer-ready answer now. Answer each supported part in the original order. ' +
+        'For any unsupported part, say only that specific detail needs to be confirmed. ' +
+        'Do not use the full refusal sentence unless none of the evidence supports any requested part. ' +
+        'End with SOURCES, CONFIDENCE, and SEGMENTS exactly as previously instructed.';
+      const retryKey = answerProvider === 'groq' ? usedGroqKey : openaiKey;
+      const retryModel = usedFallback ? fallbackModel : chatModel;
+      const retryBaseUrl = answerProvider === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1';
+      if (retryKey) {
+        try {
+          const retried = await openaiChatDetailed(retryKey, retryModel, [
+            ...messages,
+            { role: 'assistant', content: raw },
+            { role: 'user', content: retryInstruction }
+          ], retryBaseUrl);
+          if (cleanAnswer(retried.content) !== SAFE_UNCONFIRMED) {
+            completion = retried;
+            raw = retried.content;
+          }
+        } catch { /* keep the safe first response if correction fails */ }
+      }
+    }
     const sourceLine = raw.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
     const confidenceLine = raw.match(/(?:\*\*)?CONFIDENCE(?:\*\*)?\s*:\s*(\d{1,3})/i);
     const sourceNumbers = parseNumbers(sourceLine);
@@ -827,6 +856,10 @@ export default async function handler(req, res) {
     // model assigned itself a low confidence score. A full refusal is justified
     // only when it cited no evidence at all; unsupported parts remain explicit.
     if (confidence < 30 && !okCalc.length && !sourceNumbers.length) answer = SAFE_UNCONFIRMED;
+    if (answer === SAFE_UNCONFIRMED) {
+      confidence = Math.min(confidence, 22);
+      confidenceLabel = 'Needs verification';
+    }
 
     // Per-paragraph attribution: map each answer paragraph to the source(s) that
     // support it, so the UI can show which FAQ backs which part. Fully optional —
