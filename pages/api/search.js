@@ -129,6 +129,8 @@ export default async function handler(req, res) {
   let access;
   let usedGroqKeyLabel = null;
   let usedGroqKey = null;
+  let partialAnswerRetryAttempted = false;
+  let partialAnswerRetrySucceeded = false;
   try {
     access = await authenticateRequest(req);
     if (!access) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
@@ -388,6 +390,21 @@ export default async function handler(req, res) {
       ...umbrellaExpansions,
       ...concepts.expansions
     ].map((t) => String(t || '').trim()).filter(Boolean))].slice(0, 20);
+    const interpretationLog = {
+      original: question,
+      cleaned: clearQuestion,
+      helperUsed: !!clarity,
+      ambiguous: isAmbiguous,
+      interpretations: interpretations.slice(0, 8),
+      detectedModels: questionModels.map((item) => ({ slug: item.slug, name: item.name, product: item.product })),
+      selectedProduct,
+      selectedModel: selectedModel?.slug || 'all',
+      selectedModelLabel: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models`,
+      scopeSource: selectedModelFromUi ? 'selector' : inferredModel ? 'question' : 'all_models',
+      topics: topicPlan.map((topic) => ({ question: topic.question, queries: topic.queries || [] })).slice(0, 8),
+      conceptGroups: concepts.groups.slice(0, 12),
+      searchQueries: embedTexts
+    };
 
     const vectors = await openaiEmbed(openaiKey, embedTexts);
     const combined = new Map();
@@ -424,6 +441,8 @@ export default async function handler(req, res) {
     // restricted strategies, merging, scale-up, etc.). An article that names
     // only another model is rejected. Multi-model comparison articles remain
     // eligible only when they include the selected model.
+    const candidateCountBeforeScope = candidates.length;
+    const rejectedEvidence = [];
     candidates = candidates.filter((item) => {
       const blob = `${item.article_title || ''}\n${item.content || ''}`;
       const override = articleScopeOverrides[String(item.article_id || '')];
@@ -438,15 +457,24 @@ export default async function handler(req, res) {
       // Product isolation is determined only by the authoritative help-centre
       // domain or an explicit Admin assignment. Words inside an article can
       // never move CFD evidence into Futures (or the reverse).
-      if (!internalKnowledge && selectedProduct !== 'both' && sourceProduct !== selectedProduct) return false;
+      if (!internalKnowledge && selectedProduct !== 'both' && sourceProduct !== selectedProduct) {
+        rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: `Wrong product: ${sourceProduct || 'unknown'} evidence for ${selectedProduct}`, similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
+        return false;
+      }
       if (!selectedModel) return true;
-      if (override) return override.model === 'all' || override.model === selectedModel.slug;
+      if (override) {
+        const accepted = override.model === 'all' || override.model === selectedModel.slug;
+        if (!accepted) rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: `Admin scope says ${override.model}; question requires ${selectedModel.slug}`, similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
+        return accepted;
+      }
       const namedInFamily = mentioned.filter((model) => model.product === selectedModel.product);
       // No Account model from this product is named, so this is a
       // product-wide policy article. The authoritative source-domain check
       // above has already proved that it belongs to the selected product.
       if (!namedInFamily.length) return true;
-      return namedInFamily.some((model) => model.slug === selectedModel.slug);
+      const accepted = namedInFamily.some((model) => model.slug === selectedModel.slug);
+      if (!accepted) rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: `Evidence names ${namedInFamily.map((model) => model.slug).join(', ')}; question requires ${selectedModel.slug}`, similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
+      return accepted;
     });
 
     if (!candidates.length) {
@@ -456,7 +484,7 @@ export default async function handler(req, res) {
         actorRole: access.role, sessionId: access.sessionId, userName: access.name, userEmail: access.email,
         authProvider: access.authProvider, questionWordCount: wordCount(question), eventType: 'query', success: true,
         model: `No answer · Scope: ${selectedProduct.toUpperCase()}/${selectedModel?.name || 'All models'}`,
-        metadata: { question, questionPreview: question.slice(0, 180), selectedProduct, selectedModel: selectedModel?.slug || 'all', selectedScopeLabel: target, sourceCount: 0, reason: 'No evidence inside selected product scope', durationMs: Date.now() - started, questionTruncated: false, answerTruncated: false }
+        metadata: { question, questionPreview: question.slice(0, 180), selectedProduct, selectedModel: selectedModel?.slug || 'all', selectedScopeLabel: target, sourceCount: 0, reason: 'No evidence inside selected product scope', interpretation: interpretationLog, evidenceTrail: { candidateCountBeforeScope, acceptedCandidateCount: 0, rejected: rejectedEvidence.slice(0, 30), selectedForAnswer: [] }, durationMs: Date.now() - started, questionTruncated: false, answerTruncated: false }
       });
       return res.status(200).json({
         scopeNotice: true,
@@ -576,17 +604,19 @@ export default async function handler(req, res) {
     // in the same verified-source UI, pass the same product/model scope filter,
     // and OVERRIDE any older FAQ. Best-effort: never breaks the FAQ answer.
     let noticeEscalations = [];
+    let noticeRejections = [];
     let hasNoticeEvidence = false;
     let noticeMetaByAid = {};
     try {
       if (await noticesAccess(access, sb)) {
-        const { matches: nMatches, escalations } = await retrieveNotices(sb, {
+        const { matches: nMatches, escalations, rejected: nRejected } = await retrieveNotices(sb, {
           openaiKey,
           question: clearQuestion || question,
           product: selectedProduct,
           model: selectedModel?.slug || 'all',
           limit: 6
         });
+        noticeRejections = nRejected || [];
         if (nMatches && nMatches.length) {
           hasNoticeEvidence = true;
           noticeEscalations = escalations || [];
@@ -781,6 +811,7 @@ export default async function handler(req, res) {
     // Correct the occasional whole-answer refusal when at least part of a
     // multi-part question has evidence. Genuine no-evidence cases are not retried.
     if (cleanAnswer(raw) === SAFE_UNCONFIRMED && matches.length) {
+      partialAnswerRetryAttempted = true;
       const retrySystem = system +
         '\n\nREQUIRED PARTIAL-ANSWER RECOVERY: The first draft refused despite relevant evidence. ' +
         'Ignore that draft. Inspect each numbered question independently. State every answer directly supported by the evidence. ' +
@@ -802,6 +833,7 @@ export default async function handler(req, res) {
           if (cleanAnswer(retried.content) !== SAFE_UNCONFIRMED) {
             completion = retried;
             raw = retried.content;
+            partialAnswerRetrySucceeded = true;
           }
         } catch { /* keep the safe first response if correction fails */ }
       }
@@ -971,6 +1003,16 @@ export default async function handler(req, res) {
         smart: !!clarity, ambiguous: isAmbiguous, groqKeyLabel: usedGroqKeyLabel,
         scopeSource: selectedModelFromUi ? 'selector' : inferredModel ? 'question' : 'all_models',
         refusalReason: answer === SAFE_UNCONFIRMED ? (sourceNumbers.length ? 'answer_model_refused_despite_citations' : 'no_cited_evidence') : null,
+        interpretation: interpretationLog,
+        evidenceTrail: {
+          candidateCountBeforeScope,
+          acceptedCandidateCount: candidates.length,
+          rejected: [...rejectedEvidence, ...noticeRejections].slice(0, 40),
+          selectedForAnswer: matches.slice(0, 20).map((item, index) => ({ position: index + 1, id: item.article_id, title: item.article_title, url: item.article_url, kind: noticeMetaByAid[item.article_id] ? 'notice' : String(item.article_id || '').startsWith('kb:') ? 'internal' : 'faq', similarity: Number(item.similarity || 0), rank: Number(item._rank || 0), exactScope: !!item._scoped })),
+          finalSourceNumbers: sourceNumbers,
+          finalSources: sources.slice(0, 12).map((source) => ({ title: source.title, url: source.url, kind: source.kind }))
+        },
+        processing: { partialAnswerRetryAttempted, partialAnswerRetrySucceeded, fallback: usedFallback, groundingScore },
         question, questionPreview: question.slice(0, 180),
         answer: String(answer || ''), answerPreview: String(answer || '').slice(0, 240),
         answerWordCount: wordCount(answer), answerTruncated: false, questionTruncated: false,
