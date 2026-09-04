@@ -462,6 +462,15 @@ export default async function handler(req, res) {
         return false;
       }
       if (!selectedModel) return true;
+      const normalizedTitle = String(item.article_title || '').toLowerCase().replace(/[–—]/g, '-');
+      if (selectedModel.slug === 'stellar-1-step' && /\b(?:2-step|2 step|two-step|two step)\b/.test(normalizedTitle) && !/\b(?:stellar\s+)?(?:1-step|1 step|one-step|one step)\b/.test(normalizedTitle)) {
+        rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: 'FAQ title says 2-Step; question requires Stellar 1-Step', similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
+        return false;
+      }
+      if (selectedModel.slug === 'stellar-2-step' && /\b(?:1-step|1 step|one-step|one step)\b/.test(normalizedTitle) && !/\b(?:stellar\s+)?(?:2-step|2 step|two-step|two step)\b/.test(normalizedTitle)) {
+        rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: 'FAQ title says 1-Step; question requires Stellar 2-Step', similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
+        return false;
+      }
       if (override) {
         const accepted = override.model === 'all' || override.model === selectedModel.slug;
         if (!accepted) rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: `Admin scope says ${override.model}; question requires ${selectedModel.slug}`, similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
@@ -614,7 +623,7 @@ export default async function handler(req, res) {
           question: clearQuestion || question,
           product: selectedProduct,
           model: selectedModel?.slug || 'all',
-          limit: 6
+          limit: 3
         });
         noticeRejections = nRejected || [];
         if (nMatches && nMatches.length) {
@@ -627,8 +636,9 @@ export default async function handler(req, res) {
             article_title: m.article_title,
             article_url: m.article_url,
             content: m.content,
-            similarity: 1,
-            _scoped: true
+            similarity: Number(m.similarity || 0),
+            _rank: 40 + (Number(m.similarity || 0) * 8),
+            _scoped: m.meta?.model === selectedModel?.slug
           }));
           matches = [...noticeEvidence, ...matches].slice(0, 16);
         }
@@ -709,9 +719,25 @@ export default async function handler(req, res) {
     // normal Groq attempt fails. It keeps the highest-ranked scoped evidence and
     // all calculator evidence, avoiding an unnecessary provider switch when a
     // long prompt exceeds a model or gateway limit.
-    const recoveryMatches = matches.filter((item, index) => index < 7 || String(item.article_id || '').startsWith('calc:'));
-    const recoveryContext = recoveryMatches.map((item, index) =>
-      `[${index + 1}] ${item.article_title}\nURL: ${item.article_url}\n${String(item.content || '').slice(0, 4200)}`
+    const recoveryById = new Map();
+    const addRecovery = (item) => { if (item) recoveryById.set(String(item.id), item); };
+    matches.filter((item) => String(item.article_id || '').startsWith('calc:')).forEach(addRecovery);
+    for (const topic of topicPlan) {
+      const topicTerms = keywords(topic.question);
+      const best = [...matches].sort((a, b) => {
+        const score = (item) => {
+          const title = String(item.article_title || '').toLowerCase();
+          const content = String(item.content || '').toLowerCase();
+          return topicTerms.reduce((sum, term) => sum + (title.includes(term) ? 4 : content.includes(term) ? 1 : 0), 0) + Number(item.similarity || 0);
+        };
+        return score(b) - score(a);
+      })[0];
+      addRecovery(best);
+    }
+    for (const item of matches) { if (recoveryById.size >= 10) break; addRecovery(item); }
+    const recoveryMatches = [...recoveryById.values()];
+    const recoveryContext = recoveryMatches.map((item) =>
+      `[${matches.indexOf(item) + 1}] ${item.article_title}\nURL: ${item.article_url}\n${String(item.content || '').slice(0, 4200)}`
     ).join('\n\n---\n\n');
     const recoveryMessages = [
       { role: 'system', content: system },
@@ -820,7 +846,7 @@ export default async function handler(req, res) {
         'Use the full refusal sentence only if the evidence answers zero questions.';
       const retryQuestion =
         `Customer questions:\n${topicPlan.map((topic, index) => `${index + 1}. ${topic.question}`).join('\n')}\n\n` +
-        `FAQ evidence:\n${context}`;
+        `FAQ evidence:\n${recoveryContext || context}`;
       const retryKey = answerProvider === 'groq' ? usedGroqKey : openaiKey;
       const retryModel = usedFallback ? fallbackModel : chatModel;
       const retryBaseUrl = answerProvider === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1';
