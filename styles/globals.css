@@ -243,6 +243,13 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .answer-head span { font: 700 12.5px/1 var(--display); letter-spacing: -.01em; }
 .answer-head > div { display: flex; align-items: center; gap: 10px; }
 .answer-head small { color: var(--faint); font: 700 9px/1 var(--display); letter-spacing: .1em; text-transform: uppercase; }
+.coverage-summary { margin: -5px 0 16px; padding: 10px 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--surface-2) 72%, transparent); font: 650 11px/1.35 var(--display); color: var(--muted); }
+.coverage-summary b { color: var(--ink); }
+.coverage-summary span::before { content: '•'; margin-right: 8px; color: var(--violet); }
+.coverage-summary .needs-check { color: var(--warn); }
+.notice-override { margin: -5px 0 16px; padding: 10px 12px; display: grid; gap: 3px; border: 1px solid color-mix(in srgb, var(--violet) 38%, var(--line)); border-radius: 10px; background: color-mix(in srgb, var(--violet) 8%, var(--surface)); }
+.notice-override b { color: var(--violet); font: 750 11px/1.2 var(--display); }
+.notice-override span { color: var(--muted); font: 500 11px/1.45 var(--display); }
 
 /* Confidence pill */
 .confidence-pill { padding: 5px 10px 5px 6px; display: inline-flex; align-items: center; gap: 7px; border-radius: 999px; font: 800 10px/1 var(--display); letter-spacing: .01em; }
@@ -746,6 +753,19 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 
 /* ================= MODAL ================= */
 .modal-backdrop { position: fixed; inset: 0; z-index: 100; padding: 20px; display: grid; place-items: center; background: rgba(11,9,20,.6); backdrop-filter: blur(6px); animation: fade .2s ease both; }
+.entry-gate { position: fixed; inset: 0; z-index: 300; padding: 20px; display: grid; place-items: center; background: rgba(8,6,16,.82); backdrop-filter: blur(12px); }
+.entry-card { width: min(580px, 100%); max-height: calc(100vh - 40px); overflow: auto; padding: 30px; border: 1px solid color-mix(in srgb, var(--violet) 38%, var(--line)); border-radius: 22px; background: var(--surface); box-shadow: 0 30px 90px rgba(0,0,0,.42); }
+.entry-brand { margin-bottom: 26px; display: flex; align-items: center; gap: 10px; color: var(--muted); font: 700 11px/1 var(--display); text-transform: uppercase; letter-spacing: .08em; }
+.entry-brand .fn-logo { width: 32px; height: 25px; }
+.entry-card h2 { margin: 7px 0 17px; font: 800 28px/1.1 var(--display); letter-spacing: -.035em; }
+.release-list { margin: 0 0 22px; padding: 0; list-style: none; display: grid; gap: 10px; }
+.release-list li { position: relative; padding-left: 22px; color: var(--ink); font: 550 13px/1.5 var(--display); }
+.release-list li::before { content: '✓'; position: absolute; left: 0; color: var(--success); font-weight: 800; }
+.qc-warning { margin: 0 0 18px; padding: 17px; border: 1px solid color-mix(in srgb, var(--warn) 42%, var(--line)); border-radius: 14px; background: color-mix(in srgb, var(--warn) 8%, var(--surface)); }
+.qc-warning b { color: var(--warn); font: 800 12px/1 var(--display); text-transform: uppercase; letter-spacing: .06em; }
+.qc-warning p { margin: 9px 0 0; color: var(--ink); font: 550 13px/1.6 var(--display); }
+.entry-ack { width: 100%; min-height: 48px; }
+.entry-card > small { display: block; margin-top: 10px; text-align: center; color: var(--faint); font: 500 10px/1.45 var(--display); }
 .modal-card { width: min(100%, 520px); padding: 30px; border: 1px solid var(--line); border-radius: 22px; background: var(--surface); box-shadow: var(--shadow-xl); animation: rise .32s cubic-bezier(.2,.8,.2,1) both; }
 .modal-icon { width: 46px; height: 46px; display: grid; place-items: center; border-radius: 14px; color: var(--danger); background: var(--danger-soft); font-size: 21px; }
 .modal-card h2 { margin: 16px 0 7px; font: 700 21px/1.2 var(--display); letter-spacing: -.02em; }
