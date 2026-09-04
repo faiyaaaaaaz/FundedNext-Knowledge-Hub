@@ -54,6 +54,17 @@ function isoOf(y, m0, d) { return `${y}-${pad(m0 + 1)}-${pad(d)}`; }
 function dhakaTodayIso() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 }
+function dhakaDateTimeInput(dayOffset = 0) {
+  const date = new Date(Date.now() + dayOffset * 86400000);
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Dhaka', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+  }).formatToParts(date).filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+}
+function dhakaInputToIso(value) {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(String(value || '')) ? `${value}:00+06:00` : value;
+}
 function shiftIso(iso, days) {
   const [y, m, d] = iso.split('-').map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d + days));
@@ -274,18 +285,21 @@ export default function Admin() {
   const [noticeFile, setNoticeFile] = useState(null);
   const [noticeMsg, setNoticeMsg] = useState('');
   const [noticeBusy, setNoticeBusy] = useState(false);
+  const [noticeRefreshing, setNoticeRefreshing] = useState(false);
   const [noticeList, setNoticeList] = useState([]);
   const [noticeIndexedAt, setNoticeIndexedAt] = useState(null);
   const [noticeSearch, setNoticeSearch] = useState('');
   const [noticeStatusFilter, setNoticeStatusFilter] = useState('all');
-  const loadNotices = async () => {
+  const loadNotices = async (announce = false) => {
+    if (announce) { setNoticeRefreshing(true); setNotice(''); setError(''); }
     try {
       const r = await fetch('/api/notices', { headers: headers() });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Failed to load notices.');
       setNoticeList(d.notices || []);
       setNoticeIndexedAt(d.indexedAt || null);
-    } catch (e) { setError(e.message); }
+      if (announce) setNotice(`Notices refreshed · ${(d.notices || []).length} stored.`);
+    } catch (e) { setError(e.message); } finally { if (announce) setNoticeRefreshing(false); }
   };
   const importNoticeFile = async () => {
     if (!noticeFile) return setError('Choose the combined RAG .json file first.');
@@ -297,7 +311,7 @@ export default function Admin() {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Import failed.');
       setNoticeMsg('Imported ' + d.imported + ' \u00b7 reconciled ' + d.reconciled + ' \u00b7 indexed ' + d.indexed + '.');
-      loadNotices();
+      await loadNotices();
     } catch (e) { setError(e.message); } finally { setNoticeBusy(false); }
   };
   const reindexNoticesNow = async () => {
@@ -307,6 +321,7 @@ export default function Admin() {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Reindex failed.');
       setNoticeMsg('Re-indexed ' + d.indexed + ' active notices.');
+      await loadNotices();
     } catch (e) { setError(e.message); } finally { setNoticeBusy(false); }
   };
   const setNoticeStatusNow = async (entry_id, status) => {
@@ -314,14 +329,14 @@ export default function Admin() {
       const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'set-status', entry_id, status }) });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Update failed.');
-      setNotice('Notice updated.'); loadNotices();
+      setNotice('Notice updated.'); await loadNotices();
     } catch (e) { setError(e.message); }
   };
   // --- Paste-a-notice + notices access state/handlers ---
   const [pasteText, setPasteText] = useState('');
   const [pasteUrl, setPasteUrl] = useState('');
   const [pastePoster, setPastePoster] = useState('');
-  const [pasteDate, setPasteDate] = useState('');
+  const [pasteDate, setPasteDate] = useState(() => dhakaDateTimeInput());
   const [pasteProposed, setPasteProposed] = useState(null);
   const [pasteBusy, setPasteBusy] = useState(false);
   const [pasteStage, setPasteStage] = useState('');
@@ -336,7 +351,7 @@ export default function Admin() {
       setTimeout(() => setPasteStage('Preparing your review…'), 5200)
     ];
     try {
-      const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'extract', text: pasteText, source_url: pasteUrl, posted_by: pastePoster, posted_at: pasteDate || undefined }) });
+      const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'extract', text: pasteText, source_url: pasteUrl, posted_by: pastePoster, posted_at: dhakaInputToIso(pasteDate) || undefined }) });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Analyze failed.');
       if (!d.proposed?.length) throw new Error('The notice could not be structured. Please check the pasted text and try again.');
@@ -352,8 +367,8 @@ export default function Admin() {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Save failed.');
       setNotice('Saved ' + (d.saved || 0) + ' notice entries.');
-      setPasteText(''); setPasteUrl(''); setPastePoster(''); setPasteDate(''); setPasteProposed(null);
-      loadNotices();
+      setPasteText(''); setPasteUrl(''); setPastePoster(''); setPasteDate(dhakaDateTimeInput()); setPasteProposed(null); setPasteStage('');
+      await loadNotices();
     } catch (e) { setError(e.message); } finally { setPasteBusy(false); }
   };
   const loadNoticeAccess = async () => {
@@ -1107,7 +1122,7 @@ export default function Admin() {
 
         {tab === 'notices' && <div className="settings-stack">
           <section className="settings-card">
-            <div className="settings-head"><div><h2>Coverage status</h2><p>This shows exactly where your stored ClickUp coverage currently ends.</p></div><button className="btn btn-secondary" disabled={noticeBusy} onClick={loadNotices}>Refresh</button></div>
+            <div className="settings-head"><div><h2>Coverage status</h2><p>This shows exactly where your stored ClickUp coverage currently ends.</p></div><button className="btn btn-secondary notice-refresh-btn" disabled={noticeBusy || noticeRefreshing} onClick={() => loadNotices(true)}>{noticeRefreshing ? <><span className="notice-spinner" />Refreshing…</> : 'Refresh'}</button></div>
             {latestNotice ? <div className="notice-coverage-grid">
               <div className="notice-latest-card"><span className="eyebrow">Latest notice covered</span><h3>{latestNotice.title}</h3><p><b>{latestNotice.posted_by || 'Poster not recorded'}</b> · {formatDate(latestNotice.posted_at)}</p><small>{latestNotice.category} · {latestNotice.product}/{latestNotice.model}</small>{latestNotice.source_url && <a href={latestNotice.source_url} target="_blank" rel="noreferrer">Open this notice in ClickUp ↗</a>}</div>
               <div className="notice-stat"><span>Total stored</span><strong>{noticeList.length}</strong></div>
@@ -1121,7 +1136,7 @@ export default function Admin() {
             <div className="autosync-actions" style={{ marginTop: 12 }}>
               <button className="btn btn-primary" disabled={noticeBusy || !noticeFile} onClick={importNoticeFile}>{noticeBusy ? 'Working\u2026' : 'Upload & load'}</button>
               <button className="btn btn-secondary" disabled={noticeBusy} onClick={reindexNoticesNow}>Re-index only</button>
-              <button className="btn btn-secondary" disabled={noticeBusy} onClick={loadNotices}>Refresh list</button>
+              <button className="btn btn-secondary notice-refresh-btn" disabled={noticeBusy || noticeRefreshing} onClick={() => loadNotices(true)}>{noticeRefreshing ? <><span className="notice-spinner" />Refreshing…</> : 'Refresh list'}</button>
             </div>
             {noticeMsg && <p className="field-help" style={{ color: '#5fd08a' }}>{noticeMsg}</p>}
           </section>
@@ -1130,7 +1145,7 @@ export default function Admin() {
             <div className="autosync-grid">
               <div className="field-block"><label>ClickUp notice link</label><input value={pasteUrl} onChange={(e) => setPasteUrl(e.target.value)} placeholder="https://app.clickup.com/…/t/…" /></div>
               <div className="field-block"><label>Posted by</label><input value={pastePoster} onChange={(e) => setPastePoster(e.target.value)} placeholder="e.g. Preya Hossain" /></div>
-              <div className="field-block"><label>Date (YYYY-MM-DD)</label><input value={pasteDate} onChange={(e) => setPasteDate(e.target.value)} placeholder="2026-09-01" /></div>
+              <div className="field-block"><label>Posted date and time (GMT+6)</label><input type="datetime-local" value={pasteDate} onChange={(e) => setPasteDate(e.target.value)} /><div className="notice-date-shortcuts"><button type="button" onClick={() => setPasteDate(dhakaDateTimeInput())}>Now</button><button type="button" onClick={() => setPasteDate(dhakaDateTimeInput(-1))}>Yesterday</button></div></div>
             </div>
             <label style={{ marginTop: 12, display: 'block' }}>Notice text (and thread clarifications)</label>
             <textarea className="prompt-area" value={pasteText} onChange={(e) => setPasteText(e.target.value)} placeholder="Paste the full notice here…" />
