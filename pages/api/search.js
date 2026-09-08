@@ -632,6 +632,7 @@ export default async function handler(req, res) {
           hasNoticeEvidence = true;
           noticeEscalations = escalations || [];
           nMatches.forEach((m) => { if (m.meta) noticeMetaByAid[m.article_id] = m.meta; });
+          nMatches.sort((a, b) => (Date.parse(b.meta?.posted_at || 0) || 0) - (Date.parse(a.meta?.posted_at || 0) || 0));
           const noticeEvidence = nMatches.map((m) => ({
             id: `notice-${m.article_id}`,
             article_id: m.article_id,
@@ -657,9 +658,11 @@ export default async function handler(req, res) {
     const [basePrompt, brandRules, snippets] = await Promise.all([
       getPrompt(), getBrandingRules(), getRelevantSnippets(question)
     ]);
-    const context = matches.map((item, index) =>
-      `[${index + 1}] ${item.article_title}\nURL: ${item.article_url}\n${item.content}`
-    ).join('\n\n---\n\n');
+    const context = matches.map((item, index) => {
+      const nm = noticeMetaByAid[item.article_id];
+      const tag = nm ? `OFFICIAL NOTICE (dated ${String(nm.posted_at || '').slice(0, 10)}) - current policy, overrides older evidence:\n` : '';
+      return `[${index + 1}] ${tag}${item.article_title}\nURL: ${item.article_url}\n${item.content}`;
+    }).join('\n\n---\n\n');
     const snippetText = snippets.length
       ? '\n\nCORRECTIVE INSTRUCTIONS FROM APPROVED REVIEWS:\n' + snippets.map((item) => `- ${item.instruction}`).join('\n')
       : '';
@@ -703,7 +706,7 @@ export default async function handler(req, res) {
       ? '\n\nTONE: Respond professionally and directly. Do not add a generic empathy sentence.'
       : `\n\nTONE: The client appears ${emotion}. Begin with one brief, natural, professional acknowledgement appropriate to that emotion, then answer directly. Do not say you detected an emotion. Do not over-apologize, admit fault, promise an outcome, or change any policy fact. Empathy affects tone only.`;
     const noticesText = hasNoticeEvidence
-      ? '\n\nAUTHORITATIVE UPDATES: Some evidence items are official operational notices reflecting the LATEST policy. If any evidence conflicts, the notice OVERRIDES an older FAQ. Treat notice figures, dates, and conditions as current, and prefer them over any conflicting FAQ statement.'
+      ? '\n\nAUTHORITATIVE UPDATES: Some evidence items are official CEx notices marked "OFFICIAL NOTICE (dated ...)". They reflect the LATEST policy and OVERRIDE any older FAQ or older notice. You MUST follow these rules: (1) When evidence items conflict, follow ONLY the one with the most recent notice date. NEVER merge an older allowance with a newer restriction. (2) If a newer notice restricts, prohibits, or removes something an older item allowed, state the restriction and do NOT present the old allowance as still valid. (3) Honor every condition exactly as written - account size, purchase date, region, model. If the answer depends on a condition the customer did not state (for example WHEN the account was purchased), do NOT assume the permissive case: give the conditional outcome for each branch (for example: if purchased on or after the stated date ... ; if purchased before it ...). (4) Never soften a prohibition into "allowed with an add-on" unless the newest notice explicitly says so.'
       : '';
     const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText + noticesText +
       `\n\nAfter the customer-ready answer, add five private final lines. COVERAGE must contain exactly ${topicPlan.length} comma-separated values, one for each customer question in order:\n` +
