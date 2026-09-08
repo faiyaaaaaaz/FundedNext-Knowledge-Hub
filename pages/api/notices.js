@@ -5,7 +5,7 @@
 // ============================================================================
 import { authenticateRequest, supabaseAdmin, getKeys } from '../../lib/server';
 import {
-  isNoticeLabUser, importNoticesRag, reconcileNotices, reindexNotices,
+  isNoticeLabUser, importNoticesRag, reconcileNotices, reindexNotices, applyNoticeStatusFast, deleteNotice,
   listNotices, setNoticeStatus, saveNoticeEntry,
   getNoticesAccessConfig, setNoticesAccessConfig, extractNoticeFromText
 } from '../../lib/notices';
@@ -50,9 +50,13 @@ export default async function handler(req, res) {
       }
 
       if (body.action === 'set-status') {
-        await setNoticeStatus(body.entry_id, body.status, sb);
         const { openaiKey } = await getKeys();
-        await reindexNotices(sb, { openaiKey });
+        await applyNoticeStatusFast(body.entry_id, body.status, sb, { openaiKey });
+        return res.status(200).json({ ok: true });
+      }
+
+      if (body.action === 'delete') {
+        await deleteNotice(body.entry_id, sb);
         return res.status(200).json({ ok: true });
       }
 
