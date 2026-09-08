@@ -366,13 +366,25 @@ export default function Admin() {
       await loadNotices();
     } catch (e) { setError(e.message); } finally { setNoticeBusy(false); }
   };
+  const [noticeRowBusy, setNoticeRowBusy] = useState('');
   const setNoticeStatusNow = async (entry_id, status) => {
+    setNoticeRowBusy(entry_id);
     try {
       const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'set-status', entry_id, status }) });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Update failed.');
       setNotice('Notice updated.'); await loadNotices();
-    } catch (e) { setError(e.message); }
+    } catch (e) { setError(e.message); } finally { setNoticeRowBusy(''); }
+  };
+  const deleteNoticeNow = async (entry_id, title) => {
+    if (!window.confirm('Permanently delete this notice?\n\n"' + (title || entry_id) + '"\n\nThis removes it and its embedding for good. Use Expire instead if you might want it back.')) return;
+    setNoticeRowBusy(entry_id);
+    try {
+      const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'delete', entry_id }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Delete failed.');
+      setNotice('Notice deleted.'); await loadNotices();
+    } catch (e) { setError(e.message); } finally { setNoticeRowBusy(''); }
   };
   // --- Paste-a-notice + notices access state/handlers ---
   const [pasteText, setPasteText] = useState('');
@@ -950,7 +962,7 @@ export default function Admin() {
     return out;
   })();
   const pageIsLoading = loadingTab === tab || (settingsLoading && ['access', 'ai', 'keys'].includes(tab));
-  const latestNotice = noticeList.reduce((latest, item) => {
+  const latestNotice = noticeList.filter((n) => n.status === 'active').reduce((latest, item) => {
     if (!item?.posted_at) return latest;
     return !latest || new Date(item.posted_at) > new Date(latest.posted_at) ? item : latest;
   }, null);
@@ -1221,8 +1233,9 @@ export default function Admin() {
               <span className="sync-log-main"><b>{n.title}</b><small>{n.posted_by || 'Poster not recorded'} · {formatDate(n.posted_at)}</small><small>{n.category} · {n.product}/{n.model} · {n.topic_key}{n.requires_escalation ? ' \u00b7 escalation' : ''}</small></span>
               {n.source_url && <a className="btn btn-secondary" style={{ padding: '6px 10px' }} href={n.source_url} target="_blank" rel="noreferrer">Open</a>}
               {n.status === 'active'
-                ? <button className="btn btn-secondary" style={{ padding: '6px 10px' }} onClick={() => setNoticeStatusNow(n.entry_id, 'expired')}>Expire</button>
-                : <button className="btn btn-secondary" style={{ padding: '6px 10px' }} onClick={() => setNoticeStatusNow(n.entry_id, 'active')}>Reactivate</button>}
+                ? <button className="btn btn-secondary" style={{ padding: '6px 10px' }} disabled={noticeRowBusy === n.entry_id} onClick={() => setNoticeStatusNow(n.entry_id, 'expired')}>{noticeRowBusy === n.entry_id ? <><span className="notice-spinner" />…</> : 'Expire'}</button>
+                : <button className="btn btn-secondary" style={{ padding: '6px 10px' }} disabled={noticeRowBusy === n.entry_id} onClick={() => setNoticeStatusNow(n.entry_id, 'active')}>{noticeRowBusy === n.entry_id ? <><span className="notice-spinner" />…</> : 'Reactivate'}</button>}
+              <button className="btn btn-secondary" style={{ padding: '6px 10px', color: '#ff8a8a' }} disabled={noticeRowBusy === n.entry_id} onClick={() => deleteNoticeNow(n.entry_id, n.title)}>Delete</button>
             </div></div>)}{!visibleNotices.length && <div className="empty-admin">{noticeList.length ? 'No notices match this search and status.' : 'No notices loaded yet.'}</div>}</div>
           </section>
         </div>}
