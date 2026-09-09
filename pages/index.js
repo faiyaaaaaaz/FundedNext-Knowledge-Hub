@@ -304,9 +304,17 @@ export default function Home() {
     return { ...(json ? { 'Content-Type': 'application/json' } : {}), 'x-app-session': token };
   }
 
-  async function loadStats(token = session) {
+  useEffect(() => {
+    if (!session) return;
+    const refresh = () => { if (!document.hidden) loadStats(session, true); };
+    const interval = setInterval(refresh, 60000);
+    window.addEventListener('focus', refresh);
+    return () => { clearInterval(interval); window.removeEventListener('focus', refresh); };
+  }, [session]);
+
+  async function loadStats(token = session, background = false) {
     if (!token) return setStatsLoading(false);
-    setStatsLoading(true);
+    if (!background) setStatsLoading(true);
     try {
       const response = await fetch('/api/stats', { headers: { 'x-app-session': token } });
       if (response.status === 401) return logout();
@@ -515,11 +523,11 @@ export default function Home() {
             'Fetching every published article and comparing its ID and content fingerprint'
           ]
         } : {
-          headline: `Indexing ${status.queued} previously detected article change${status.queued === 1 ? '' : 's'}`,
+          headline: `Making saved updates searchable · ${status.queued} articles remaining`,
           details: [
             `Batch started at ${clock()}`,
-            `${status.queued} article${status.queued === 1 ? '' : 's'} already waiting in the saved queue`,
-            'Creating searchable sections and embeddings for this batch'
+            `${status.queued} pending articles from an earlier comparison (new and edited articles combined)`,
+            'This step processes saved updates; it does not discover new changes'
           ]
         });
 
@@ -537,7 +545,7 @@ export default function Home() {
           if (!response.ok) throw new Error(data.error || `Server ${response.status}`);
           failures = 0; processed += data.processed || 0; chunks += data.chunkCount || 0; batches += data.embeddingBatches || 0;
           loadStats();
-          const detail = data.phase === 'detecting'
+          const detail = data.phase === 'detecting' || data.comparisonConfirmed
             ? [
                 `Comparison completed at ${clock()}`,
                 `${data.scanned || 0} published Intercom articles compared`,
@@ -587,7 +595,7 @@ export default function Home() {
     } catch (error) {
       setSyncState({ headline: 'Sync stopped before article processing', details: ['No completion claim was recorded', error?.message || 'The saved queue could not be inspected', `Stopped at ${clock()}`] });
     } finally {
-      clearInterval(timerRef.current); setSyncing(false); loadStats();
+      clearInterval(timerRef.current); setSyncing(false); loadStats(); loadScopes();
     }
   }
 
@@ -630,7 +638,7 @@ export default function Home() {
             {!messages.length && <div className="welcome-state"><div className="assistant-orb"><Logo /></div><span className="status-chip">Source-backed assistance</span><h1>How can I help today?</h1><p>Ask about a policy, Account, Performance Reward, trading rule, or platform.</p><div className="suggestion-grid">{['How does trailing drawdown work?', 'Explain Performance Reward eligibility', 'What causes an Account breach?'].map((question) => <button key={question} onClick={() => send(question)}>{question}<span>↗</span></button>)}</div></div>}
             {messages.map((message, index) => message.role === 'user'
               ? <div className="message user-message" key={index}><div className="message-label">You</div><div className="user-bubble">{message.content}</div></div>
-              : <div className="message assistant-message" key={index}><div className="bot-avatar"><Logo /></div><div className={`assistant-bubble${message.error ? ' error-bubble' : ''}`}><div className="answer-head"><span>FundedNext assistant</span><div>{Number.isFinite(message.confidence) && <ConfidenceHealth score={message.confidence} label={message.confidenceLabel} reasons={message.confidenceReasons} />}<small>{message.fallback ? 'OpenAI backup' : message.provider === 'groq' ? 'Groq' : 'OpenAI'}</small>{message.fallback && <span className="fallback-flash" title="Every Groq attempt failed before this answer switched to GPT">⚡ Last-resort GPT</span>}{message.usedCalculator && <span className="calc-tag" title="This answer used trade-calculator logic">⚙ Calculator logic</span>}</div></div>{message.coverageSummary?.total > 1 && <div className="coverage-summary"><b>{message.coverageSummary.answered} of {message.coverageSummary.total} questions fully answered</b>{message.coverageSummary.partial > 0 && <span>{message.coverageSummary.partial} partially answered</span>}{message.coverageSummary.notConfirmed > 0 && <span className="needs-check">{message.coverageSummary.notConfirmed} requires manual confirmation</span>}</div>}{message.noticeConflict && <div className="notice-override"><b>CEx Notice applied</b><span>A relevant Notice was treated as higher authority than older FAQ information.</span></div>}{message.segments?.length ? <AttributedAnswer segments={message.segments} sources={message.sources} /> : <Answer text={message.content} />}<div className="answer-actions"><button onClick={() => copyAnswer(index, message.content)}>{copied === index ? '✓ Copied' : '⧉ Copy answer'}</button>{!message.error && message.queryLogId && <button className={message.feedback === 'helpful' ? 'feedback-selected' : ''} disabled={!!message.feedback || feedbackSaving[index]} onClick={() => rateAnswer(index, 'helpful')}>{message.feedback === 'helpful' ? '✓ Helpful' : '♡ Helpful'}</button>}{!message.error && message.queryLogId && <button className={message.feedback === 'great' ? 'feedback-selected great' : ''} disabled={!!message.feedback || feedbackSaving[index]} onClick={() => rateAnswer(index, 'great')}>{message.feedback === 'great' ? '✓ Great answer' : '☆ Great answer'}</button>}<button className={message.disputed ? 'disputed' : ''} disabled={message.disputed || message.error} onClick={() => { setDisputeIndex(index); setDisputeReason(''); setDisputeError(''); }}>{message.disputed ? '✓ Answer disputed' : '⚑ Dispute answer'}</button></div>{message.feedback && <div className="feedback-thanks">Thanks — this optional rating was saved to the answer log.</div>}{message.sources?.length > 0 && <div className="sources"><button className="sources-toggle" onClick={() => setOpenSources((current) => ({ ...current, [index]: !current[index] }))}><span>◆</span>{message.sources.length} verified source{message.sources.length > 1 ? 's' : ''}<b>{openSources[index] ? '−' : '+'}</b></button>{openSources[index] && <div className="sources-list">{message.sources.map((source, sourceIndex) => <SourcePreview key={sourceIndex} source={source} number={sourceIndex + 1} open={!!openExcerpts[`${index}-${sourceIndex}`]} onToggle={() => setOpenExcerpts((current) => ({ ...current, [`${index}-${sourceIndex}`]: !current[`${index}-${sourceIndex}`] }))} />)}</div>}</div>}</div></div>
+              : <div className="message assistant-message" key={index}><div className="bot-avatar"><Logo /></div><div className={`assistant-bubble${message.error ? ' error-bubble' : ''}`}><div className="answer-head"><span>FundedNext Assistant</span><div>{Number.isFinite(message.confidence) && <ConfidenceHealth score={message.confidence} label={message.confidenceLabel} reasons={message.confidenceReasons} />}<small>{message.fallback ? 'OpenAI backup' : message.provider === 'groq' ? 'Groq' : 'OpenAI'}</small>{message.fallback && <span className="fallback-flash" title="Every Groq attempt failed before this answer switched to GPT">⚡ Last-resort GPT</span>}{message.usedCalculator && <span className="calc-tag" title="This answer used trade-calculator logic">⚙ Calculator logic</span>}</div></div>{message.coverageSummary?.total > 1 && <div className="coverage-summary"><b>{message.coverageSummary.answered} of {message.coverageSummary.total} questions fully answered</b>{message.coverageSummary.partial > 0 && <span>{message.coverageSummary.partial} partially answered</span>}{message.coverageSummary.notConfirmed > 0 && <span className="needs-check">{message.coverageSummary.notConfirmed} requires manual confirmation</span>}</div>}{message.noticeConflict && <div className="notice-override"><b>CEx Notice applied</b><span>A relevant Notice was treated as higher authority than older FAQ information.</span></div>}{message.segments?.length ? <AttributedAnswer segments={message.segments} sources={message.sources} /> : <Answer text={message.content} />}<div className="answer-actions"><button onClick={() => copyAnswer(index, message.content)}>{copied === index ? '✓ Copied' : '⧉ Copy answer'}</button>{!message.error && message.queryLogId && <button className={message.feedback === 'helpful' ? 'feedback-selected' : ''} disabled={!!message.feedback || feedbackSaving[index]} onClick={() => rateAnswer(index, 'helpful')}>{message.feedback === 'helpful' ? '✓ Helpful' : '♡ Helpful'}</button>}{!message.error && message.queryLogId && <button className={message.feedback === 'great' ? 'feedback-selected great' : ''} disabled={!!message.feedback || feedbackSaving[index]} onClick={() => rateAnswer(index, 'great')}>{message.feedback === 'great' ? '✓ Great answer' : '☆ Great answer'}</button>}<button className={message.disputed ? 'disputed' : ''} disabled={message.disputed || message.error} onClick={() => { setDisputeIndex(index); setDisputeReason(''); setDisputeError(''); }}>{message.disputed ? '✓ Answer disputed' : '⚑ Dispute answer'}</button></div>{message.feedback && <div className="feedback-thanks">Thanks — this optional rating was saved to the answer log.</div>}{message.sources?.length > 0 && <div className="sources"><button className="sources-toggle" onClick={() => setOpenSources((current) => ({ ...current, [index]: !current[index] }))}><span>◆</span>{message.sources.length} verified source{message.sources.length > 1 ? 's' : ''}<b>{openSources[index] ? '−' : '+'}</b></button>{openSources[index] && <div className="sources-list">{message.sources.map((source, sourceIndex) => <SourcePreview key={sourceIndex} source={source} number={sourceIndex + 1} open={!!openExcerpts[`${index}-${sourceIndex}`]} onToggle={() => setOpenExcerpts((current) => ({ ...current, [`${index}-${sourceIndex}`]: !current[`${index}-${sourceIndex}`] }))} />)}</div>}</div>}</div></div>
             )}
             {loading && <div className="message assistant-message"><div className="bot-avatar thinking-avatar"><Logo /></div><div className="assistant-bubble thinking-card"><div className="thinking-head"><span className="knowledge-scan" aria-hidden="true"><i /><i /><i /><b /></span><div><b>Building a verified answer</b><small>Working only within {scopeProduct.toUpperCase()} · {selectedModelName}</small></div><span className="thinking-live"><i /> Live</span></div><div className="thinking-current" aria-live="polite"><i /><span key={thinkingStep}>{THINKING_STEPS[thinkingStep]}</span></div><div className="thinking-skeleton"><i /><i /><i /></div></div></div>}
           </div>
@@ -647,9 +655,9 @@ export default function Home() {
             <div className="metric-card model-card"><span>Answering model</span><strong>{stats?.answerProvider === 'groq' ? 'Groq' : 'OpenAI'}</strong><small>{stats?.answerModel || 'Unavailable'}</small><em>{role === 'admin' ? 'Automatic GPT fallback: on (admin only)' : 'Automatic fallback is off'}</em></div>
             <div className="metric-card primary"><span>Published articles</span><strong>{stats?.totalArticles?.toLocaleString() ?? '—'}</strong><small>Total articles stored and available</small></div>
             <div className="metric-grid"><div className="metric-card"><span>Indexed</span><strong>{stats?.indexedArticles?.toLocaleString() ?? '—'}</strong></div><div className="metric-card"><span>Queued</span><strong>{stats?.queuedArticles?.toLocaleString() ?? '—'}</strong></div></div>
-            <div className="metric-card"><span>Searchable sections</span><strong>{stats?.totalChunks?.toLocaleString() ?? '—'}</strong><small>Focused pieces used for retrieval</small></div>
-            <div className="metric-card update-time"><span>Last knowledge update</span><strong>{formatDhaka(stats?.lastUpdatedAt)}</strong>{stats?.lastSyncAt && <small className="sync-ago"><span className="live-dot tiny" />Auto-synced {timeAgo(stats.lastSyncAt)}{stats?.lastSyncSummary?.changed ? ` · ${stats.lastSyncSummary.changed} updated` : ' · no changes'}</small>}</div>
-            <div className="metric-card update-time"><span>Last notices update</span><strong>{stats?.noticesUpdatedAt ? formatDhaka(stats.noticesUpdatedAt) : 'Not loaded yet'}</strong><small>Manual updates only</small></div>
+            <div className="metric-card sections-metric"><span>▦ Searchable passages</span><strong>{stats?.totalChunks?.toLocaleString() ?? '—'}</strong><small>Focused pieces used for retrieval</small></div>
+            <div className="metric-card update-time knowledge-time"><span>↻ Knowledge updates</span><strong>{stats?.lastUpdatedAt ? formatDhaka(stats.lastUpdatedAt) : 'No content update recorded'}</strong><small>Last article content indexed</small>{stats?.lastSyncAt && <small>Last automatic check: {formatDhaka(stats.lastSyncAt)} · {Number(stats?.lastSyncSummary?.indexed || 0)} articles indexed · {Number(stats?.lastSyncSummary?.changed || 0)} changes detected</small>}</div>
+            <div className="metric-card update-time notice-time"><span>▤ Latest CEx Notice covered</span>{stats?.latestNotice ? <><strong>{stats.latestNotice.title}</strong><small>{stats.latestNotice.posted_by || 'Author not recorded'}</small><small>Posted: {formatDhaka(stats.latestNotice.posted_at)}</small>{/^https?:\/\//i.test(stats.latestNotice.source_url || '') && <a href={stats.latestNotice.source_url} target="_blank" rel="noreferrer">Open Notice ↗</a>}</> : <small>No Notice available for this account</small>}<small>Search index refreshed: {stats?.noticesUpdatedAt ? formatDhaka(stats.noticesUpdatedAt) : 'Not recorded'}</small></div>
             {role === 'admin' && <div className="metric-card dispute-metric"><span>Pending disputes</span><strong>{stats?.pendingDisputes ?? '—'}</strong><Link href="/admin">Review in Admin →</Link></div>}
             <div className="rail-tip"><b>Confidence guide</b><p><span className="dot high" />85–100: strong direct support</p><p><span className="dot medium" />65–84: review suggested</p><p><span className="dot low" />Below 65: verify carefully</p></div>
           </>}
