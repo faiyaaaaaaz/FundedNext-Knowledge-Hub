@@ -252,6 +252,7 @@ export default function Home() {
   const [syncing, setSyncing] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
   const [syncState, setSyncState] = useState({ headline: 'Knowledge base', details: [] });
+  const [syncProgress, setSyncProgress] = useState({ phase: 'idle', processed: 0, remaining: null, scanned: null, newFound: null, updatedFound: null, deleted: null, titles: [] });
   const [elapsed, setElapsed] = useState(0);
   const [disputeIndex, setDisputeIndex] = useState(null);
   const [disputeReason, setDisputeReason] = useState('');
@@ -501,6 +502,7 @@ export default function Home() {
     setSyncing(true); setSyncOpen(true); cancelRef.current = false; setElapsed(0);
     const started = Date.now();
     let processed = 0, chunks = 0, batches = 0, failures = 0, changedDetectionPasses = 0;
+    setSyncProgress({ phase: 'checking', processed: 0, remaining: null, scanned: null, newFound: null, updatedFound: null, deleted: null, titles: [] });
     const clock = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     setSyncState({ headline: 'Inspecting the saved sync queue', details: [`Started at ${clock()}`, 'No article comparison has run yet'] });
     timerRef.current = setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
@@ -515,6 +517,7 @@ export default function Home() {
         if (statusResponse.status === 401) { logout(); break; }
         if (!statusResponse.ok) throw new Error(status.error || 'Could not inspect the sync queue.');
         const activePhase = status.phase;
+        setSyncProgress((current) => ({ ...current, phase: activePhase, remaining: status.queued }));
         setSyncState(activePhase === 'detecting' ? {
           headline: 'Comparing Intercom with the saved knowledge base',
           details: [
@@ -544,6 +547,7 @@ export default function Home() {
           if (response.status === 401) { logout(); break; }
           if (!response.ok) throw new Error(data.error || `Server ${response.status}`);
           failures = 0; processed += data.processed || 0; chunks += data.chunkCount || 0; batches += data.embeddingBatches || 0;
+          setSyncProgress((current) => ({ ...current, phase: data.done ? 'complete' : data.phase, processed, remaining: data.remaining ?? current.remaining, scanned: data.scanned ?? current.scanned, newFound: data.scanned != null ? (current.newFound || 0) + (data.newFound || 0) : current.newFound, updatedFound: data.scanned != null ? (current.updatedFound || 0) + (data.updatedFound || 0) : current.updatedFound, deleted: data.scanned != null ? (current.deleted || 0) + (data.deleted || 0) : current.deleted, titles: data.sampleTitles?.length ? data.sampleTitles : current.titles }));
           loadStats();
           const detail = data.phase === 'detecting' || data.comparisonConfirmed
             ? [
@@ -630,7 +634,7 @@ export default function Home() {
     <main className="app-shell">
       <header className="app-header"><Brand /><div className="header-actions">{identity.name && <div className="user-identity"><b>{identity.name}</b><small>{identity.email}</small></div>}{!identity.name && <span className="role-badge">{role}</span>}<button className="header-action" onClick={toggleTheme} aria-label="Change theme"><span>{theme === 'dark' ? '☀' : '☾'}</span><b>{theme === 'dark' ? 'Light mode' : 'Dark mode'}</b></button>{role === 'admin' && <Link className="btn btn-secondary btn-small" href="/admin">Admin console</Link>}<button className="header-action" onClick={logout} aria-label="Sign out"><span>⏻</span><b>Sign out</b></button></div></header>
 
-      {role === 'admin' && <div className={`sync-console ${syncOpen ? 'expanded' : ''}`}><div className="sync-summary"><div className="sync-headline"><span className={`sync-activity ${syncing ? 'working' : ''}`} aria-hidden="true"><i /><i /><i /></span><div><b>{syncState.headline}</b><small>{syncing ? `Syncing · ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')} elapsed` : 'Knowledge base ready'}</small></div></div><div className="row"><button className="text-button neutral" onClick={() => setSyncOpen(!syncOpen)}>{syncOpen ? 'Hide details' : 'View details'}</button><button className="btn btn-secondary btn-small" onClick={checkUpdates} disabled={syncing}>{syncing ? 'Syncing…' : 'Check for updates'}</button>{syncing && <button className="text-button" onClick={() => { cancelRef.current = true; abortRef.current?.abort(); }}>Cancel</button>}</div></div>{syncOpen && <div className="sync-details">{syncState.details.map((detail, index) => <div key={index} className={`sync-step ${syncing ? 'pending' : ''}`}><span className="tick">{syncing ? index + 1 : '✓'}</span><span className="detail">{detail}</span></div>)}</div>}</div>}
+      {role === 'admin' && <div className={`sync-console ${syncOpen ? 'expanded' : ''}`}><div className="sync-summary"><div className="sync-headline"><span className={`sync-activity ${syncing ? 'working' : ''}`} aria-hidden="true"><i /><i /><i /></span><div><b>{syncState.headline}</b><small>{syncing ? `Syncing · ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')} elapsed` : 'Knowledge base ready'}</small></div></div><div className="row"><button className="text-button neutral" onClick={() => setSyncOpen(!syncOpen)}>{syncOpen ? 'Hide details' : 'View details'}</button><button className="btn btn-secondary btn-small" onClick={checkUpdates} disabled={syncing}>{syncing ? 'Syncing…' : 'Check for updates'}</button>{syncing && <button className="text-button" onClick={() => { cancelRef.current = true; abortRef.current?.abort(); }}>Cancel</button>}</div></div>{syncOpen && <div className="sync-overview"><div className="sync-counts">{[['Articles checked', syncProgress.scanned], ['New articles found', syncProgress.newFound], ['Edits found', syncProgress.updatedFound], ['Removed', syncProgress.deleted], ['Made searchable this run', syncProgress.processed], ['Still queued', syncProgress.remaining]].map(([label, value]) => <div key={label}><strong>{value ?? '—'}</strong><span>{label}</span></div>)}</div><div className="sync-overview-columns"><section><h3>{syncing ? 'In progress' : syncProgress.phase === 'complete' ? 'Verification complete' : 'Sync status'}</h3>{syncState.details.map((detail, index) => <p key={index}>{detail}</p>)}<small>— means this run has not measured it yet. Queued articles can include updates found in earlier runs.</small></section><section><h3>Most recent completed batch</h3>{syncProgress.titles.length ? <ul>{syncProgress.titles.map((title, index) => <li key={index}>{title}</li>)}</ul> : <p>No batch completed in this run yet.</p>}</section></div></div>}</div>}
 
       <div className="workspace-grid">
         <section className="assistant-card">
@@ -656,7 +660,7 @@ export default function Home() {
             <div className="metric-card primary"><span>Published articles</span><strong>{stats?.totalArticles?.toLocaleString() ?? '—'}</strong><small>Total articles stored and available</small></div>
             <div className="metric-grid"><div className="metric-card"><span>Indexed</span><strong>{stats?.indexedArticles?.toLocaleString() ?? '—'}</strong></div><div className="metric-card"><span>Queued</span><strong>{stats?.queuedArticles?.toLocaleString() ?? '—'}</strong></div></div>
             <div className="metric-card sections-metric"><span>▦ Searchable passages</span><strong>{stats?.totalChunks?.toLocaleString() ?? '—'}</strong><small>Focused pieces used for retrieval</small></div>
-            <div className="metric-card update-time knowledge-time"><span>↻ Knowledge updates</span><strong>{stats?.lastUpdatedAt ? formatDhaka(stats.lastUpdatedAt) : 'No content update recorded'}</strong><small>Last article content indexed</small>{stats?.lastSyncAt && <small>Last automatic check: {formatDhaka(stats.lastSyncAt)} · {Number(stats?.lastSyncSummary?.indexed || 0)} articles indexed · {Number(stats?.lastSyncSummary?.changed || 0)} changes detected</small>}</div>
+            <div className="metric-card update-time knowledge-time"><span>↻ Latest FAQ synced</span>{stats?.latestFaq ? <><strong>{stats.latestFaq.title || 'Untitled FAQ'}</strong><small>Synced: {formatDhaka(stats.latestFaq.last_indexed_at)}</small><small>Article updated: {stats.latestFaq.updated_at ? formatDhaka(typeof stats.latestFaq.updated_at === 'number' ? stats.latestFaq.updated_at * 1000 : stats.latestFaq.updated_at) : 'Not recorded'}</small>{/^https?:\/\//i.test(stats.latestFaq.url || '') && <a href={stats.latestFaq.url} target="_blank" rel="noreferrer">Open FAQ ↗</a>}<small>One article from the latest completed batch.</small></> : <small>No completed FAQ sync recorded.</small>}{stats?.lastSyncAt && <small>Last automatic check: {formatDhaka(stats.lastSyncAt)}</small>}</div>
             <div className="metric-card update-time notice-time"><span>▤ Latest CEx Notice covered</span>{stats?.latestNotice ? <><strong>{stats.latestNotice.title}</strong><small>{stats.latestNotice.posted_by || 'Author not recorded'}</small><small>Posted: {formatDhaka(stats.latestNotice.posted_at)}</small>{/^https?:\/\//i.test(stats.latestNotice.source_url || '') && <a href={stats.latestNotice.source_url} target="_blank" rel="noreferrer">Open Notice ↗</a>}</> : <small>No Notice available for this account</small>}<small>Search index refreshed: {stats?.noticesUpdatedAt ? formatDhaka(stats.noticesUpdatedAt) : 'Not recorded'}</small></div>
             {role === 'admin' && <div className="metric-card dispute-metric"><span>Pending disputes</span><strong>{stats?.pendingDisputes ?? '—'}</strong><Link href="/admin">Review in Admin →</Link></div>}
             <div className="rail-tip"><b>Confidence guide</b><p><span className="dot high" />85–100: strong direct support</p><p><span className="dot medium" />65–84: review suggested</p><p><span className="dot low" />Below 65: verify carefully</p></div>
