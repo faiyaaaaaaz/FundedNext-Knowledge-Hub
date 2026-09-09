@@ -283,7 +283,7 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 
 /* Answer typography — natural spacing so copy/paste is clean */
 .answer { font-family: var(--answer-font); font-size: 15.5px; font-weight: 400; line-height: 1.82; letter-spacing: 0; word-spacing: normal; color: var(--ink-2); }
-.answer p { margin: 0 0 15px; }
+.answer p { margin: 0 0 11px; }
 .answer p:last-child, .answer ul:last-child, .answer ol:last-child { margin-bottom: 0; }
 .answer ol, .answer ul { margin: 8px 0 16px; padding-left: 24px; }
 .answer li { margin: 7px 0; padding-left: 4px; }
@@ -334,7 +334,7 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 /* Per-paragraph source citations. The number is drawn with CSS content and the
    whole chip + tooltip is user-select:none, so citations are never copied — not
    by the Copy button, not by a manual drag-select. Hover/tap reveals the source. */
-.answer-seg:not(:last-child) { margin-bottom: 15px; }
+.answer-seg:not(:last-child) { margin-bottom: 11px; }
 .seg-cites { display: inline-flex; gap: 3px; margin-left: 5px; user-select: none; -webkit-user-select: none; white-space: nowrap; }
 .cites-row { margin: 6px 0 0 !important; }
 .seg-cite { position: relative; display: inline-grid; place-items: center; min-width: 17px; height: 17px; padding: 0 5px; border-radius: 6px; background: var(--violet-soft); color: var(--violet-ink); text-decoration: none; font: 700 10px/1 var(--display); vertical-align: super; cursor: pointer; user-select: none; -webkit-user-select: none; transition: background .14s, transform .14s, box-shadow .14s; }
@@ -490,6 +490,13 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .rail-head small { color: var(--muted); font-size: 10px; }
 .metric-card { margin-bottom: 11px; padding: 16px; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); transition: transform .18s, box-shadow .18s; }
 .metric-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-sm); }
+.metric-card { min-width: 0; overflow-wrap: anywhere; }
+.metric-card.model-card { border-top: 3px solid var(--violet); background: color-mix(in srgb, var(--violet) 7%, var(--surface)); }
+.metric-card.storage-health-card { border-top: 3px solid var(--success); }
+.metric-card.sections-metric { border-left: 3px solid var(--violet); background: color-mix(in srgb, var(--violet) 5%, var(--surface)); }
+.metric-card.knowledge-time { border-left: 3px solid var(--success); background: color-mix(in srgb, var(--success) 5%, var(--surface)); }
+.metric-card.notice-time { border-left: 3px solid var(--warn); background: color-mix(in srgb, var(--warn) 6%, var(--surface)); }
+.metric-card.notice-time a { margin-top: 9px; color: var(--violet); font-size: 12px; }
 .metric-card > span { color: var(--faint); font: 800 9px/1.3 var(--display); letter-spacing: .1em; text-transform: uppercase; }
 .metric-card strong { margin-top: 6px; font: 800 24px/1 var(--display); letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
 .metric-card small { margin-top: 7px; color: var(--muted); font-size: 10px; line-height: 1.5; }
