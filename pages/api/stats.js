@@ -13,7 +13,7 @@ export default async function handler(req, res) {
       sb.from('articles').select('*', { count: 'exact', head: true }),
       sb.from('articles').select('*', { count: 'exact', head: true }).eq('needs_index', true),
       sb.from('chunks').select('*', { count: 'exact', head: true }),
-      sb.from('articles').select('last_indexed_at').not('last_indexed_at', 'is', null).order('last_indexed_at', { ascending: false }).limit(1),
+      sb.from('articles').select('intercom_id,title,url,updated_at,last_indexed_at').not('last_indexed_at', 'is', null).order('last_indexed_at', { ascending: false }).order('intercom_id', { ascending: true }).limit(1),
       sb.from('disputes').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
       getKeys(),
       getLastSyncMarkers(sb),
@@ -23,12 +23,19 @@ export default async function handler(req, res) {
     const healthRow = Array.isArray(databaseHealth.data) ? databaseHealth.data[0] : databaseHealth.data;
     const databaseBytes = Number(healthRow?.database_bytes || 0);
     const databaseLimitBytes = Number(healthRow?.database_limit_bytes || 0);
+    const latestFaq = latest.data?.[0] || null;
+    if (latestFaq?.updated_at) {
+      const raw = latestFaq.updated_at;
+      const date = /^\d+$/.test(String(raw)) ? new Date(Number(raw) * (Number(raw) < 1e12 ? 1000 : 1)) : new Date(raw);
+      latestFaq.updated_at = Number.isNaN(date.getTime()) ? null : date.toISOString();
+    }
     return res.status(200).json({
       totalArticles: articles.count || 0,
       queuedArticles: queued.count || 0,
       indexedArticles: Math.max(0, (articles.count || 0) - (queued.count || 0)),
       totalChunks: chunks.count || 0,
       lastUpdatedAt: latest.data?.[0]?.last_indexed_at || null,
+      latestFaq,
       noticesUpdatedAt: noticesUpdated?.data?.value || null,
       latestNotice: noticeResult?.data?.[0] || null,
       lastSyncAt: syncMarkers.lastAutoSyncAt || null,
