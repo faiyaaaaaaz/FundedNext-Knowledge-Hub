@@ -7,6 +7,8 @@ import {
 } from '../../lib/server';
 import { retrieveNotices, noticesAccess } from '../../lib/notices';
 
+export const config = { maxDuration: 60 };
+
 const STOP = new Set([
   'the','a','an','of','to','in','on','for','and','or','is','are','was','were','how','much','many',
   'can','could','i','you','your','my','me','do','does','did','what','when','where','which','with',
@@ -97,9 +99,9 @@ function cleanAnswer(raw) {
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
-  if (/knowledge\s*base|provided\s+(?:FAQ\s+)?(?:excerpts?|context|information)|the\s+FAQ\s+(?:does\s+not|doesn't)\s+(?:mention|specify|confirm)/i.test(answer)) {
-    answer = SAFE_UNCONFIRMED;
-  }
+  // Reword internal evidence references without discarding supported paragraphs.
+  answer = answer.replace(/(?:the\s+FAQ|the\s+knowledge\s*base|the\s+provided\s+(?:FAQ\s+)?(?:excerpts?|context|information))\s+(?:does\s+not|doesn't)\s+(?:mention|specify|confirm)[^.?!]*[.?!]?/gi, 'This specific detail needs to be confirmed.')
+    .replace(/(\d)[ \t]+%/g, '$1%');
   return answer || SAFE_UNCONFIRMED;
 }
 
@@ -687,7 +689,7 @@ export default async function handler(req, res) {
     const multiPartText = multiPart
       ? '\n\nThis question has several parts. Answer them in this exact order and do not merge topics:\n' +
         topicPlan.map((topic, index) => `${index + 1}. ${topic.question}`).join('\n') +
-        '\nAnswer every part the evidence supports, each as its own clearly separated numbered point. For any single part you cannot verify from the evidence, say only that that specific part needs checking — do not refuse or defer the entire answer because one part is unverified.'
+        '\nAnswer each supported concern in its own short natural paragraph. Use varied, brief transitions such as "Regarding your withdrawal," or "As for opening another trade," only where useful. Do not mechanically number the answers or repeat the same introductory phrase. Keep everything plain text. For an unsupported part, say only that the specific detail needs checking; do not defer the entire answer.'
       : '';
     // Exact computed results are provided as evidence — reproduce them verbatim.
     const calcMergeText = calcResults.length
@@ -843,7 +845,7 @@ export default async function handler(req, res) {
     let raw = completion.content;
     // Correct the occasional whole-answer refusal when at least part of a
     // multi-part question has evidence. Genuine no-evidence cases are not retried.
-    if (cleanAnswer(raw) === SAFE_UNCONFIRMED && matches.length) {
+    if ((cleanAnswer(raw) === SAFE_UNCONFIRMED || (cleanAnswer(raw).length < 300 && /(?:unable|cannot|can't|could not).{0,65}(?:confirm|answer)|allow me some time|please.*time.*verify/i.test(cleanAnswer(raw)))) && matches.length) {
       partialAnswerRetryAttempted = true;
       const retrySystem = system +
         '\n\nREQUIRED PARTIAL-ANSWER RECOVERY: The first draft refused despite relevant evidence. ' +
@@ -935,7 +937,7 @@ export default async function handler(req, res) {
     const validCoverage = new Set(['answered', 'partial', 'not_confirmed']);
     let coverageStatuses = String(coverageLine?.[1] || '').toLowerCase().split(',').map((item) => item.trim().replace(/[ -]+/g, '_')).filter((item) => validCoverage.has(item));
     if (coverageStatuses.length !== topicPlan.length) {
-      const fallbackStatus = answer === SAFE_UNCONFIRMED ? 'not_confirmed' : (sources.length ? 'answered' : 'not_confirmed');
+      const fallbackStatus = 'not_confirmed';
       coverageStatuses = topicPlan.map(() => fallbackStatus);
     }
     const questionCoverage = topicPlan.map((topic, index) => ({ question: topic.question, status: coverageStatuses[index] }));
