@@ -213,7 +213,7 @@ export default async function handler(req, res) {
     const selectedProduct = ['cfd', 'futures', 'both'].includes(req.body?.scope?.product) ? req.body.scope.product : 'cfd';
     const selectedModelSlug = String(req.body?.scope?.model || 'all');
     const selectedModelFromUi = selectedModelSlug === 'all' ? null : scopeCatalog.models.find((item) =>
-      item.slug === selectedModelSlug && item.status !== 'review' && (selectedProduct === 'both' || item.product === selectedProduct)
+      item.slug === selectedModelSlug && ['current','previous'].includes(item.status) && (selectedProduct === 'both' || item.product === selectedProduct)
     );
     if (selectedModelSlug !== 'all' && !selectedModelFromUi) {
       return res.status(200).json({
