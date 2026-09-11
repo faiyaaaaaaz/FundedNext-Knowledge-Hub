@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import Link from 'next/link';
 import { getSupabaseBrowser } from '../lib/supabaseBrowser';
+import {WorkspaceSidebar, WorkspaceTour} from '../components/Workspace';
 
 const THINKING_STEPS = [
   'Understanding the question',
@@ -276,7 +277,7 @@ export default function Home() {
       setIdentity({ name: localStorage.getItem('appName') || '', email: localStorage.getItem('appEmail') || '' });
       loadStats(savedSession); loadScopes(savedSession);
     } else completeGoogleLogin();
-    const savedTheme = localStorage.getItem('theme') || 'dark';
+    const savedTheme = localStorage.getItem('theme') || 'light';
     setTheme(savedTheme); document.documentElement.setAttribute('data-theme', savedTheme);
     return () => { timerRef.current && clearInterval(timerRef.current); thinkingRef.current && clearInterval(thinkingRef.current); };
   }, []);
@@ -307,7 +308,7 @@ export default function Home() {
 
   useEffect(() => {
     if (!session) return;
-    const refresh = () => { if (!document.hidden) loadStats(session, true); };
+    const refresh = () => { if (!document.hidden) { loadStats(session, true); refreshScopeCatalog(session); } };
     const interval = setInterval(refresh, 60000);
     window.addEventListener('focus', refresh);
     return () => { clearInterval(interval); window.removeEventListener('focus', refresh); };
@@ -337,6 +338,13 @@ export default function Home() {
     } catch {}
   }
 
+  async function refreshScopeCatalog(token) {
+    try {
+      const response=await fetch('/api/scopes',{headers:{'x-app-session':token}});
+      if(response.ok){const data=await response.json();setScopeCatalog(data.catalog||{products:[],models:[]});}
+    } catch { /* Keep the last verified catalogue during a transient outage. */ }
+  }
+
   async function saveScope(product, model = 'all') {
     setScopeProduct(product); setScopeModel(model); setScopeNotice(null);
   }
@@ -361,12 +369,16 @@ export default function Home() {
     if (!client) return;
     setLoggingIn(true);
     try {
+      // Only exchange a Google callback here; never silently recreate an
+      // expired/revoked app session from an older Supabase browser session.
+      if (!sessionStorage.getItem('workspaceGooglePending')) return;
       const { data } = await client.auth.getSession();
       if (!data.session?.access_token) return;
       const response = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ googleAccessToken: data.session.access_token }) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Google sign-in was not accepted.');
       storeLogin(result);
+      sessionStorage.removeItem('workspaceGooglePending');
     } catch (error) { setLoginError(error.message); } finally { setLoggingIn(false); }
   }
 
@@ -374,7 +386,8 @@ export default function Home() {
     const client = getSupabaseBrowser();
     if (!client) return setLoginError('Google sign-in is not configured yet. Ask an Admin to finish setup.');
     setLoginError('');
-    const { error } = await client.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.origin } });
+    sessionStorage.setItem('workspaceGooglePending','1');
+    const { error } = await client.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.origin, queryParams: {prompt:'select_account'} } });
     if (error) setLoginError(error.message);
   }
 
@@ -634,7 +647,9 @@ export default function Home() {
   const scopeIsDefault = savedScope.product === scopeProduct && savedScope.model === scopeModel;
 
   return (
-    <main className="app-shell">
+    <main className="app-shell workspace-v2">
+      <WorkspaceSidebar session={session} role={role} busy={loading} refreshKey={messages.length} onNew={()=>{setMessages([]);setClarification(null);setInput('');}} onOpen={item=>{setMessages([{role:'user',content:item.question},{role:'assistant',question:item.question,content:item.answer,sources:item.sources,confidence:item.confidence,provider:item.provider,queryLogId:item.id,feedback:item.feedback,error:item.incomplete,selectedScope:item.scope}]);setOpenSources({});setOpenExcerpts({});}} />
+      <WorkspaceTour session={session} blocked={entryChecking||!!workspaceEntry||!!acknowledgementError||!!clarification||loading} hasAnswer={messages.some(m=>m.role==='assistant'&&!m.error&&!!m.queryLogId)} />
       <header className="app-header"><Brand /><div className="header-actions">{identity.name && <div className="user-identity"><b>{identity.name}</b><small>{identity.email}</small></div>}{!identity.name && <span className="role-badge">{role}</span>}<button className="header-action" onClick={toggleTheme} aria-label="Change theme"><span>{theme === 'dark' ? '☀' : '☾'}</span><b>{theme === 'dark' ? 'Light mode' : 'Dark mode'}</b></button>{role === 'admin' && <Link className="btn btn-secondary btn-small" href="/admin">Admin console</Link>}<button className="header-action" onClick={logout} aria-label="Sign out"><span>⏻</span><b>Sign out</b></button></div></header>
 
       {role === 'admin' && <div className={`sync-console ${syncOpen ? 'expanded' : ''}`}><div className="sync-summary"><div className="sync-headline"><span className={`sync-activity ${syncing ? 'working' : ''}`} aria-hidden="true"><i /><i /><i /></span><div><b>{syncState.headline}</b><small>{syncing ? `Syncing · ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')} elapsed` : 'Knowledge base ready'}</small></div></div><div className="row"><button className="text-button neutral" onClick={() => setSyncOpen(!syncOpen)}>{syncOpen ? 'Hide details' : 'View details'}</button><button className="btn btn-secondary btn-small" onClick={checkUpdates} disabled={syncing}>{syncing ? 'Syncing…' : 'Check for updates'}</button>{syncing && <button className="text-button" onClick={() => { cancelRef.current = true; abortRef.current?.abort(); }}>Cancel</button>}</div></div>{syncOpen && <div className="sync-overview"><div className="sync-counts">{[['Articles checked', syncProgress.scanned], ['New articles found', syncProgress.newFound], ['Edits found', syncProgress.updatedFound], ['Removed', syncProgress.deleted], ['Made searchable this run', syncProgress.processed], ['Still queued', syncProgress.remaining]].map(([label, value]) => <div key={label}><strong>{value ?? '—'}</strong><span>{label}</span></div>)}</div><div className="sync-overview-columns"><section><h3>{syncing ? 'In progress' : syncProgress.phase === 'complete' ? 'Verification complete' : 'Sync status'}</h3>{syncState.details.map((detail, index) => <p key={index}>{detail}</p>)}<small>— means this run has not measured it yet. Queued articles can include updates found in earlier runs.</small></section><section><h3>Most recent completed batch</h3>{syncProgress.titles.length ? <ul>{syncProgress.titles.map((title, index) => <li key={index}>{title}</li>)}</ul> : <p>No batch completed in this run yet.</p>}</section></div></div>}</div>}
