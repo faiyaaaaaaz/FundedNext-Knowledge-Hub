@@ -1,7 +1,7 @@
 import {
   authenticateRequest, getKeys, getPrompt, supabaseAdmin, openaiEmbed,
   openaiChatDetailed, getBrandingRules, brandingInstructions,
-  applyBrandingReplacements, getRelevantSnippets, logActivity,
+  applyBrandingReplacements, getRelevantSnippets, logActivity as createActivity,
   expandConcepts, clarifyQuery, correctTypos, runCalculators,
   getGroqKeys, verifyGrounding, getPublishedScopeCatalog, modelsMentioned, getArticleScopeOverrides
 } from '../../lib/server';
@@ -101,7 +101,8 @@ function cleanAnswer(raw) {
 
   // Reword internal evidence references without discarding supported paragraphs.
   answer = answer.replace(/(?:the\s+FAQ|the\s+knowledge\s*base|the\s+provided\s+(?:FAQ\s+)?(?:excerpts?|context|information))\s+(?:does\s+not|doesn't)\s+(?:mention|specify|confirm)[^.?!]*[.?!]?/gi, 'This specific detail needs to be confirmed.')
-    .replace(/(\d)[ \t]+%/g, '$1%');
+    .replace(/(\d)[ \t]+%/g, '$1%')
+    .replace(/([$€£]\s*\d[\d,.]*)[ \t]+([KMB])\b/g, '$1$2');
   return answer || SAFE_UNCONFIRMED;
 }
 
@@ -135,12 +136,34 @@ export default async function handler(req, res) {
   let usedGroqKey = null;
   let partialAnswerRetryAttempted = false;
   let partialAnswerRetrySucceeded = false;
+  let requestLogId = null;
+  let requestMetadata = {};
+  async function logActivity(entry) {
+    if (!requestLogId) return createActivity(entry);
+    requestMetadata = { ...requestMetadata, ...(entry.metadata || {}) };
+    const row = { metadata: requestMetadata };
+    for (const [key, column] of Object.entries({ provider: 'provider', model: 'model', inputTokens: 'input_tokens', outputTokens: 'output_tokens', estimatedCost: 'estimated_cost', success: 'success', questionWordCount: 'question_word_count' })) {
+      if (entry[key] !== undefined) row[column] = entry[key];
+    }
+    const { error } = await supabaseAdmin().from('activity_logs').update(row).eq('id', requestLogId);
+    if (error) console.error('Query log update failed', requestLogId);
+    return requestLogId;
+  }
   try {
     access = await authenticateRequest(req);
     if (!access) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
 
     const question = String(req.body?.question || '').trim().slice(0, 20000);
     if (!question) return res.status(400).json({ error: 'Please type a question.' });
+    requestMetadata = { question, selectedProduct: req.body?.scope?.product || '', selectedModel: req.body?.scope?.model || '', status: 'processing', stage: 'Preparing request', durationMs: 0 };
+    requestLogId = await createActivity({ actorRole: access.role, sessionId: access.sessionId, userName: access.name, userEmail: access.email, authProvider: access.authProvider, eventType: 'query', success: false, questionWordCount: wordCount(question), metadata: requestMetadata });
+    if (!requestLogId) return res.status(503).json({ error: 'The request could not be recorded. Please try again.' });
+    const sendJson = res.json.bind(res);
+    res.json = async (body) => {
+      const failed = res.statusCode >= 400;
+      await logActivity({ success: !failed, metadata: { status: failed ? 'failed' : 'completed', stage: failed ? requestMetadata.stage : 'Finished', durationMs: Date.now() - started, ...(body.error ? { error: body.error } : {}), ...(body.answer ? { answer: body.answer } : {}), ...(body.clarifyingQuestion ? { answer: body.clarifyingQuestion } : {}), ...(body.notice ? { answer: body.notice } : {}) } });
+      return sendJson({ ...body, queryLogId: requestLogId });
+    };
 
     const { openaiKey, groqKey, chatModel, chatProvider, smartRetrieval, normalUserGptFallback, adminAutoFallback, fallbackProvider, fallbackModel } = await getKeys();
 
@@ -155,6 +178,7 @@ export default async function handler(req, res) {
     // - Pure calculation(s) with no other question → answer exactly, here.
     // - Mixed (calc + policy) → keep the exact results and merge them into the
     //   FAQ answer below as authoritative evidence, so every part is answered.
+    await logActivity({ provider: chatProvider, model: chatModel, metadata: { stage: 'Checking calculations', durationMs: Date.now() - started } });
     const calc = await runCalculators({ question, provider: chatProvider, model: chatModel, openaiKey, groqKey: groqPrimary });
     const calcResults = calc?.results || [];
     const okCalc = calcResults.filter((r) => r.ok);
@@ -245,6 +269,7 @@ export default async function handler(req, res) {
     // 2) optional LLM rewrite for messy/vague input (non-fatal, may be null)
     let clarity = null;
     if (smartRetrieval) {
+      await logActivity({ metadata: { stage: 'Interpreting question', durationMs: Date.now() - started } });
       clarity = await clarifyQuery({
         question, provider: chatProvider, model: chatModel, openaiKey, groqKey: groqPrimary
       });
@@ -410,6 +435,7 @@ export default async function handler(req, res) {
       searchQueries: embedTexts
     };
 
+    await logActivity({ metadata: { stage: 'Searching source articles', durationMs: Date.now() - started } });
     const vectors = await openaiEmbed(openaiKey, embedTexts);
     const combined = new Map();
     const vectorMatches = [];
@@ -724,6 +750,7 @@ export default async function handler(req, res) {
       { role: 'system', content: system },
       { role: 'user', content: `${askedText}\n\nFAQ evidence:\n${context}` }
     ];
+    await logActivity({ provider: chatProvider, model: chatModel, metadata: { stage: 'Generating answer', durationMs: Date.now() - started } });
     // A smaller, evidence-preserving recovery request is used only after every
     // normal Groq attempt fails. It keeps the highest-ranked scoped evidence and
     // all calculator evidence, avoiding an unnecessary provider switch when a
@@ -993,6 +1020,7 @@ export default async function handler(req, res) {
     // This keeps the assistant useful for agents while catching invented claims.
     let groundingScore = null;
     if (smartRetrieval && answer !== SAFE_UNCONFIRMED && !usedCalculator) {
+      await logActivity({ metadata: { stage: 'Verifying answer', durationMs: Date.now() - started } });
       const check = await verifyGrounding({
         question: clearQuestion || question, answer, context,
         provider: answerProvider, model: usedFallback ? fallbackModel : chatModel, openaiKey, groqKey: groqPrimary
