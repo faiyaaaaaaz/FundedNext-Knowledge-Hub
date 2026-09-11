@@ -1,4 +1,5 @@
 import {authenticateRequest,supabaseAdmin,publishScopeCatalog,getPublishedScopeCatalog,logActivity} from '../../lib/server';
+import {applyModelOverrides} from '../../lib/modelDiscovery';
 export const config={maxDuration:120};
 export default async function handler(req,res){
  res.setHeader('Cache-Control','no-store');
@@ -26,7 +27,10 @@ export default async function handler(req,res){
    overrides[slug]={...model,status:'review'};
   }else{
    if(!model)return res.status(400).json({error:'Model not found. Refresh the review queue.'});
-   if(body.action==='merge'){
+   if(body.action==='correct-product'){
+    if(!['cfd','futures'].includes(body.product))return res.status(400).json({error:'Choose CFD or Futures.'});
+    overrides[model.slug]={...model,product:body.product,status:'review'};
+   }else if(body.action==='merge'){
     const target=catalog.models.find(m=>m.slug===body.target&&m.slug!==model.slug&&m.product===model.product&&['current','previous'].includes(m.status));
     if(!target)return res.status(400).json({error:'Choose an approved model in the same product family.'});
     overrides[target.slug]={...target,aliases:[...new Set([...target.aliases,...model.aliases,model.name.toLowerCase()])]};
@@ -35,9 +39,10 @@ export default async function handler(req,res){
     overrides[model.slug]={...model,name:String(body.name||model.name).trim().slice(0,120),aliases:[...new Set([...model.aliases,String(body.name||model.name).toLowerCase()])],status:body.status};
    }else return res.status(400).json({error:'Unknown review action.'});
   }
-  const save=await sb.from('settings').upsert({key:'scope_model_overrides',value:JSON.stringify(overrides)});if(save.error)throw save.error;
-  const updated=await publishScopeCatalog(sb);
-  await logActivity({actorRole:user.role,userEmail:user.email,userName:user.name,sessionId:user.sessionId,eventType:'model_review',success:true,metadata:{action:body.action,slug:model.slug,status:body.status,target:body.target,name:body.name}});
+  // A review modifies the existing snapshot; only Rescan reads every FAQ.
+  const updated={...catalog,models:applyModelOverrides(catalog.models,overrides),reviewedAt:new Date().toISOString()};
+  const save=await sb.from('settings').upsert([{key:'scope_model_overrides',value:JSON.stringify(overrides)},{key:'published_scope_catalog',value:JSON.stringify(updated)}]);if(save.error)throw save.error;
+  await logActivity({actorRole:user.role,userEmail:user.email,userName:user.name,sessionId:user.sessionId,eventType:'model_review',success:true,metadata:{action:body.action,slug:model.slug,status:body.status,target:body.target,name:body.name,previousProduct:model.product,correctedProduct:body.product}});
   return res.json({catalog:updated});
  }catch(error){return res.status(500).json({error:error.message});}
 }
