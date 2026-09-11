@@ -1,7 +1,9 @@
 import '../styles/globals.css';
 import '../styles/workspace.css';
+import '../styles/usability.css';
 import { useEffect } from 'react';
 import Head from 'next/head';
+import InteractionFeedback from '../components/InteractionFeedback';
 
 export default function App({ Component, pageProps }) {
   useEffect(() => {
@@ -18,5 +20,6 @@ export default function App({ Component, pageProps }) {
       <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     </Head>
     <Component {...pageProps} />
+    <InteractionFeedback />
   </>;
 }
