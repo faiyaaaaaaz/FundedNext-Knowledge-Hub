@@ -24,7 +24,7 @@ function mapRow(row) {
   const meta = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
   return {
     id: row.id, createdAt: row.created_at, userName: row.user_name || '', userEmail: row.user_email || '',
-    actorRole: row.actor_role || '', question: meta.question || meta.questionPreview || '', answer: meta.answer || meta.answerPreview || '',
+    actorRole: row.actor_role || '', question: meta.question || meta.questionPreview || '', answer: meta.answer || meta.answerPreview || meta.error || (meta.status === 'processing' ? `No completed response recorded. Last stage: ${meta.stage || 'Unknown'}. ${Date.now() - Date.parse(row.created_at) > 120000 ? 'The request may have been interrupted or timed out.' : 'The request may still be running.'}` : meta.reason || ''),
     questionWordCount: Number(row.question_word_count || 0), answerWordCount: Number(meta.answerWordCount || 0),
     provider: row.provider || '', model: row.model || '', inputTokens: Number(row.input_tokens || 0), outputTokens: Number(row.output_tokens || 0),
     estimatedCost: Number(row.estimated_cost || 0), success: row.success !== false, product: meta.selectedProduct || '',
