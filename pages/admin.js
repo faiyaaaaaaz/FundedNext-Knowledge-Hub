@@ -1,6 +1,8 @@
 import { useEffect, useState, useRef } from 'react';
 import Link from 'next/link';
 import { getSupabaseBrowser } from '../lib/supabaseBrowser';
+import {AdminMessages,AdminOverview} from '../components/Workspace';
+import ModelReview from '../components/ModelReview';
 
 const OPENAI_MODELS = ['gpt-4o', 'gpt-4o-mini', 'o3', 'o3-mini'];
 const GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.6-27b'];
@@ -258,7 +260,7 @@ export default function Admin() {
   const [session, setSession] = useState('');
   const [role, setRole] = useState('');
   const [loginError, setLoginError] = useState('');
-  const [tab, setTab] = useState('access');
+  const [tab, setTab] = useState('overview');
   const [status, setStatus] = useState(null);
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [loadingTab, setLoadingTab] = useState('');
@@ -445,7 +447,7 @@ export default function Admin() {
   useEffect(() => {
     const savedSession = localStorage.getItem('appSession') || '';
     const savedRole = localStorage.getItem('appRole') || '';
-    const savedTheme = localStorage.getItem('theme') || 'dark';
+    const savedTheme = localStorage.getItem('theme') || 'light';
     setTheme(savedTheme); document.documentElement.setAttribute('data-theme', savedTheme);
     if (savedSession && savedRole === 'admin') {
       setSession(savedSession); setRole(savedRole); loadSettings(savedSession);
@@ -480,6 +482,7 @@ export default function Admin() {
     if (!client) return;
     setLoginError('');
     try {
+      if (!sessionStorage.getItem('workspaceGooglePending')) return;
       const { data: authData } = await client.auth.getSession();
       if (!authData.session?.access_token) return;
       const response = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ googleAccessToken: authData.session.access_token }) });
@@ -488,13 +491,15 @@ export default function Admin() {
       if (result.role !== 'admin') throw new Error('Your Google account is not listed in ADMIN_GOOGLE_EMAILS.');
       localStorage.setItem('appSession', result.token); localStorage.setItem('appRole', result.role);
       setSession(result.token); setRole(result.role); loadSettings(result.token);
+      sessionStorage.removeItem('workspaceGooglePending');
     } catch (e) { setLoginError(e.message); }
   }
 
   async function googleLogin() {
     const client = getSupabaseBrowser();
     if (!client) return setLoginError('Google sign-in is not configured.');
-    const { error } = await client.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: `${window.location.origin}/admin` } });
+    sessionStorage.setItem('workspaceGooglePending','1');
+    const { error } = await client.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: `${window.location.origin}/admin`, queryParams:{prompt:'select_account'} } });
     if (error) setLoginError(error.message);
   }
 
@@ -940,6 +945,8 @@ export default function Admin() {
   );
 
   const navigation = [
+    ['overview','▦','Overview'],
+    ['messages','✉','Team inbox & reports'], ['modelreview','◎','Model discovery'],
     ['access', '⌁', 'Team access'], ['ai', '✦', 'AI & model'], ['branding', 'Aa', 'Brand Language'],
     ['disputes', '⚑', 'Disputes'], ['snippets', '⌘', 'Snippets'], ['knowledge', '▤', 'Knowledge'], ['querylogs', '◧', 'Query & answer logs'], ['calcdata', '∑', 'Calculator data'], ['activity', '◫', 'Activity logs'],
     ['autosync', '↻', 'Automatic sync'], ['groqkeys', '⚿', 'Groq keys'], ['notices', '❖', 'Notices'], ['keys', '◇', 'API vault']
@@ -979,13 +986,16 @@ export default function Admin() {
   });
 
   return (
-    <main className="admin-shell">
+    <main className="admin-shell workspace-admin-v2">
       <aside className="admin-sidebar"><Brand /><nav>{navigation.map(([id, icon, label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => { setTab(id); clearMessages(); }}><span>{icon}</span>{label}{id === 'disputes' && status?.pendingDisputes > 0 && <em>{status.pendingDisputes}</em>}</button>)}</nav><div className="sidebar-foot"><Link href="/">← Back to assistant</Link><button onClick={logout}>Sign out</button></div></aside>
       <section className="admin-main">
         <header className="admin-top"><div><span className="eyebrow">Workspace settings</span><h1>{titles[tab]}</h1></div><button className="icon-btn" onClick={toggleTheme} aria-label="Change theme">{theme === 'dark' ? '☀' : '☾'}</button></header>
         {notice && <div className="notice success">✓ {notice}</div>}{error && <div className="notice danger">{error}</div>}
         {pageIsLoading && <DataLoader title={`Loading ${titles[tab]}`} detail="Requesting the latest live workspace data…" />}
 
+        {tab === 'overview' && <AdminOverview session={session} onNavigate={setTab} />}
+        {tab === 'messages' && <AdminMessages session={session} />}
+        {tab === 'modelreview' && <ModelReview session={session} />}
         {tab === 'access' && <div className="settings-stack">
           <section className="settings-card"><div className="settings-head"><div><h2>Google sign-in</h2><p>Access is permanently restricted to nextventures.io Google accounts.</p></div><span className={`state-pill ${status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'ready' : ''}`}>{status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'Configured' : 'Vercel setup needed'}</span></div><div className="permission-table"><div><span>Access rule</span><b>Required value</b><b>Status</b></div><div><span>Allowed domain</span><b>nextventures.io</b><b>Fixed</b></div><div><span>Admin list</span><b>ADMIN_GOOGLE_EMAILS</b><b>{status?.adminGoogleConfigured ? 'Configured' : 'Missing'}</b></div></div></section>
           <section className="settings-card"><div className="settings-head"><div><h2>Workspace roles</h2><p>Every user must authenticate with Google. Admin rights come only from the Vercel Admin email list.</p></div><span className="state-pill ready">Google only</span></div><div className="permission-table"><div><span>Requirement</span><b>Agent</b><b>Admin</b></div><div><span>@nextventures.io Google account</span><b>Required</b><b>Required</b></div><div><span>Listed in ADMIN_GOOGLE_EMAILS</span><b>No</b><b>Required</b></div></div></section>
