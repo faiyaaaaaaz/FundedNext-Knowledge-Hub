@@ -3,13 +3,14 @@ import { authenticateRequest, logActivity, supabaseAdmin } from '../../lib/serve
 // Updating this release object as part of a deployment automatically shows the
 // real release notes once to every user, including Admins.
 const CURRENT_RELEASE = {
-  version: '2026.09.04-notices',
+  version: '2026.09.workspace-v2',
   title: 'What’s new',
   changes: [
-    'CEx Notices are now included in the knowledgebase.',
-    'Multi-question client messages are handled part by part.',
-    'Account-model recognition and wrong-model source protection have been improved.',
-    'Answer interpretation and evidence details are now recorded for Admin review.'
+    'A redesigned workspace with light and dark modes.',
+    'Your previous questions and answers are available in My conversations.',
+    'Track your submitted disputes and receive decision notifications.',
+    'Admin messages now appear in your personal inbox.',
+    'A guided introduction explains scope, source review, and answer feedback.'
   ]
 };
 
