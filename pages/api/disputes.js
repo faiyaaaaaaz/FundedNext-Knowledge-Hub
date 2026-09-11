@@ -77,6 +77,7 @@ export default async function handler(req, res) {
           reviewed_at: new Date().toISOString()
         }).eq('id', id).select().single();
         if (error) throw error;
+        await logActivity({actorRole:access.role,userEmail:access.email,userName:access.name,sessionId:access.sessionId,eventType:'dispute_review',success:true,metadata:{disputeId:id,status:data.status,reason}});
         return res.status(200).json({ dispute: data });
       }
 
