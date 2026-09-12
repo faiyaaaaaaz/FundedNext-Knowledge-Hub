@@ -293,6 +293,7 @@ export default function Admin() {
   const [queryFilters, setQueryFilters] = useState({ from: '', to: '', name: '', email: '', provider: '', model: '', scope: '', feedback: '', search: '' });
   const [expandedQueryLog, setExpandedQueryLog] = useState(null);
   const [queryLogsBusy, setQueryLogsBusy] = useState(false);
+  const [exportingReport, setExportingReport] = useState(false);
   const [selectedQueryLogs, setSelectedQueryLogs] = useState([]);
   const [deletingQueryLogs, setDeletingQueryLogs] = useState(false);
   const [disputingQueryLog, setDisputingQueryLog] = useState(null);
@@ -846,6 +847,31 @@ export default function Admin() {
     loadActivity({ email: '', from: '', to: '' });
   }
 
+  async function downloadQueryReport() {
+    if (exportingReport || !selectedQueryLogs.length) return;
+    setExportingReport(true); setError(''); setNotice('');
+    try {
+      const response = await fetch('/api/query-logs', {
+        method: 'POST', headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'export', ids: selectedQueryLogs })
+      });
+      if (handleAuthLoss(response)) return;
+      if (!response.ok) {
+        let data = {}; try { data = await response.json(); } catch {}
+        throw new Error(data.error || `Report download failed (HTTP ${response.status}). Please retry with fewer selected records.`);
+      }
+      if (!String(response.headers.get('content-type') || '').includes('application/json')) throw new Error('The server did not return a review report. Please try again.');
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a'); link.href = url;
+      link.download = 'fundednext-review-' + new Date().toISOString().slice(0,10) + '.json';
+      document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setNotice('Review report downloaded. It includes selected queries and approved disputes, with missing historical evidence marked.');
+    } catch (e) { setError(e.message); }
+    finally { setExportingReport(false); }
+  }
+
   async function loadQueryLogs(filters = queryFilters) {
     setQueryLogsBusy(true); setError('');
     try {
@@ -911,7 +937,7 @@ export default function Admin() {
           question: log.question, answer: log.answer, reason: queryLogDisputeReason.trim(),
           confidence: log.confidence, provider: log.provider,
           scope: log.product ? { product: log.product, model: log.accountModel || 'all', label: log.scopeLabel || log.accountModel || 'All models' } : undefined,
-          sources: [{ type: 'query_log', id: log.id, title: `Stored query log · ${formatDate(log.createdAt)}`, url: '' }, ...(log.sources || [])]
+          sources: [{ type: 'query_log', id: log.id, title: `Stored query log · ${formatDate(log.createdAt)}`, url: '', model: log.model || null, originalUserEmail: log.userEmail || null, recordedAt: log.createdAt }, ...(log.sources || [])]
         })
       });
       if (handleAuthLoss(response)) return;
@@ -1054,7 +1080,7 @@ export default function Admin() {
           </section>
           <section className="settings-card">
             <div className="settings-head"><div><h2>Recorded queries and answers</h2><p>{queryLogs?.logs?.length || 0} result{queryLogs?.logs?.length === 1 ? '' : 's'} · newest first</p></div></div>
-            <div className="query-log-bulk"><button className="btn btn-secondary" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs((queryLogs?.logs || []).map((log) => log.id))}>Select all filtered</button><button className="btn btn-secondary" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs([])}>Clear selection</button><span>{selectedQueryLogs.length} selected</span><button className="btn query-delete" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => deleteQueryLogs('ids')}>Delete selected permanently</button><button className="btn query-delete" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => deleteQueryLogs('filter')}>Delete all filtered permanently</button></div>
+            <div className="query-log-bulk"><button className="btn btn-secondary" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs((queryLogs?.logs || []).map((log) => log.id))}>Select all filtered</button><button className="btn btn-secondary" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs([])}>Clear selection</button><span>{selectedQueryLogs.length} selected</span><button className="btn btn-primary" disabled={!selectedQueryLogs.length || exportingReport || deletingQueryLogs} onClick={downloadQueryReport}>{exportingReport ? 'Preparing report…' : 'Download review report'}</button><button className="btn query-delete" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => deleteQueryLogs('ids')}>Delete selected permanently</button><button className="btn query-delete" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => deleteQueryLogs('filter')}>Delete all filtered permanently</button></div>
             <div className="query-log-list">{(queryLogs?.logs || []).map((log) => {
               const expanded = expandedQueryLog === log.id;
               const selected = selectedQueryLogs.includes(log.id);
@@ -1070,19 +1096,20 @@ export default function Admin() {
                     <i>{expanded ? '−' : '+'}</i>
                   </button>
                 </div>
+                <div className="query-record-actions"><button type="button" className="btn btn-danger" disabled={!log.question || !log.answer} onClick={() => { setDisputingQueryLog(log); setQueryLogDisputeReason(''); }}>⚑ Dispute answer</button></div>
                 {expanded && <div className="query-log-detail">
                   {log.feedback && <div className={`query-feedback-detail ${log.feedback}`}><span>{feedbackLabel}</span><div><b>Answer feedback received</b><small>Submitted by {log.feedbackBy || log.userName || log.userEmail || 'the agent'} · {formatDate(log.feedbackAt || log.createdAt)}</small></div></div>}
                   <div className="query-log-facts"><span>Product<b>{log.product ? log.product.toUpperCase() : 'Legacy record'}</b></span><span>Account model<b>{log.scopeLabel || log.accountModel || 'Not recorded'}</b></span><span>Answer model<b>{log.model || 'Not recorded'}</b></span><span>Confidence<b>{log.confidence == null ? 'Not recorded' : `${log.confidence}% · ${log.confidenceLabel}`}</b></span><span>Answer feedback<b>{feedbackLabel || 'No feedback received'}</b></span><span>Question words<b>{log.questionWordCount.toLocaleString()}</b></span><span>Answer words<b>{log.answerWordCount.toLocaleString()}</b></span><span>Tokens<b>{log.inputTokens.toLocaleString()} in · ${log.outputTokens.toLocaleString()} out</b></span><span>Response time<b>{log.durationMs ? `${(log.durationMs / 1000).toFixed(1)}s` : 'Not recorded'}</b></span></div>
                   <div className="query-log-copy"><label>Complete query</label><div>{log.question || 'Not retained in this older record.'}</div><label>Complete answer</label><div>{log.answer || 'Not retained in this older record.'}</div></div>
-                  {log.interpretation && <div className="interpretation-trail">
+                  {(log.interpretation || log.evidenceTrail || log.processing) && <details className="query-audit-details"><summary>Processing and evidence details · {log.evidenceTrail?.selectedForAnswer?.length || 0} selected · {log.evidenceTrail?.rejected?.length || 0} rejected</summary><div className="interpretation-trail">{log.interpretation && <>
                     <div className="interpretation-title"><div><span className="eyebrow">Interpretation and evidence trail</span><h3>How this answer was produced</h3></div><span className={`state-pill ${log.interpretation.helperUsed ? 'ready' : ''}`}>{log.interpretation.helperUsed ? 'AI interpretation used' : 'Rule-based interpretation'}</span></div>
                     <div className="interpretation-summary"><span>Cleaned meaning<b>{log.interpretation.cleaned || log.question}</b></span><span>Detected scope<b>{log.interpretation.selectedProduct?.toUpperCase()} · {log.interpretation.selectedModelLabel}</b><small>Chosen from {log.interpretation.scopeSource === 'selector' ? 'the Agent selector' : log.interpretation.scopeSource === 'question' ? 'the question wording' : 'the full product family'}</small></span></div>
                     <div className="interpretation-section"><label>Questions extracted ({log.interpretation.topics?.length || 0})</label><ol>{(log.interpretation.topics || []).map((topic, index) => <li key={index}>{topic.question}</li>)}</ol></div>
                     <div className="interpretation-section"><label>Searches created ({log.interpretation.searchQueries?.length || 0})</label><div className="interpretation-chips">{(log.interpretation.searchQueries || []).map((query, index) => <span key={index}>{query}</span>)}</div></div>
-                    {log.evidenceTrail && <><div className="interpretation-section"><label>Evidence selected for the answering AI ({log.evidenceTrail.selectedForAnswer?.length || 0})</label><div className="evidence-audit-list accepted">{(log.evidenceTrail.selectedForAnswer || []).map((item, index) => <div key={`${item.id}-${index}`}><span>{item.position}</span><div><b>{item.title || item.id}</b><small>{item.kind} · similarity {(Number(item.similarity || 0) * 100).toFixed(1)}%{item.exactScope ? ' · exact Account match' : ''}</small></div>{item.url && <a href={item.url} target="_blank" rel="noreferrer">Open ↗</a>}</div>)}</div></div>
-                    <div className="interpretation-section"><label>Evidence rejected before answering ({log.evidenceTrail.rejected?.length || 0})</label>{log.evidenceTrail.rejected?.length ? <div className="evidence-audit-list rejected">{log.evidenceTrail.rejected.map((item, index) => <div key={`${item.id}-${index}`}><span>×</span><div><b>{item.title || item.id}</b><small>{item.reason}</small></div>{item.url && <a href={item.url} target="_blank" rel="noreferrer">Inspect ↗</a>}</div>)}</div> : <p className="interpretation-empty">No candidate evidence was rejected.</p>}</div></>}
+                    </>}{log.evidenceTrail && <><details className="interpretation-section"><summary>Evidence selected for the answering AI ({log.evidenceTrail.selectedForAnswer?.length || 0})</summary><div className="evidence-audit-list accepted">{(log.evidenceTrail.selectedForAnswer || []).map((item, index) => <div key={`${item.id}-${index}`}><span>{item.position}</span><div><b>{item.title || item.id}</b><small>{item.kind} · similarity {(Number(item.similarity || 0) * 100).toFixed(1)}%{item.exactScope ? ' · exact Account match' : ''}</small></div>{item.url && <a href={item.url} target="_blank" rel="noreferrer">Open ↗</a>}</div>)}</div></details>
+                    <details className="interpretation-section"><summary>Evidence rejected before answering ({log.evidenceTrail.rejected?.length || 0})</summary>{log.evidenceTrail.rejected?.length ? <div className="evidence-audit-list rejected">{log.evidenceTrail.rejected.map((item, index) => <div key={`${item.id}-${index}`}><span>×</span><div><b>{item.title || item.id}</b><small>{item.reason}</small></div>{item.url && <a href={item.url} target="_blank" rel="noreferrer">Inspect ↗</a>}</div>)}</div> : <p className="interpretation-empty">No candidate evidence was rejected.</p>}</details></>}
                     {log.processing && <div className="interpretation-processing"><span>Corrective retry<b>{log.processing.partialAnswerRetryAttempted ? (log.processing.partialAnswerRetrySucceeded ? 'Used successfully' : 'Attempted; refusal retained') : 'Not needed'}</b></span><span>Provider fallback<b>{log.processing.fallback ? 'Used' : 'Not used'}</b></span><span>Grounding score<b>{log.processing.groundingScore == null ? 'Not available' : `${log.processing.groundingScore}%`}</b></span></div>}
-                  </div>}
+                  </div></details>}
                   {log.sources?.length > 0 && <div className="query-log-sources"><label>Sources used ({log.sourceCount})</label>{log.sources.map((source, index) => <a key={`${source.url}-${index}`} href={source.url || undefined} target="_blank" rel="noreferrer">{source.title || 'Untitled source'}<span>Open ↗</span></a>)}</div>}
                   <button type="button" className="query-collapse" onClick={() => setExpandedQueryLog(null)}>Collapse details ↑</button>
                 </div>}
@@ -1091,7 +1118,6 @@ export default function Admin() {
           </section>
         </div>}
 
-        {tab === 'querylogs' && expandedQueryLog && (() => { const log = (queryLogs?.logs || []).find((item) => item.id === expandedQueryLog); return log ? <div className="query-dispute-dock"><span>Found something wrong in this stored answer?</span><button type="button" className="btn btn-danger" disabled={!log.question || !log.answer} onClick={() => { setDisputingQueryLog(log); setQueryLogDisputeReason(''); }}>⚑ Submit this answer as a dispute</button></div> : null; })()}
 
         {tab === 'knowledge' && <div className="settings-stack">
           <section className="settings-card"><div className="settings-head"><div><h2>Product and Account catalogue</h2><p>Bird’s-eye view of the scopes detected from the current FAQ library. Previous models remain available to Agents; uncertain new detections stay in review instead of entering the live selector.</p></div><span className="state-pill ready">{knowledge?.scopeCatalog?.models?.length || 0} detected</span></div>
