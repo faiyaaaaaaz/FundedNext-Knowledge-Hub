@@ -3,7 +3,7 @@ import {
   openaiChatDetailed, getBrandingRules, brandingInstructions,
   applyBrandingReplacements, getRelevantSnippets, logActivity as createActivity,
   expandConcepts, clarifyQuery, correctTypos, runCalculators,
-  getGroqKeys, verifyGrounding, getPublishedScopeCatalog, modelsMentioned, getArticleScopeOverrides
+  sha256, getGroqKeys, verifyGrounding, getPublishedScopeCatalog, modelsMentioned, getArticleScopeOverrides
 } from '../../lib/server';
 import { retrieveNotices, noticesAccess } from '../../lib/notices';
 
@@ -28,6 +28,9 @@ const CORE_GUARDRAILS =
   '\n\nNON-OVERRIDABLE QUALITY RULES:\n' +
   '- Write only a customer-ready reply. Never mention excerpts, source numbers, context, retrieval, database, or knowledge base.\n' +
   '- Never transfer a rule from one Account type to another.\n' +
+  '- In comparisons, cover the same requested dimensions for each named model. Distinguish shared rules from differences. A fact available for only one model is not proof of a difference.\n' +
+  '- If the user says monthly loss but evidence describes maximum or overall loss, explain the terminology distinction using that evidence and ask whether they mean maximum overall loss. Do not invent a monthly limit or silently equate monthly with maximum.\n' +
+  '- Name the specific unresolved question when requesting clarification; never use a standalone vague sentence such as This specific detail needs to be confirmed.\n' +
   '- Never guess or generalize with typically, generally, usually, or likely.\n' +
   '- Use plain text only. Do not use Markdown, bold text, italics, headings, asterisks, underscores, or decorative symbols.\n' +
   '- Keep paragraphs short and separated by one blank line. Use simple numbered steps only when a sequence is genuinely needed.\n' +
@@ -100,7 +103,7 @@ function cleanAnswer(raw) {
     .trim();
 
   // Reword internal evidence references without discarding supported paragraphs.
-  answer = answer.replace(/(?:the\s+FAQ|the\s+knowledge\s*base|the\s+provided\s+(?:FAQ\s+)?(?:excerpts?|context|information))\s+(?:does\s+not|doesn't)\s+(?:mention|specify|confirm)[^.?!]*[.?!]?/gi, 'This specific detail needs to be confirmed.')
+  answer = answer.replace(/(?:the\s+FAQ|the\s+knowledge\s*base|the\s+provided\s+(?:FAQ\s+)?(?:excerpts?|context|information))\s+(?:does\s+not|doesn't)\s+(?:mention|specify|confirm)\b/gi, 'I still need to confirm')
     .replace(/(\d)[ \t]+%/g, '$1%')
     .replace(/([$€£]\s*\d[\d,.]*)[ \t]+([KMB])\b/g, '$1$2');
   return answer || SAFE_UNCONFIRMED;
@@ -138,6 +141,28 @@ export default async function handler(req, res) {
   let partialAnswerRetrySucceeded = false;
   let requestLogId = null;
   let requestMetadata = {};
+  const reviewTrace = { version: 1, prompts: {}, attempts: [] };
+  async function tracedAnswerCall(key, model, messages, baseUrl) {
+    const promptId = sha256(JSON.stringify(messages));
+    reviewTrace.prompts[promptId] = messages;
+    const attempt = { model, provider: /groq/.test(baseUrl || '') ? 'groq' : 'openai', promptId, startedAt: new Date().toISOString(), status: 'started' };
+    reviewTrace.attempts.push(attempt);
+    await logActivity({ metadata: { reviewTrace } });
+    const attemptStart = Date.now();
+    try {
+      const result = await openaiChatDetailed(key, model, messages, baseUrl);
+      attempt.status = 'completed';
+      attempt.usage = result.usage || null;
+      return result;
+    } catch (error) {
+      attempt.status = 'failed';
+      attempt.error = String(error.message || error).split(String(key || '__no_key__')).join('[redacted]').replace(/Bearer\s+\S+|(?:sk-|gsk_)[A-Za-z0-9_-]+/gi, '[redacted]').slice(0, 1200);
+      throw error;
+    } finally {
+      attempt.durationMs = Date.now() - attemptStart;
+      await logActivity({ metadata: { reviewTrace } });
+    }
+  }
   async function logActivity(entry) {
     if (!requestLogId) return createActivity(entry);
     requestMetadata = { ...requestMetadata, ...(entry.metadata || {}) };
@@ -235,7 +260,8 @@ export default async function handler(req, res) {
     // use that model throughout retrieval, notice lookup, and confidence checks.
     const inferredModel = selectedModelSlug === 'all' && questionModels.length === 1 ? questionModels[0] : null;
     const selectedModel = selectedModelFromUi || inferredModel;
-    const scope = selectedModel ? selectedModel.aliases[0] : detectScope(question);
+    const comparisonModels = !selectedModel && questionModels.length > 1 ? questionModels.filter((item) => selectedProduct === 'both' || item.product === selectedProduct) : [];
+    const scope = selectedModel ? selectedModel.aliases[0] : comparisonModels.length > 1 ? null : detectScope(question);
     const allocationQuestion = /\b(?:maximum|max|total|aggregate)?\s*allocation\b/i.test(question);
     const personalAllocation = allocationQuestion && /\b(?:my|i|me|mine|for me)\b/i.test(question);
     if (personalAllocation && !selectedModel) {
@@ -628,6 +654,16 @@ export default async function handler(req, res) {
     } else {
       matches = candidates.slice(0, 10);
     }
+    // Preserve evidence for each explicitly requested model in a comparison.
+    if (comparisonModels.length > 1) {
+      const balanced = new Map();
+      for (const model of comparisonModels) {
+        candidates.filter(item => modelsMentioned(item.article_title || '', scopeCatalog.models).some(m => m.slug === model.slug)).slice(0, 3).forEach(item => balanced.set(String(item.id), item));
+      }
+      for (const item of matches) { if (balanced.size >= 16) break; balanced.set(String(item.id), item); }
+      matches = [...balanced.values()];
+    }
+
     // Merge exact calculator results as top, authoritative evidence so the model
     // reproduces the computed figures while still answering the FAQ parts.
     if (calcResults.length) {
@@ -750,7 +786,7 @@ export default async function handler(req, res) {
       { role: 'system', content: system },
       { role: 'user', content: `${askedText}\n\nFAQ evidence:\n${context}` }
     ];
-    await logActivity({ provider: chatProvider, model: chatModel, metadata: { stage: 'Generating answer', durationMs: Date.now() - started } });
+    await logActivity({ provider: chatProvider, model: chatModel, metadata: { stage: 'Generating answer', durationMs: Date.now() - started, interpretation: interpretationLog, evidenceSnapshot: { capturedAt: new Date().toISOString(), kind: 'retrieved_passages_at_request_time', contextHash: sha256(context), passages: matches.map((item, index) => ({ position: index + 1, chunkId: item.id, articleId: item.article_id, title: item.article_title, url: item.article_url, content: String(item.content || ''), contentHash: sha256(String(item.content || '')), sourceUpdatedAt: item.article_updated_at || null, notice: noticeMetaByAid[item.article_id] || null })) } } });
     // A smaller, evidence-preserving recovery request is used only after every
     // normal Groq attempt fails. It keeps the highest-ranked scoped evidence and
     // all calculator evidence, avoiding an unnecessary provider switch when a
@@ -790,14 +826,14 @@ export default async function handler(req, res) {
         const fallbackPool = groqPool.length ? groqPool : (groqPrimary ? [{ key: groqPrimary }] : []);
         let fallbackError = null;
         for (const item of fallbackPool) {
-          try { const result = await openaiChatDetailed(item.key, fallbackModel, messages, 'https://api.groq.com/openai/v1'); usedGroqKey = item.key; usedGroqKeyLabel = item.label || `Key ${item.id}`; return result; }
+          try { const result = await tracedAnswerCall(item.key, fallbackModel, messages, 'https://api.groq.com/openai/v1'); usedGroqKey = item.key; usedGroqKeyLabel = item.label || `Key ${item.id}`; return result; }
           catch (e) { fallbackError = e; }
         }
         if (fallbackError) throw fallbackError;
         throw new Error('No active Groq key is available for fallback.');
       }
       if (!openaiKey) throw new Error('No OpenAI key is available for fallback.');
-      return openaiChatDetailed(openaiKey, fallbackModel, messages);
+      return tracedAnswerCall(openaiKey, fallbackModel, messages);
     };
 
     if (chatProvider === 'groq') {
@@ -812,7 +848,7 @@ export default async function handler(req, res) {
         if (round) await new Promise((resolve) => setTimeout(resolve, 700));
         for (const idx of order) {
           try {
-            completion = await openaiChatDetailed(pool[idx].key, chatModel, messages, 'https://api.groq.com/openai/v1');
+            completion = await tracedAnswerCall(pool[idx].key, chatModel, messages, 'https://api.groq.com/openai/v1');
             usedGroqKey = pool[idx].key;
             usedGroqKeyLabel = pool[idx].label || `Key ${pool[idx].id}`;
             answerProvider = 'groq';
@@ -825,7 +861,7 @@ export default async function handler(req, res) {
         await new Promise((resolve) => setTimeout(resolve, 900));
         for (const idx of order) {
           try {
-            completion = await openaiChatDetailed(pool[idx].key, chatModel, recoveryMessages, 'https://api.groq.com/openai/v1');
+            completion = await tracedAnswerCall(pool[idx].key, chatModel, recoveryMessages, 'https://api.groq.com/openai/v1');
             usedGroqKey = pool[idx].key;
             usedGroqKeyLabel = pool[idx].label || `Key ${pool[idx].id}`;
             answerProvider = 'groq';
@@ -860,7 +896,7 @@ export default async function handler(req, res) {
       }
     } else {
       try {
-        completion = await openaiChatDetailed(openaiKey, chatModel, messages);
+        completion = await tracedAnswerCall(openaiKey, chatModel, messages);
       } catch (primaryError) {
         if (!canFallback) throw primaryError;
         completion = await runConfiguredFallback();
@@ -877,7 +913,7 @@ export default async function handler(req, res) {
       const retrySystem = system +
         '\n\nREQUIRED PARTIAL-ANSWER RECOVERY: The first draft refused despite relevant evidence. ' +
         'Ignore that draft. Inspect each numbered question independently. State every answer directly supported by the evidence. ' +
-        'For an unsupported question, write only "This specific detail needs to be confirmed." ' +
+        'For an unsupported question, name the exact missing detail and ask a focused clarification when terminology is ambiguous. ' +
         'Finding no evidence for one question must never erase answers to the others. ' +
         'Use the full refusal sentence only if the evidence answers zero questions.';
       const retryQuestion =
@@ -888,7 +924,7 @@ export default async function handler(req, res) {
       const retryBaseUrl = answerProvider === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1';
       if (retryKey) {
         try {
-          const retried = await openaiChatDetailed(retryKey, retryModel, [
+          const retried = await tracedAnswerCall(retryKey, retryModel, [
             { role: 'system', content: retrySystem },
             { role: 'user', content: retryQuestion }
           ], retryBaseUrl);
