@@ -1,4 +1,5 @@
 import { authenticateRequest, supabaseAdmin } from '../../lib/server';
+import { gzipSync } from 'zlib';
 
 export const config = { maxDuration: 60, api: { responseLimit: false } };
 
@@ -85,9 +86,47 @@ function failedOrIncomplete(row) {
   return !!row.error || (!row.answer && (!row.success || ['processing','failed_or_incomplete','error','timeout'].includes(row.status)));
 }
 
-async function buildReport(ids, filters) {
-  const reportQueries = await fetchAll(filtersFrom(), null, true);
-  const failedRows = reportQueries.filter(failedOrIncomplete);
+function compactReviewQuery(row, focusIds) {
+  if (focusIds.has(String(row.id)) || failedOrIncomplete(row)) return { ...row, diagnosticDetail: 'full' };
+  const needsReview = !!row.reviewCandidate;
+  const trail = row.evidenceTrail || null;
+  const rejectionCounts = {};
+  for (const item of trail?.rejected || []) {
+    const reason = String(item.reason || 'Other').replace(/\s*\([^)]*\)\s*$/, '');
+    rejectionCounts[reason] = (rejectionCounts[reason] || 0) + 1;
+  }
+  const snapshot = row.evidenceSnapshot ? {
+    capturedAt: row.evidenceSnapshot.capturedAt, kind: row.evidenceSnapshot.kind,
+    contextHash: row.evidenceSnapshot.contextHash,
+    passages: (row.evidenceSnapshot.passages || []).map((item) => ({
+      position: item.position, chunkId: item.chunkId, articleId: item.articleId,
+      title: item.title, url: item.url, ...(needsReview ? { content: item.content } : {}), contentHash: item.contentHash,
+      sourceUpdatedAt: item.sourceUpdatedAt, notice: item.notice ? {
+        entry_id: item.notice.entry_id, title: item.notice.title, category: item.notice.category,
+        topic_key: item.notice.topic_key, product: item.notice.product, model: item.notice.model,
+        posted_at: item.notice.posted_at, status: item.notice.status
+      } : null
+    }))
+  } : null;
+  const trace = row.reviewTrace ? {
+    version: row.reviewTrace.version,
+    attempts: (row.reviewTrace.attempts || []).map(({ response, ...attempt }) => ({ ...attempt, responseRetained: false })),
+    promptCount: Object.keys(row.reviewTrace.prompts || {}).length,
+    promptsRetained: false
+  } : null;
+  return {
+    ...row, diagnosticDetail: needsReview ? 'compact_review_candidate_with_passages' : 'compact_all-confidence',
+    evidenceTrail: trail ? { ...trail, rejected: undefined, rejectedSummary: { total: (trail.rejected || []).length, byReason: rejectionCounts } } : null,
+    evidenceSnapshot: snapshot, reviewTrace: trace,
+    availability: { ...(row.availability || {}), finalCitedPassages: row.sources?.length ? 'recorded_in_sources' : 'none', fullPromptAndCandidateText: 'omitted_from_compact_high_confidence_record' }
+  };
+}
+
+async function buildReport(ids, filters, compact = true) {
+  const allQueries = await fetchAll(filtersFrom(), null, true);
+  const failedRows = allQueries.filter(failedOrIncomplete);
+  const focusIds = new Set(ids.map(String));
+  const reportQueries = compact ? allQueries.map((row) => compactReviewQuery(row, focusIds)) : allQueries;
   const approvedDisputes = [];
   for (let offset = 0; ; offset += 500) {
     const { data, error } = await supabaseAdmin().from('disputes')
@@ -103,7 +142,7 @@ async function buildReport(ids, filters) {
   const found = new Set(reportQueries.map(query => String(query.id)));
   const failedIds = failedRows.map(row => String(row.id));
   return {
-    schema: 'fundednext-evaluation-report', version: 3, exportedAt: new Date().toISOString(),
+    schema: 'fundednext-evaluation-report', version: 4, exportedAt: new Date().toISOString(),
     contents: 'Every recorded query at every confidence level, including failed/incomplete queries, plus all approved disputes as a separately labelled evaluation reference library. Manual selections are retained only as reviewer focus markers.',
     limitations: [
       'Observable processing and answer-model request evidence only; no private hidden chain-of-thought.',
@@ -113,7 +152,7 @@ async function buildReport(ids, filters) {
       'Snippet-generated disputes passed approval in this application and are included. Pending and rejected disputes are excluded.',
       'Interpretation and verification model calls are summarized where recorded; detailed request traces cover answer generation and its retries.'
     ],
-    selection: { manuallySelectedQueryIds: ids, automaticallyIncludedFailedQueryIds: failedIds, filtersVisibleWhenExported: filters, queryScope: 'all recorded queries regardless of confidence or active filters' },
+    selection: { manuallySelectedQueryIds: ids, automaticallyIncludedFailedQueryIds: failedIds, filtersVisibleWhenExported: filters, queryScope: 'all recorded queries regardless of confidence or active filters', compact, detailPolicy: compact ? 'Full traces for focus and failed records; review candidates retain retrieved passage text with compact request traces; other answers retain exact final cited passages and compact trace summaries.' : 'Full traces for every query.' },
     requestedQueryIds: ids, missingQueryIds: ids.filter(id => !found.has(id)),
     counts: {
       queries: reportQueries.length, failedOrIncompleteQueries: failedIds.length,
@@ -136,8 +175,16 @@ export default async function handler(req, res) {
       if (req.body?.action !== 'export') return res.status(400).json({ error: 'Unknown report action.' });
       const ids = [...new Set((Array.isArray(req.body.ids) ? req.body.ids : []).map(String).filter(Boolean))];
       const filters = filtersFrom(req.body.filters || {});
-      const report = await buildReport(ids, filters);
+      const compact = req.body?.compact !== false;
+      const report = await buildReport(ids, filters, compact);
       if (!report.counts.queries) return res.status(400).json({ error: 'No recorded queries are available for export.' });
+      if (req.body?.compressed) {
+        const compressed = gzipSync(Buffer.from(JSON.stringify(report)), { level: 9 });
+        res.setHeader('Content-Type', 'application/gzip');
+        res.setHeader('Content-Disposition', 'attachment; filename="fundednext-review.json.gz"');
+        res.setHeader('Content-Length', String(compressed.length));
+        return res.status(200).send(compressed);
+      }
       res.setHeader('Content-Disposition', 'attachment; filename="fundednext-review.json"');
       return res.status(200).json(report);
     }
