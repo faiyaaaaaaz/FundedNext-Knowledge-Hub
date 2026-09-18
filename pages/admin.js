@@ -50,6 +50,19 @@ function initials(name, email) {
   return base.slice(0, 2).toUpperCase();
 }
 
+function sourceType(source = {}) {
+  if (source.type === 'answer_scope' || source.type === 'query_log') return source.type;
+  if (source.kind) return source.kind;
+  const url = String(source.url || '');
+  if (/app\.clickup\.com/i.test(url)) return 'notice';
+  if (/help(?:futures)?\.fundednext\.com/i.test(url)) return 'faq';
+  return 'unknown';
+}
+
+function sourceTypeLabel(source) {
+  return ({ faq: 'FAQ', notice: 'CEx Notice', internal: 'Internal knowledge', calculator: 'Calculator', answer_scope: 'Answer scope', query_log: 'Query record' })[sourceType(source)] || 'Type not recorded';
+}
+
 function activityEventLabel(value) {
   return ({ workspace_acknowledgement: 'Daily acknowledgement', query: 'Assistant query', login: 'Sign in', logout: 'Sign out', sync: 'Knowledge sync', feedback: 'Answer feedback' })[value] || String(value || 'Activity').replace(/_/g, ' ');
 }
@@ -282,7 +295,9 @@ export default function Admin() {
   const [selectedDispute, setSelectedDispute] = useState(null);
   const [reviewReason, setReviewReason] = useState('');
   const [disputeFilter, setDisputeFilter] = useState('');
+  const [disputeSearch, setDisputeSearch] = useState('');
   const [snippets, setSnippets] = useState([]);
+  const [snippetUsage, setSnippetUsage] = useState(null);
   const [activity, setActivity] = useState(null);
   const [activityEmail, setActivityEmail] = useState('');
   const [activityFrom, setActivityFrom] = useState('');
@@ -330,6 +345,7 @@ export default function Admin() {
   const [noticeFile, setNoticeFile] = useState(null);
   const [noticeMsg, setNoticeMsg] = useState('');
   const [noticeBusy, setNoticeBusy] = useState(false);
+  const [noticeExporting, setNoticeExporting] = useState(false);
   const [noticeRefreshing, setNoticeRefreshing] = useState(false);
   const [noticeList, setNoticeList] = useState([]);
   const [noticeIndexedAt, setNoticeIndexedAt] = useState(null);
@@ -358,6 +374,19 @@ export default function Admin() {
       setNoticeMsg('Imported ' + d.imported + ' \u00b7 reconciled ' + d.reconciled + ' \u00b7 indexed ' + d.indexed + '.');
       await loadNotices();
     } catch (e) { setError(e.message); } finally { setNoticeBusy(false); }
+  };
+  const exportNotices = async () => {
+    if (noticeExporting) return;
+    setNoticeExporting(true); setError(''); setNotice('');
+    try {
+      const response = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'export' }) });
+      if (!response.ok) { let data = {}; try { data = await response.json(); } catch {} throw new Error(data.error || `Notices export failed (HTTP ${response.status}).`); }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a'); link.href = url; link.download = `fundednext-notices-${new Date().toISOString().slice(0,10)}.json`;
+      document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setNotice('Notices knowledge base downloaded, including manually saved and inactive historical entries.');
+    } catch (e) { setError(e.message); } finally { setNoticeExporting(false); }
   };
   const reindexNoticesNow = async () => {
     setNoticeBusy(true); setNoticeMsg('');
@@ -458,7 +487,7 @@ export default function Admin() {
 
   useEffect(() => {
     if (!session || role !== 'admin') return;
-    const loaders = { branding: loadTerms, disputes: loadDisputes, snippets: loadSnippets, activity: loadActivity, autosync: loadAutoSync, knowledge: loadKnowledge, querylogs: loadQueryLogs, calcdata: loadCalc, groqkeys: loadGroqKeys, notices: loadNotices };
+    const loaders = { branding: loadTerms, disputes: loadDisputes, snippets: loadSnippets, snippetlogs: loadSnippetUsage, activity: loadActivity, autosync: loadAutoSync, knowledge: loadKnowledge, querylogs: loadQueryLogs, calcdata: loadCalc, groqkeys: loadGroqKeys, notices: loadNotices };
     const loader = loaders[tab];
     if (loader) {
       const activeTab = tab;
@@ -791,11 +820,14 @@ export default function Admin() {
     try {
       const response = await fetch('/api/disputes', {
         method: 'PATCH', headers: headers(true),
-        body: JSON.stringify({ id: selectedDispute.id, action, approvalReason: reviewReason })
+        body: JSON.stringify({ id: selectedDispute.id, action, approvalReason: reviewReason,
+          title: selectedDispute.generated_title, triggerTerms: selectedDispute.generated_trigger_terms,
+          instruction: selectedDispute.generated_snippet })
       });
       const data = await response.json(); if (!response.ok) throw new Error(data.error);
-      setSelectedDispute(data.dispute); setReviewReason(''); setNotice(action === 'generate' ? 'Corrective snippet generated and activated.' : `Dispute ${action}d.`);
-      await loadDisputes(); if (action === 'generate') await loadSnippets();
+      setSelectedDispute(data.dispute); setReviewReason('');
+      setNotice(action === 'generate' ? 'Correction draft generated. Review and edit it before activation.' : action === 'activate-snippet' ? 'Reviewed corrective snippet activated.' : action === 'reset-snippet' ? 'Dispute restored. You can generate a new draft.' : `Dispute ${action}d.`);
+      await loadDisputes(); if (action === 'activate-snippet') await loadSnippets();
     } catch (e) { setError(e.message); } finally { setSaving(false); }
   }
 
@@ -808,6 +840,27 @@ export default function Admin() {
     } catch (e) { setError(e.message); }
   }
 
+  async function loadSnippetUsage() {
+    try {
+      const response = await fetch('/api/snippet-logs', { headers: headers() });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json(); if (!response.ok) throw new Error(data.error);
+      setSnippetUsage(data);
+    } catch (e) { setError(e.message); }
+  }
+
+  async function regenerateSnippet(snippet) {
+    if (!snippet.source_dispute_id) return setError('This legacy snippet is not linked to a dispute, so it cannot be regenerated automatically.');
+    setSaving(true); clearMessages();
+    try {
+      const response = await fetch('/api/disputes', { method: 'PATCH', headers: headers(true), body: JSON.stringify({ id: snippet.source_dispute_id, action: 'generate' }) });
+      const data = await response.json(); if (!response.ok) throw new Error(data.error);
+      await loadDisputes();
+      setSelectedDispute(data.dispute); setTab('disputes');
+      setNotice('A replacement draft was created from fresh FAQ and Notice evidence. The existing snippet remains active until you approve the replacement.');
+    } catch (e) { setError(e.message); } finally { setSaving(false); }
+  }
+
   async function updateSnippet(snippet, updates) {
     const response = await fetch('/api/snippets', { method: 'PATCH', headers: headers(true), body: JSON.stringify({ id: snippet.id, ...updates }) });
     const data = await response.json(); if (!response.ok) return setError(data.error);
@@ -818,7 +871,7 @@ export default function Admin() {
     if (!window.confirm('Delete this corrective snippet permanently?')) return;
     const response = await fetch(`/api/snippets?id=${id}`, { method: 'DELETE', headers: headers() });
     const data = await response.json(); if (!response.ok) return setError(data.error);
-    setNotice('Snippet deleted.'); loadSnippets();
+    setNotice('Snippet deleted and its dispute restored to approved.'); await loadSnippets(); await loadDisputes();
   }
 
   async function loadActivity(opts = {}) {
@@ -848,12 +901,12 @@ export default function Admin() {
   }
 
   async function downloadQueryReport() {
-    if (exportingReport || !selectedQueryLogs.length) return;
+    if (exportingReport) return;
     setExportingReport(true); setError(''); setNotice('');
     try {
       const response = await fetch('/api/query-logs', {
         method: 'POST', headers: { ...headers(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'export', ids: selectedQueryLogs })
+        body: JSON.stringify({ action: 'export', ids: selectedQueryLogs, filters: queryFilters })
       });
       if (handleAuthLoss(response)) return;
       if (!response.ok) {
@@ -867,7 +920,7 @@ export default function Admin() {
       link.download = 'fundednext-review-' + new Date().toISOString().slice(0,10) + '.json';
       document.body.appendChild(link); link.click(); link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setNotice('Review report downloaded. It includes selected queries and approved disputes, with missing historical evidence marked.');
+      setNotice('Diagnostic report downloaded. It includes every recorded query at every confidence level, all failures, your focus selections, and approved disputes.');
     } catch (e) { setError(e.message); }
     finally { setExportingReport(false); }
   }
@@ -897,6 +950,12 @@ export default function Admin() {
 
   function toggleQueryLog(id) {
     setSelectedQueryLogs((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  }
+
+  function selectReviewCandidates() {
+    const ids = (queryLogs?.logs || []).filter((log) => log.reviewCandidate).map((log) => log.id);
+    setSelectedQueryLogs(ids);
+    setNotice(ids.length ? `${ids.length} priority records selected as focus items. The report will still include every high-, medium-, and low-confidence answer.` : 'No priority candidates match these filters. The report will still include every recorded answer.');
   }
 
   function openQueryLog(id) {
@@ -974,12 +1033,13 @@ export default function Admin() {
     ['overview','▦','Overview'],
     ['messages','✉','Team inbox & reports'], ['modelreview','◎','Model discovery'],
     ['access', '⌁', 'Team access'], ['ai', '✦', 'AI & model'], ['branding', 'Aa', 'Brand Language'],
-    ['disputes', '⚑', 'Disputes'], ['snippets', '⌘', 'Snippets'], ['knowledge', '▤', 'Knowledge'], ['querylogs', '◧', 'Query & answer logs'], ['calcdata', '∑', 'Calculator data'], ['activity', '◫', 'Activity logs'],
+    ['disputes', '⚑', 'Disputes'], ['snippets', '⌘', 'Snippets'], ['snippetlogs', '↳', 'Snippet usage logs'], ['knowledge', '▤', 'Knowledge'], ['querylogs', '◧', 'Query & answer logs'], ['calcdata', '∑', 'Calculator data'], ['activity', '◫', 'Activity logs'],
     ['autosync', '↻', 'Automatic sync'], ['groqkeys', '⚿', 'Groq keys'], ['notices', '❖', 'Notices'], ['keys', '◇', 'API vault']
   ];
   const titles = Object.fromEntries(navigation.map(([id,, title]) => [id, title]));
   const models = provider === 'groq' ? GROQ_MODELS : OPENAI_MODELS;
   const filteredTerms = terms.filter((term) => `${term.category} ${term.match_term || ''} ${term.required_term} ${term.notes || ''}`.toLowerCase().includes(termSearch.toLowerCase()));
+  const visibleDisputes = disputes.filter((item) => `${item.question || ''} ${item.answer || ''} ${item.user_name || ''} ${item.user_email || ''} ${item.dispute_reason || ''}`.toLowerCase().includes(disputeSearch.toLowerCase()));
   const filteredArticleScopes = (knowledge?.articleScopes || []).filter((article) => `${article.title} ${article.product}`.toLowerCase().includes(articleScopeSearch.toLowerCase())).slice(0, 100);
 
   const activityLogs = activity?.logs || [];
@@ -1055,11 +1115,25 @@ export default function Admin() {
         </div>}
 
         {tab === 'disputes' && <div className="dispute-layout">
-          <section className="settings-card"><div className="settings-head"><div><h2>Disputed answers</h2><p>Review Agent feedback before creating corrective instructions.</p></div><select className="compact-select" value={disputeFilter} onChange={(e) => setDisputeFilter(e.target.value)}><option value="">All statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="snippet_generated">Snippet generated</option></select></div><div className="dispute-list">{disputes.map((item) => <button key={item.id} className={selectedDispute?.id === item.id ? 'selected' : ''} onClick={() => { setSelectedDispute(item); setReviewReason(''); }}><span className={`status-dot ${item.status}`} /><div><b>{item.question}</b><div className="dispute-submitter"><span className="dispute-avatar">{initials(item.user_name, item.user_email)}</span><span>{item.user_name || item.user_email || (item.actor_role === 'admin' ? 'Master Admin' : 'Teammate')}</span></div><small className="meta-line">{formatDate(item.created_at)} · {item.confidence ?? '—'}% confidence</small></div><em>{item.status.replace('_', ' ')}</em></button>)}{!disputes.length && <div className="empty-admin">No disputes in this view.</div>}</div></section>
-          <section className="settings-card review-pane">{selectedDispute ? <><div className="settings-head"><div><span className={`review-status ${selectedDispute.status}`}>{selectedDispute.status.replace('_', ' ')}</span><h2>Dispute #{selectedDispute.id}</h2></div></div><div className="review-meta"><span className="dispute-avatar">{initials(selectedDispute.user_name, selectedDispute.user_email)}</span><div className="who"><b>{selectedDispute.user_name || selectedDispute.user_email || (selectedDispute.actor_role === 'admin' ? 'Master Admin' : 'Teammate')}</b>{selectedDispute.user_email && <small>{selectedDispute.user_email}</small>}</div><div className="when">Submitted<b>{formatDate(selectedDispute.created_at)}</b></div></div><label>Question</label><div className="review-block">{selectedDispute.question}</div><label>AI answer</label><div className="review-block answer-copy">{selectedDispute.answer}</div><label>Agent’s reason</label><div className="review-block dispute-reason">{selectedDispute.dispute_reason}</div>{selectedDispute.sources?.length > 0 && <><label>Sources shown to Agent</label><div className="review-links">{selectedDispute.sources.map((source, index) => <a href={source.url} target="_blank" rel="noreferrer" key={index}>{source.title} ↗</a>)}</div></>}{selectedDispute.status === 'pending' && <><label>Your review reason</label><textarea value={reviewReason} onChange={(e) => setReviewReason(e.target.value)} placeholder="Why are you approving or rejecting this dispute?" /><div className="row"><button className="btn btn-primary" disabled={saving} onClick={() => disputeAction('approve')}>Approve dispute</button><button className="btn btn-secondary" disabled={saving} onClick={() => disputeAction('reject')}>Reject</button></div></>}{selectedDispute.status === 'approved' && <><label>Admin approval reason</label><div className="review-block">{selectedDispute.approval_reason}</div><button className="btn btn-primary" disabled={saving} onClick={() => disputeAction('generate')}>{saving ? 'Checking FAQs and generating…' : 'Generate corrective snippet'}</button></>}{selectedDispute.status === 'snippet_generated' && <><label>Generated instruction</label><div className="review-block snippet-result">{selectedDispute.generated_snippet}</div><button className="btn btn-secondary" onClick={() => setTab('snippets')}>Open Snippets</button></>}</> : <div className="empty-admin tall">Select a dispute to review its full context.</div>}</section>
+          <section className="settings-card"><div className="settings-head"><div><h2>Disputed answers</h2><p>Review concerns, evidence, draft corrections, and activation state.</p></div><span className="state-pill">{visibleDisputes.length} shown</span></div><div className="dispute-tools"><input type="search" value={disputeSearch} onChange={(e) => setDisputeSearch(e.target.value)} placeholder="Search questions, agents, answers, or reasons…" /><select className="compact-select" value={disputeFilter} onChange={(e) => setDisputeFilter(e.target.value)}><option value="">All statuses</option><option value="pending">Pending review</option><option value="approved">Approved / correction draft</option><option value="rejected">Rejected</option><option value="snippet_generated">Active correction</option></select></div><div className="dispute-list">{visibleDisputes.map((item) => <button key={item.id} className={selectedDispute?.id === item.id ? 'selected' : ''} onClick={() => { setSelectedDispute(item); setReviewReason(''); }}><span className={`status-dot ${item.status}`} /><div><b>{item.question}</b><div className="dispute-submitter"><span className="dispute-avatar">{initials(item.user_name, item.user_email)}</span><span>{item.user_name || item.user_email || (item.actor_role === 'admin' ? 'Master Admin' : 'Teammate')}</span></div><small className="meta-line">{formatDate(item.created_at)} · {item.confidence ?? '—'}% confidence</small></div><em>{item.snippet_missing ? 'snippet deleted' : item.status === 'approved' && item.generated_snippet ? 'draft ready' : item.status.replace('_', ' ')}</em></button>)}{!visibleDisputes.length && <div className="empty-admin">No disputes match this view.</div>}</div></section>
+          <section className="settings-card review-pane">{selectedDispute ? <>
+            <div className="settings-head"><div><span className={`review-status ${selectedDispute.status}`}>{selectedDispute.snippet_missing ? 'snippet deleted' : selectedDispute.status.replace('_', ' ')}</span><h2>Dispute #{selectedDispute.id}</h2></div></div>
+            <div className="review-meta"><span className="dispute-avatar">{initials(selectedDispute.user_name, selectedDispute.user_email)}</span><div className="who"><b>{selectedDispute.user_name || selectedDispute.user_email || (selectedDispute.actor_role === 'admin' ? 'Master Admin' : 'Teammate')}</b>{selectedDispute.user_email && <small>{selectedDispute.user_email}</small>}</div><div className="when">Submitted<b>{formatDate(selectedDispute.created_at)}</b></div></div>
+            <label>Question</label><div className="review-block">{selectedDispute.question}</div>
+            <label>AI answer</label><div className="review-block answer-copy">{selectedDispute.answer}</div>
+            <label>Agent’s reason</label><div className="review-block dispute-reason">{selectedDispute.dispute_reason}</div>
+            {selectedDispute.sources?.some((source) => source.type !== 'correction_evidence') && <><label>Recorded scope and sources from the disputed answer</label><div className="review-links">{selectedDispute.sources.filter((source) => source.type !== 'correction_evidence').map((source, index) => <div className="review-source-row" key={index}><span>{sourceTypeLabel(source)}</span>{source.url ? <a href={source.url} target="_blank" rel="noreferrer">{source.title} ↗</a> : <b>{source.title}</b>}</div>)}</div></>}
+            {selectedDispute.sources?.some((source) => source.type === 'correction_evidence') && <details className="correction-evidence"><summary>FAQ and Notice passages used for this draft ({selectedDispute.sources.filter((source) => source.type === 'correction_evidence').length})</summary><div>{selectedDispute.sources.filter((source) => source.type === 'correction_evidence').map((source, index) => <article key={`${source.id || index}`}><b><em className={`source-kind ${sourceType(source)}`}>{sourceTypeLabel(source)}</em>{source.title}</b><p>{source.excerpt || 'Passage text unavailable.'}</p>{source.url && <a href={source.url} target="_blank" rel="noreferrer">Open {sourceTypeLabel(source)} ↗</a>}</article>)}</div></details>}
+            {selectedDispute.status === 'pending' && <><label>Your review reason</label><textarea value={reviewReason} onChange={(e) => setReviewReason(e.target.value)} placeholder="Why are you approving or rejecting this dispute?" /><div className="row"><button className="btn btn-primary" disabled={saving} onClick={() => disputeAction('approve')}>Approve dispute</button><button className="btn btn-secondary" disabled={saving} onClick={() => disputeAction('reject')}>Reject</button></div></>}
+            {selectedDispute.status === 'approved' && <><label>Admin approval reason</label><div className="review-block">{selectedDispute.approval_reason}</div>{selectedDispute.generated_snippet ? <div className="snippet-draft-review">{selectedDispute.linked_snippet && <div className="draft-warning"><b>Replacement draft — existing snippet is still active</b><span>Review this FAQ-and-Notice draft. The live correction will change only after you activate the replacement.</span></div>}<div className="draft-warning"><b>Draft only — inactive</b><span>This instruction cannot affect answers until you review it and explicitly activate it.</span></div><label>Draft title</label><input value={selectedDispute.generated_title || ''} onChange={(e) => setSelectedDispute((item) => ({ ...item, generated_title: e.target.value }))} /><label>Trigger terms</label><textarea className="compact-textarea" value={selectedDispute.generated_trigger_terms || ''} onChange={(e) => setSelectedDispute((item) => ({ ...item, generated_trigger_terms: e.target.value }))} /><label>Correction instruction</label><textarea value={selectedDispute.generated_snippet || ''} onChange={(e) => setSelectedDispute((item) => ({ ...item, generated_snippet: e.target.value }))} /><div className="row"><button className="btn btn-primary" disabled={saving} onClick={() => disputeAction('activate-snippet')}>{saving ? 'Activating…' : selectedDispute.linked_snippet ? 'Activate replacement' : 'Activate reviewed correction'}</button><button className="btn btn-secondary" disabled={saving} onClick={() => disputeAction('generate')}>Discard draft & recheck FAQ + Notices</button></div></div> : <button className="btn btn-primary" disabled={saving} onClick={() => disputeAction('generate')}>{saving ? 'Checking FAQ and Notices…' : 'Generate correction draft'}</button>}</>}
+            {selectedDispute.status === 'snippet_generated' && selectedDispute.snippet_missing && <div className="draft-warning danger"><b>The linked snippet was deleted</b><span>The dispute record was left in the wrong state by the earlier workflow.</span><button className="btn btn-primary" disabled={saving} onClick={() => disputeAction('reset-snippet')}>Restore dispute for a new draft</button></div>}
+            {selectedDispute.status === 'snippet_generated' && !selectedDispute.snippet_missing && <><label>Active instruction</label><div className="review-block snippet-result">{selectedDispute.generated_snippet}</div><div className="row"><button className="btn btn-primary" disabled={saving} onClick={() => disputeAction('generate')}>{saving ? 'Rechecking FAQ and Notices…' : 'Regenerate with FAQ + Notices'}</button><button className="btn btn-secondary" onClick={() => setTab('snippets')}>Open active snippet</button></div></>}
+          </> : <div className="empty-admin tall">Select a dispute to review its full context.</div>}</section>
         </div>}
 
-        {tab === 'snippets' && <div className="settings-stack"><section className="settings-card"><div className="settings-head"><div><h2>Corrective snippets</h2><p>Approved instructions are automatically applied when their trigger words match a future question.</p></div><span className="state-pill ready">{snippets.filter((item) => item.active).length} active</span></div><div className="snippet-list">{snippets.map((snippet) => <article key={snippet.id} className={!snippet.active ? 'inactive' : ''}><div className="snippet-head"><div><span>#{snippet.id}</span><h3>{snippet.title}</h3></div><label className="toggle"><input type="checkbox" checked={snippet.active} onChange={(e) => updateSnippet(snippet, { active: e.target.checked })} /><i /></label></div><label>Triggers</label><p className="trigger-text">{snippet.trigger_terms}</p><label>Instruction</label><textarea defaultValue={snippet.instruction} onBlur={(e) => e.target.value !== snippet.instruction && updateSnippet(snippet, { instruction: e.target.value })} /><div className="snippet-foot"><small>Created {formatDate(snippet.created_at)}</small><button className="mini-action danger-text" onClick={() => deleteSnippet(snippet.id)}>Delete</button></div></article>)}{!snippets.length && <div className="empty-admin">Approved disputes will appear here after you generate their snippets.</div>}</div></section></div>}
+        {tab === 'snippets' && <div className="settings-stack"><section className="settings-card"><div className="settings-head"><div><h2>Corrective snippets</h2><p>Approved instructions are automatically applied when their trigger words match a future question.</p></div><span className="state-pill ready">{snippets.filter((item) => item.active).length} active</span></div><div className="snippet-list">{snippets.map((snippet) => <article key={snippet.id} className={!snippet.active ? 'inactive' : ''}><div className="snippet-head"><div><span>#{snippet.id}</span><h3>{snippet.title}</h3></div><label className="toggle"><input type="checkbox" checked={snippet.active} onChange={(e) => updateSnippet(snippet, { active: e.target.checked })} /><i /></label></div><label>Triggers</label><p className="trigger-text">{snippet.trigger_terms}</p><label>Instruction</label><textarea defaultValue={snippet.instruction} onBlur={(e) => e.target.value !== snippet.instruction && updateSnippet(snippet, { instruction: e.target.value })} /><div className="snippet-foot"><small>Created {formatDate(snippet.created_at)}</small><div className="row"><button className="mini-action" disabled={saving || !snippet.source_dispute_id} title={!snippet.source_dispute_id ? 'Legacy snippet has no linked dispute' : ''} onClick={() => regenerateSnippet(snippet)}>Recheck FAQ + Notices</button><button className="mini-action danger-text" onClick={() => deleteSnippet(snippet.id)}>Delete</button></div></div></article>)}{!snippets.length && <div className="empty-admin">Approved disputes will appear here after you activate their reviewed drafts.</div>}</div></section></div>}
+
+        {tab === 'snippetlogs' && <div className="settings-stack snippet-usage-page">{snippetUsage && <><div className="activity-kpis">{[['Snippet uses', snippetUsage.summary.uses], ['Corrective snippets used', snippetUsage.summary.snippets], ['Queries affected', snippetUsage.summary.queriesAffected], ['Team members', snippetUsage.summary.users]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><section className="settings-card"><div className="settings-head"><div><h2>Usage by corrective snippet</h2><p>A use means the matching instruction was injected into an answer request. It does not claim the snippet changed the final wording.</p></div><button className="btn btn-secondary" onClick={loadSnippetUsage}>Refresh</button></div><div className="snippet-usage-summary">{snippetUsage.snippets.map((item) => <article key={item.snippetId || item.title}><div><b>{item.title}</b><small>Snippet #{item.snippetId || 'legacy'} · last used {formatDate(item.lastUsedAt)}</small></div><strong>{item.uses} use{item.uses === 1 ? '' : 's'}</strong><span>{item.queriesAffected} quer{item.queriesAffected === 1 ? 'y' : 'ies'} · {item.users} user{item.users === 1 ? '' : 's'}</span></article>)}{!snippetUsage.snippets.length && <div className="empty-admin">No snippet use has been recorded yet. New uses will appear after this update is deployed.</div>}</div></section><section className="settings-card"><div className="settings-head"><div><h2>Recent snippet-use events</h2><p>Each row links the correction, query, user, scope, and exact instruction version used.</p></div></div><div className="snippet-event-list">{snippetUsage.events.map((event) => <details key={event.id}><summary><div><b>{event.title || `Snippet #${event.snippetId}`}</b><small>{event.questionPreview || 'Question text unavailable'}</small></div><span>{event.userName || event.userEmail || 'Unknown user'}<small>{formatDate(event.createdAt)}</small></span></summary><div><p><b>Question</b>{event.question || event.questionPreview || 'Unavailable'}</p><p><b>Scope</b>{event.selectedProduct?.toUpperCase() || 'Not recorded'} · {event.selectedScopeLabel || event.selectedModel || 'Not recorded'}</p><p><b>Instruction used</b>{event.instruction || 'Unavailable'}</p><p><b>Query log</b>#{event.queryLogId || 'not recorded'} · match score {event.matchScore ?? 'not recorded'}</p></div></details>)}{!snippetUsage.events.length && <div className="empty-admin">No events recorded yet.</div>}</div></section></>}</div>}
 
         {tab === 'activity' && <div className="settings-stack"><section className="settings-card activity-filters"><div className="settings-head"><div><h2>Filter activity</h2><p>Dates are interpreted in GMT+6.</p></div><DateRangeFilter from={activityFrom} to={activityTo} onApply={applyDateRange} /></div><div className="field-action"><input type="search" value={activityEmail} onChange={(e) => setActivityEmail(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && loadActivity()} placeholder="Search a teammate’s email address" /><div className="row"><button className="btn btn-primary" onClick={() => loadActivity()}>Search</button><button className="btn btn-secondary" onClick={clearActivityFilters}>Clear</button></div></div></section>{activity && <><div className="activity-kpis">{[['Users', activity.summary.users], ['Queries', activity.summary.queries], ['Question words', activity.summary.questionWords.toLocaleString()], ['Input tokens', activity.summary.inputTokens.toLocaleString()], ['Output tokens', activity.summary.outputTokens.toLocaleString()], ['Estimated cost', `$${activity.summary.estimatedCost.toFixed(4)}`]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><section className="settings-card"><div className="settings-head"><div><h2>Activity results</h2><p className="activity-count">{activityLogs.length} event{activityLogs.length === 1 ? '' : 's'} match the current filters.</p></div></div><div className="activity-log-list">{pageLogs.map((log) => <ActivityLogCard key={log.id} log={log} expanded={expandedActivityLog === log.id} onToggle={() => setExpandedActivityLog(expandedActivityLog === log.id ? null : log.id)} />)}{!pageLogs.length && <div className="empty-admin">No activity for this filter.</div>}</div>{totalPages > 1 && <div className="pager"><button disabled={activityPage === 1} onClick={() => setActivityPage((p) => Math.max(1, p - 1))}>‹ Prev</button>{pageNumbers.map((p, i) => p === '…' ? <span key={`e${i}`} className="pager-info">…</span> : <button key={p} className={p === activityPage ? 'current' : ''} onClick={() => setActivityPage(p)}>{p}</button>)}<button disabled={activityPage === totalPages} onClick={() => setActivityPage((p) => Math.min(totalPages, p + 1))}>Next ›</button></div>}</section></>}</div>}
 
@@ -1080,7 +1154,7 @@ export default function Admin() {
           </section>
           <section className="settings-card">
             <div className="settings-head"><div><h2>Recorded queries and answers</h2><p>{queryLogs?.logs?.length || 0} result{queryLogs?.logs?.length === 1 ? '' : 's'} · newest first</p></div></div>
-            <div className="query-log-bulk"><button className="btn btn-secondary" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs((queryLogs?.logs || []).map((log) => log.id))}>Select all filtered</button><button className="btn btn-secondary" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs([])}>Clear selection</button><span>{selectedQueryLogs.length} selected</span><button className="btn btn-primary" disabled={!selectedQueryLogs.length || exportingReport || deletingQueryLogs} onClick={downloadQueryReport}>{exportingReport ? 'Preparing report…' : 'Download review report'}</button><button className="btn query-delete" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => deleteQueryLogs('ids')}>Delete selected permanently</button><button className="btn query-delete" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => deleteQueryLogs('filter')}>Delete all filtered permanently</button></div>
+            <div className="query-log-bulk"><button className="btn btn-secondary" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={selectReviewCandidates}>Mark priority review items</button><button className="btn btn-secondary" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs((queryLogs?.logs || []).map((log) => log.id))}>Select all filtered</button><button className="btn btn-secondary" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs([])}>Clear selection</button><span>{selectedQueryLogs.length} focus item{selectedQueryLogs.length === 1 ? '' : 's'} · report always includes every confidence level and every failure</span><button className="btn btn-primary" disabled={exportingReport || deletingQueryLogs} onClick={downloadQueryReport}>{exportingReport ? 'Preparing report…' : 'Download complete diagnostic report'}</button><button className="btn query-delete" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => deleteQueryLogs('ids')}>Delete selected permanently</button><button className="btn query-delete" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => deleteQueryLogs('filter')}>Delete all filtered permanently</button></div>
             <div className="query-log-list">{(queryLogs?.logs || []).map((log) => {
               const expanded = expandedQueryLog === log.id;
               const selected = selectedQueryLogs.includes(log.id);
@@ -1110,7 +1184,7 @@ export default function Admin() {
                     <details className="interpretation-section"><summary>Evidence rejected before answering ({log.evidenceTrail.rejected?.length || 0})</summary>{log.evidenceTrail.rejected?.length ? <div className="evidence-audit-list rejected">{log.evidenceTrail.rejected.map((item, index) => <div key={`${item.id}-${index}`}><span>×</span><div><b>{item.title || item.id}</b><small>{item.reason}</small></div>{item.url && <a href={item.url} target="_blank" rel="noreferrer">Inspect ↗</a>}</div>)}</div> : <p className="interpretation-empty">No candidate evidence was rejected.</p>}</details></>}
                     {log.processing && <div className="interpretation-processing"><span>Corrective retry<b>{log.processing.partialAnswerRetryAttempted ? (log.processing.partialAnswerRetrySucceeded ? 'Used successfully' : 'Attempted; refusal retained') : 'Not needed'}</b></span><span>Provider fallback<b>{log.processing.fallback ? 'Used' : 'Not used'}</b></span><span>Grounding score<b>{log.processing.groundingScore == null ? 'Not available' : `${log.processing.groundingScore}%`}</b></span></div>}
                   </div></details>}
-                  {log.sources?.length > 0 && <div className="query-log-sources"><label>Sources used ({log.sourceCount})</label>{log.sources.map((source, index) => <a key={`${source.url}-${index}`} href={source.url || undefined} target="_blank" rel="noreferrer">{source.title || 'Untitled source'}<span>Open ↗</span></a>)}</div>}
+                  {log.sources?.length > 0 && <div className="query-log-sources"><label>Sources used ({log.sourceCount})</label>{log.sources.map((source, index) => <details className="query-source-preview" key={`${source.url}-${index}`}><summary><b><em className={`source-kind ${sourceType(source)}`}>{sourceTypeLabel(source)}</em>{source.title || 'Untitled source'}</b><span>Show exact passage +</span></summary><div><p>{source.excerpt || 'The exact passage was not retained in this older query record.'}</p>{source.url && <a href={source.url} target="_blank" rel="noreferrer">Open full {sourceTypeLabel(source)} ↗</a>}</div></details>)}</div>}
                   <button type="button" className="query-collapse" onClick={() => setExpandedQueryLog(null)}>Collapse details ↑</button>
                 </div>}
               </article>;
@@ -1262,7 +1336,7 @@ export default function Admin() {
             </div>}
           </section>
           <section className="settings-card">
-            <div className="settings-head"><div><h2>Stored notices</h2><p>Search by title, poster, category, or topic. Active notices feed the assistant; older states remain available for history.</p></div>{noticeList.length ? <span className="state-pill ready">{noticeCounts.active} active</span> : null}</div>
+            <div className="settings-head"><div><h2>Stored notices</h2><p>Search by title, poster, category, or topic. Active notices feed the assistant; older states remain available for history.</p></div><div className="row">{noticeList.length ? <span className="state-pill ready">{noticeCounts.active} active</span> : null}<button className="btn btn-secondary" disabled={noticeExporting} onClick={exportNotices}>{noticeExporting ? 'Preparing export…' : 'Download Notices knowledge base'}</button></div></div>
             <div className="notice-list-tools"><input type="search" value={noticeSearch} onChange={(e) => setNoticeSearch(e.target.value)} placeholder="Search notices or poster…" /><select value={noticeStatusFilter} onChange={(e) => setNoticeStatusFilter(e.target.value)}><option value="all">All statuses ({noticeList.length})</option><option value="active">Active ({noticeCounts.active})</option><option value="superseded">Superseded ({noticeCounts.superseded})</option><option value="expired">Expired ({noticeCounts.expired})</option></select></div>
             <div className="sync-log-list">{visibleNotices.map((n) => <div key={n.entry_id} className={`sync-log ${n.status === 'active' ? '' : 'skipped'}`}><div className="sync-log-row" style={{ cursor: 'default' }}>
               <span className={`sync-badge ${n.status === 'active' ? 'success' : 'skipped'}`}>{n.status}</span>
