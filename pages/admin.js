@@ -906,21 +906,23 @@ export default function Admin() {
     try {
       const response = await fetch('/api/query-logs', {
         method: 'POST', headers: { ...headers(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'export', ids: selectedQueryLogs, filters: queryFilters })
+        body: JSON.stringify({ action: 'export', ids: selectedQueryLogs, filters: queryFilters, compact: true, compressed: true })
       });
       if (handleAuthLoss(response)) return;
       if (!response.ok) {
         let data = {}; try { data = await response.json(); } catch {}
         throw new Error(data.error || `Report download failed (HTTP ${response.status}). Please retry with fewer selected records.`);
       }
-      if (!String(response.headers.get('content-type') || '').includes('application/json')) throw new Error('The server did not return a review report. Please try again.');
+      const contentType = String(response.headers.get('content-type') || '');
+      const compressed = contentType.includes('application/gzip') || contentType.includes('application/x-gzip');
+      if (!compressed && !contentType.includes('application/json')) throw new Error('The server did not return a review report. Please try again.');
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a'); link.href = url;
-      link.download = 'fundednext-review-' + new Date().toISOString().slice(0,10) + '.json';
+      link.download = 'fundednext-review-' + new Date().toISOString().slice(0,10) + (compressed ? '.json.gz' : '.json');
       document.body.appendChild(link); link.click(); link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setNotice('Diagnostic report downloaded. It includes every recorded query at every confidence level, all failures, your focus selections, and approved disputes.');
+      setNotice(`Compact diagnostic report downloaded${compressed ? ' as a compressed .json.gz file' : ''}. It includes every confidence level, all failures, focus selections, and approved disputes.`);
     } catch (e) { setError(e.message); }
     finally { setExportingReport(false); }
   }
@@ -1154,7 +1156,7 @@ export default function Admin() {
           </section>
           <section className="settings-card">
             <div className="settings-head"><div><h2>Recorded queries and answers</h2><p>{queryLogs?.logs?.length || 0} result{queryLogs?.logs?.length === 1 ? '' : 's'} · newest first</p></div></div>
-            <div className="query-log-bulk"><button className="btn btn-secondary" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={selectReviewCandidates}>Mark priority review items</button><button className="btn btn-secondary" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs((queryLogs?.logs || []).map((log) => log.id))}>Select all filtered</button><button className="btn btn-secondary" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs([])}>Clear selection</button><span>{selectedQueryLogs.length} focus item{selectedQueryLogs.length === 1 ? '' : 's'} · report always includes every confidence level and every failure</span><button className="btn btn-primary" disabled={exportingReport || deletingQueryLogs} onClick={downloadQueryReport}>{exportingReport ? 'Preparing report…' : 'Download complete diagnostic report'}</button><button className="btn query-delete" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => deleteQueryLogs('ids')}>Delete selected permanently</button><button className="btn query-delete" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => deleteQueryLogs('filter')}>Delete all filtered permanently</button></div>
+            <div className="query-log-bulk"><button className="btn btn-secondary" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={selectReviewCandidates}>Mark priority review items</button><button className="btn btn-secondary" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs((queryLogs?.logs || []).map((log) => log.id))}>Select all filtered</button><button className="btn btn-secondary" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs([])}>Clear selection</button><span>{selectedQueryLogs.length} focus item{selectedQueryLogs.length === 1 ? '' : 's'} · all confidence levels included · compact compressed download</span><button className="btn btn-primary" disabled={exportingReport || deletingQueryLogs} onClick={downloadQueryReport}>{exportingReport ? 'Compressing report…' : 'Download compact report (.json.gz)'}</button><button className="btn query-delete" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => deleteQueryLogs('ids')}>Delete selected permanently</button><button className="btn query-delete" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => deleteQueryLogs('filter')}>Delete all filtered permanently</button></div>
             <div className="query-log-list">{(queryLogs?.logs || []).map((log) => {
               const expanded = expandedQueryLog === log.id;
               const selected = selectedQueryLogs.includes(log.id);
