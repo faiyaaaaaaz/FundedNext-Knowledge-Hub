@@ -29,7 +29,7 @@ function mapRow(row, review = false) {
     actorRole: row.actor_role || '', question: meta.question || meta.questionPreview || '', answer: meta.answer || meta.answerPreview || meta.error || (meta.status === 'processing' ? `No completed response recorded. Last stage: ${meta.stage || 'Unknown'}. ${Date.now() - Date.parse(row.created_at) > 120000 ? 'The request may have been interrupted or timed out.' : 'The request may still be running.'}` : meta.reason || ''),
     questionWordCount: Number(row.question_word_count || 0), answerWordCount: Number(meta.answerWordCount || 0),
     provider: row.provider || '', model: row.model || '', inputTokens: Number(row.input_tokens || 0), outputTokens: Number(row.output_tokens || 0),
-    estimatedCost: Number(row.estimated_cost || 0), success: row.success !== false, product: meta.selectedProduct || '',
+    estimatedCost: Number(row.estimated_cost || 0), success: row.success !== false || !!meta.answer, storedSuccessFlag: row.success !== false, product: meta.selectedProduct || '',
     accountModel: meta.selectedModel || '', scopeLabel: meta.selectedScopeLabel || '', confidence: meta.confidence ?? null,
     confidenceLabel: meta.confidenceLabel || '', sourceCount: Number(meta.sourceCount || 0), sources: Array.isArray(meta.sources) ? meta.sources : [],
     feedback: meta.feedback || '', feedbackAt: meta.feedbackAt || '', feedbackBy: meta.feedbackBy || '',
@@ -39,10 +39,11 @@ function mapRow(row, review = false) {
     evidenceTrail: meta.evidenceTrail && typeof meta.evidenceTrail === 'object' ? meta.evidenceTrail : null,
     processing: meta.processing && typeof meta.processing === 'object' ? meta.processing : null,
     refusalReason: meta.refusalReason || '', grounding: meta.grounding ?? null,
-    status: meta.status || (row.success === false ? 'failed_or_incomplete' : 'legacy_status_not_recorded'),
+    status: meta.status === 'processing' && meta.answer ? 'complete' : meta.status || (row.success === false ? 'failed_or_incomplete' : 'legacy_status_not_recorded'),
     stage: meta.stage || null, error: meta.error || null, reason: meta.reason || null,
     questionCoverage: meta.questionCoverage || null, coverageSummary: meta.coverageSummary || null,
     noticeConflict: meta.noticeConflict || null,
+    reviewCandidate: !!meta.error || !meta.answer || Number(meta.sourceCount || 0) === 0 || (meta.confidence != null && Number(meta.confidence) < 65) || (Array.isArray(meta.questionCoverage) && meta.questionCoverage.some(item => item.status !== 'answered')),
     ...(review ? {
       evidenceSnapshot: meta.evidenceSnapshot || null,
       reviewTrace: meta.reviewTrace || null,
@@ -80,11 +81,13 @@ async function fetchAll(filters, ids = null, review = false) {
   return rows.map(row => mapRow(row, review)).filter((row) => matches(row, filters));
 }
 
-async function buildReport(ids) {
-  const queries = [];
-  for (let start = 0; start < ids.length; start += 100) {
-    queries.push(...await fetchAll(filtersFrom(), ids.slice(start, start + 100), true));
-  }
+function failedOrIncomplete(row) {
+  return !!row.error || (!row.answer && (!row.success || ['processing','failed_or_incomplete','error','timeout'].includes(row.status)));
+}
+
+async function buildReport(ids, filters) {
+  const reportQueries = await fetchAll(filtersFrom(), null, true);
+  const failedRows = reportQueries.filter(failedOrIncomplete);
   const approvedDisputes = [];
   for (let offset = 0; ; offset += 500) {
     const { data, error } = await supabaseAdmin().from('disputes')
@@ -97,10 +100,11 @@ async function buildReport(ids) {
     }
     if (!data || data.length < 500) break;
   }
-  const found = new Set(queries.map(query => String(query.id)));
+  const found = new Set(reportQueries.map(query => String(query.id)));
+  const failedIds = failedRows.map(row => String(row.id));
   return {
-    schema: 'fundednext-evaluation-report', version: 1, exportedAt: new Date().toISOString(),
-    contents: 'Selected recorded queries plus all approved disputes as a separately labelled evaluation reference library.',
+    schema: 'fundednext-evaluation-report', version: 3, exportedAt: new Date().toISOString(),
+    contents: 'Every recorded query at every confidence level, including failed/incomplete queries, plus all approved disputes as a separately labelled evaluation reference library. Manual selections are retained only as reviewer focus markers.',
     limitations: [
       'Observable processing and answer-model request evidence only; no private hidden chain-of-thought.',
       'Historical missing evidence is not reconstructed from current sources. Linked live articles may have changed.',
@@ -109,9 +113,16 @@ async function buildReport(ids) {
       'Snippet-generated disputes passed approval in this application and are included. Pending and rejected disputes are excluded.',
       'Interpretation and verification model calls are summarized where recorded; detailed request traces cover answer generation and its retries.'
     ],
+    selection: { manuallySelectedQueryIds: ids, automaticallyIncludedFailedQueryIds: failedIds, filtersVisibleWhenExported: filters, queryScope: 'all recorded queries regardless of confidence or active filters' },
     requestedQueryIds: ids, missingQueryIds: ids.filter(id => !found.has(id)),
-    counts: { queries: queries.length, approvedDisputes: approvedDisputes.length },
-    queries, approvedDisputes
+    counts: {
+      queries: reportQueries.length, failedOrIncompleteQueries: failedIds.length,
+      highConfidenceQueries: reportQueries.filter(row => Number(row.confidence) >= 85).length,
+      reviewSuggestedQueries: reportQueries.filter(row => row.confidence != null && Number(row.confidence) >= 65 && Number(row.confidence) < 85).length,
+      needsVerificationQueries: reportQueries.filter(row => row.confidence == null || Number(row.confidence) < 65).length,
+      approvedDisputes: approvedDisputes.length
+    },
+    queries: reportQueries, approvedDisputes
   };
 }
 
@@ -124,8 +135,9 @@ export default async function handler(req, res) {
     if (req.method === 'POST') {
       if (req.body?.action !== 'export') return res.status(400).json({ error: 'Unknown report action.' });
       const ids = [...new Set((Array.isArray(req.body.ids) ? req.body.ids : []).map(String).filter(Boolean))];
-      if (!ids.length) return res.status(400).json({ error: 'Select at least one recorded query.' });
-      const report = await buildReport(ids);
+      const filters = filtersFrom(req.body.filters || {});
+      const report = await buildReport(ids, filters);
+      if (!report.counts.queries) return res.status(400).json({ error: 'No recorded queries are available for export.' });
       res.setHeader('Content-Disposition', 'attachment; filename="fundednext-review.json"');
       return res.status(200).json(report);
     }
