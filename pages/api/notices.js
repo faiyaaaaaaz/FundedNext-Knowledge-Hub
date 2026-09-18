@@ -12,6 +12,18 @@ import {
 
 export const config = { maxDuration: 120 };
 
+async function exportAllNotices(sb) {
+  const rows = [];
+  const pageSize = 500;
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await sb.from('notices').select('*').order('posted_at', { ascending: false }).order('entry_id', { ascending: true }).range(offset, offset + pageSize - 1);
+    if (error) throw error;
+    rows.push(...(data || []));
+    if (!data || data.length < pageSize) break;
+  }
+  return rows;
+}
+
 export default async function handler(req, res) {
   try {
     const access = await authenticateRequest(req);
@@ -30,6 +42,22 @@ export default async function handler(req, res) {
 
     if (req.method === 'POST') {
       const body = req.body || {};
+
+      if (body.action === 'export') {
+        if (access.role !== 'admin') return res.status(403).json({ error: 'Only an admin can export the Notices knowledge base.' });
+        const notices = await exportAllNotices(sb);
+        const counts = notices.reduce((result, item) => {
+          result[item.status || 'unknown'] = (result[item.status || 'unknown'] || 0) + 1;
+          return result;
+        }, {});
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Content-Disposition', 'attachment; filename="fundednext-notices-knowledge-base.json"');
+        return res.status(200).json({
+          schema: 'fundednext-notices-knowledge-base', version: 1, exportedAt: new Date().toISOString(),
+          contents: 'Complete stored CEx Notices knowledge base across all statuses. Includes uploaded records and notices saved through the manual paste workflow.',
+          counts: { total: notices.length, byStatus: counts }, notices
+        });
+      }
 
       if (body.action === 'import') {
         const rag = typeof body.rag === 'string' ? JSON.parse(body.rag) : body.rag;
