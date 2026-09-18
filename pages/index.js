@@ -118,11 +118,12 @@ function SourceCites({ refs, sources }) {
       {refs.map((n) => {
         const source = sources?.[n - 1];
         if (!source) return null;
+        const typeLabel = source.kind === 'calculator' ? 'Calculator' : source.kind === 'notice' ? 'CEx Notice' : source.kind === 'internal' ? 'Internal knowledge' : 'FAQ';
         return (
           <a key={n} className={`seg-cite${source.kind === 'calculator' ? ' calc' : ''}`} data-n={n} href={source.url || undefined} target="_blank" rel="noreferrer"
-            aria-label={`${source.kind === 'calculator' ? 'Calculator reference' : 'Source'} ${n}: ${source.title}`}>
+            aria-label={`${typeLabel} ${n}: ${source.title}`}>
             <span className="seg-cite-pop" aria-hidden="true">
-              <b>{source.kind === 'calculator' ? '⚙ Calculator' : `Source ${n}`}</b><span>{source.title}</span><em>{source.kind === 'calculator' ? 'Reference' : source.kind === 'notice' ? 'Open notice ↗' : 'Open article ↗'}</em>
+              <b>{source.kind === 'calculator' ? '⚙ Calculator' : `${typeLabel} ${n}`}</b><span>{source.title}</span><em>{source.kind === 'calculator' ? 'Reference' : source.kind === 'notice' ? 'Open CEx Notice ↗' : source.kind === 'internal' ? 'Internal reference' : 'Open FAQ ↗'}</em>
             </span>
           </a>
         );
