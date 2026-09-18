@@ -153,6 +153,8 @@ export default async function handler(req, res) {
       const result = await openaiChatDetailed(key, model, messages, baseUrl);
       attempt.status = 'completed';
       attempt.usage = result.usage || null;
+      attempt.response = String(result.content || '').slice(0, 20000);
+      attempt.responseTruncated = String(result.content || '').length > 20000;
       return result;
     } catch (error) {
       attempt.status = 'failed';
@@ -722,6 +724,21 @@ export default async function handler(req, res) {
     const [basePrompt, brandRules, snippets] = await Promise.all([
       getPrompt(), getBrandingRules(), getRelevantSnippets(question)
     ]);
+    if (snippets.length) {
+      await Promise.allSettled(snippets.map((snippet) => createActivity({
+        actorRole: access.role, sessionId: access.sessionId,
+        userName: access.name, userEmail: access.email, authProvider: access.authProvider,
+        eventType: 'snippet_usage', success: true,
+        metadata: {
+          snippetId: snippet.id, title: snippet.title || '', triggerTerms: snippet.trigger_terms || '',
+          instruction: snippet.instruction || '', instructionHash: sha256(String(snippet.instruction || '')),
+          matchScore: Number(snippet._score || 0), queryLogId: requestLogId,
+          question: question.slice(0, 4000), questionPreview: question.slice(0, 180),
+          selectedProduct, selectedModel: selectedModel?.slug || 'all',
+          selectedScopeLabel: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models`
+        }
+      })));
+    }
     const context = matches.map((item, index) => {
       const nm = noticeMetaByAid[item.article_id];
       const tag = nm ? `OFFICIAL NOTICE (dated ${String(nm.posted_at || '').slice(0, 10)}) - current policy, overrides older evidence:\n` : '';
@@ -951,20 +968,25 @@ export default async function handler(req, res) {
       const start = Math.max(0, hit - 180);
       return `${start ? '…' : ''}${content.slice(start, start + 900).trim()}${start + 900 < content.length ? '…' : ''}`;
     };
+    const sourceKind = (item) => noticeMetaByAid[item?.article_id] ? 'notice' : String(item?.article_id || '').startsWith('calc:') ? 'calculator' : String(item?.article_id || '').startsWith('kb:') ? 'internal' : 'faq';
+    const sourceRecord = (item) => {
+      const notice = noticeMetaByAid[item?.article_id];
+      return { title: item.article_title, url: item.article_url, excerpt: exactExcerpt(item), _aid: item.article_id, kind: sourceKind(item), ...(notice ? { postedBy: notice.posted_by || null, postedAt: notice.posted_at || null } : {}) };
+    };
     const seen = new Set();
     let sources = [];
     for (const number of sourceNumbers) {
       const item = matches[number - 1];
       if (item && !seen.has(item.article_id)) {
         seen.add(item.article_id);
-        sources.push({ title: item.article_title, url: item.article_url, excerpt: exactExcerpt(item), _aid: item.article_id });
+        sources.push(sourceRecord(item));
       }
     }
     if (!sourceLine) {
       for (const item of matches) {
         if (!seen.has(item.article_id)) {
           seen.add(item.article_id);
-          sources.push({ title: item.article_title, url: item.article_url, excerpt: exactExcerpt(item), _aid: item.article_id });
+          sources.push(sourceRecord(item));
         }
         if (sources.length === 3) break;
       }
@@ -976,7 +998,7 @@ export default async function handler(req, res) {
       const r = okCalc[i];
       const aid = `calc:${r.calcType}`;
       if (!sources.some((s) => s._aid === aid)) {
-        sources.unshift({ title: r.title, url: '', excerpt: String(r.text || '').trim().slice(0, 900), _aid: aid });
+        sources.unshift({ title: r.title, url: '', excerpt: String(r.text || '').trim().slice(0, 900), _aid: aid, kind: 'calculator' });
       }
     }
 
@@ -987,7 +1009,7 @@ export default async function handler(req, res) {
       if (!item) return null;
       const existing = sources.findIndex((s) => s._aid === item.article_id);
       if (existing >= 0) return existing + 1;
-      sources.push({ title: item.article_title, url: item.article_url, excerpt: exactExcerpt(item), _aid: item.article_id });
+      sources.push(sourceRecord(item));
       return sources.length;
     };
 
@@ -1108,7 +1130,9 @@ export default async function handler(req, res) {
       inputTokens,
       outputTokens,
       estimatedCost: estimateCost(answerProvider, chatModel, inputTokens, outputTokens),
+      success: true,
       metadata: {
+        status: 'complete', stage: 'Completed',
         confidence, confidenceLabel, sourceCount: sources.length, scope,
         selectedProduct, selectedModel: selectedModel?.slug || 'all',
         selectedScopeLabel: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models`,
@@ -1123,6 +1147,8 @@ export default async function handler(req, res) {
           rejected: [...rejectedEvidence, ...noticeRejections].slice(0, 40),
           selectedForAnswer: matches.slice(0, 20).map((item, index) => ({ position: index + 1, id: item.article_id, title: item.article_title, url: item.article_url, kind: noticeMetaByAid[item.article_id] ? 'notice' : String(item.article_id || '').startsWith('kb:') ? 'internal' : 'faq', similarity: Number(item.similarity || 0), rank: Number(item._rank || 0), exactScope: !!item._scoped })),
           finalSourceNumbers: sourceNumbers,
+          finalSourceDeclaration: sourceLine ? String(sourceLine[1] || '').trim() : null,
+          sourceDeclarationPresent: !!sourceLine,
           finalSources: sources.slice(0, 12).map((source) => ({ title: source.title, url: source.url, kind: source.kind }))
         },
         processing: { partialAnswerRetryAttempted, partialAnswerRetrySucceeded, fallback: usedFallback, groundingScore },
@@ -1131,7 +1157,7 @@ export default async function handler(req, res) {
         question, questionPreview: question.slice(0, 180),
         answer: String(answer || ''), answerPreview: String(answer || '').slice(0, 240),
         answerWordCount: wordCount(answer), answerTruncated: false, questionTruncated: false,
-        sources: sources.slice(0, 12).map((source) => ({ title: source.title, url: source.url }))
+        sources: sources.slice(0, 12).map((source) => ({ title: source.title, url: source.url, kind: source.kind, excerpt: String(source.excerpt || '').slice(0, 4000), postedBy: source.postedBy || null, postedAt: source.postedAt || null }))
       }
     });
 
