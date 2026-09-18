@@ -36,7 +36,12 @@ const CORE_GUARDRAILS =
   '- Keep paragraphs short and separated by one blank line. Use simple numbered steps only when a sequence is genuinely needed.\n' +
   '- For a multi-part question, answer every part supported by direct evidence and say only that the specific unsupported part needs checking.\n' +
   `- Reply exactly "${SAFE_UNCONFIRMED}" only when direct evidence supports none of the requested parts.\n` +
-  '- Factual numbers, dates, percentages, time periods, and conditions must be directly supported by the selected FAQ evidence.';
+  '- Factual numbers, dates, percentages, time periods, and conditions must be directly supported by the selected FAQ evidence.\n' +
+  '- Never treat a generic rule as proof that it applies to every Account model. When evidence differs by model, label each model separately.\n' +
+  '- A Challenge Phase does not itself receive a Performance Reward. If the customer says "Challenge Account" while asking to withdraw, explain the stage distinction or ask which FundedNext Account they mean.\n' +
+  '- For KYC nationality or country eligibility, a generic list of accepted document types is not proof that a country is eligible. Confirm only when the evidence explicitly covers that country or restriction.\n' +
+  '- When the customer gives an Account size, every numeric example must use that size and its directly supported rules. Never copy an example from another Account size.\n' +
+  '- Never infer that a company, corporate entity, or third party may own or operate an Account unless the evidence explicitly confirms that ownership arrangement.';
 
 function keywords(question) {
   return [...new Set(String(question).toLowerCase().replace(/[^a-z0-9 -]/g, ' ').split(/\s+/)
@@ -350,6 +355,21 @@ export default async function handler(req, res) {
     const payoutish = /\b(?:get paid|getting paid|payouts?|performance rewards?|reward share|profit split|withdraw|withdrawal|cash ?out)\b/.test(probe);
     // The classic ambiguous case: a payout question that names no specific aspect.
     const payoutUmbrella = payoutish && !hasProcessingQualifier && !hasCycleQualifier && !hasMethodQualifier;
+    const bareWithdrawalMinimum = /(?:\bminimum\b.{0,35}\b(?:withdraw|withdrawal)\b|\b(?:withdraw|withdrawal)\b.{0,35}\bminimum\b)/.test(probe) &&
+      !/\b(?:performance reward|fundednext account|commission|refer|affiliate|partner|pay-?in|purchase|registration fee)\b/.test(probe);
+    if (bareWithdrawalMinimum && !req.body?.clarification) {
+      return res.status(200).json({
+        needsClarification: true,
+        originalQuestion: question,
+        clarifyingQuestion: 'Which type of withdrawal do you mean?',
+        clarificationReason: 'Performance Rewards, referral commission, and partner withdrawals have different minimums. Payment-method minimums also differ.',
+        choices: [
+          { value: 'Performance Reward withdrawal from a FundedNext Account', label: 'Performance Reward', description: 'Check the minimum and method limits for a FundedNext Account reward.' },
+          { value: 'Refer & Earn commission withdrawal', label: 'Referral commission', description: 'Check the Refer & Earn commission threshold.' },
+          { value: 'Partner commission withdrawal', label: 'Partner withdrawal', description: 'Check the partner-program withdrawal minimum.' }
+        ]
+      });
+    }
     if (payoutUmbrella && !explicitMultiPart && !req.body?.clarification) {
       return res.status(200).json({
         needsClarification: true,
@@ -367,7 +387,8 @@ export default async function handler(req, res) {
 
     // The visible product/model controls now provide this missing scope. Do not
     // open a redundant Account-model clarification dialog.
-    const accountDependent = false;
+    const accountDependent = !selectedModel && questionModels.length === 0 &&
+      /\b(?:daily loss|maximum loss|mll|drawdown|profit target|minimum trading days?|consistency rule|trading cycle|first performance reward|first payout|reward cycle|reset|merge|news trading|ea trading|expert advisor|risk limit)\b/i.test(probe);
     const asksAcrossModels = /\b(all|each|every|compare|comparison|different models?|by model)\b/i.test(question);
     if (accountDependent && !asksAcrossModels && !explicitMultiPart && !req.body?.clarification) {
       return res.status(200).json({
@@ -376,14 +397,9 @@ export default async function handler(req, res) {
         clarifyingQuestion: 'Which Account model should I check?',
         clarificationReason: 'Targets, limits, cycles, and breach rules can differ by Account model.',
         choices: [
-          { value: 'Evaluation FundedNext Account', label: 'Evaluation FundedNext Account', description: 'Use the Evaluation Account rules.' },
-          { value: 'Stellar 1-Step FundedNext Account', label: 'Stellar 1-Step', description: 'Use the Stellar 1-Step rules.' },
-          { value: 'Stellar 2-Step FundedNext Account', label: 'Stellar 2-Step', description: 'Use the Stellar 2-Step rules.' },
-          { value: 'Stellar Lite FundedNext Account', label: 'Stellar Lite', description: 'Use the Stellar Lite rules.' },
-          { value: 'Stellar Instant FundedNext Account', label: 'Stellar Instant', description: 'Use the Stellar Instant rules.' },
-          { value: 'Rapid Challenge', label: 'Rapid Challenge', description: 'Use the Rapid Challenge rules.' },
-          { value: 'No DLL 1-Step CFD — Model FNL:001', label: 'No DLL 1-Step CFD — FNL:001', description: 'Use the FNL:001 model rules.' },
-          { value: 'Compare every Account model', label: 'Compare all models', description: 'Show the differences across Account models.' }
+          ...scopeCatalog.models.filter((item) => item.product === selectedProduct && ['current','previous'].includes(item.status)).slice(0, 7)
+            .map((item) => ({ value: item.name, label: item.name, description: `Use the verified ${item.name} rules.` })),
+          { value: `Compare every ${selectedProduct.toUpperCase()} Account model`, label: 'Compare all models', description: 'Show model-specific differences without merging their rules.' }
         ]
       });
     }
@@ -489,9 +505,12 @@ export default async function handler(req, res) {
       const title = String(item.article_title || '').toLowerCase();
       const content = String(item.content || '').toLowerCase();
       const termScore = terms.reduce((score, term) => score + (title.includes(term) ? 3 : content.includes(term) ? 1 : 0), 0);
+      const intentTerms = keywords(clearQuestion);
+      const titleHits = intentTerms.filter((term) => title.includes(term)).length;
+      const exactTitleScore = intentTerms.length ? (titleHits / intentTerms.length) * 14 + (titleHits >= Math.min(3, intentTerms.length) ? 6 : 0) : 0;
       const scopeScore = scope ? (title.includes(scope) ? 18 : content.includes(scope) ? 8 : hasOtherScope(`${title} ${content}`, scope) ? -18 : 0) : 0;
       const vectorScore = Number(item.similarity || 0) * 8;
-      return { ...item, _rank: termScore + scopeScore + vectorScore, _scoped: !!scope && (title.includes(scope) || content.includes(scope)) };
+      return { ...item, _rank: termScore + exactTitleScore + scopeScore + vectorScore, _scoped: !!scope && (title.includes(scope) || content.includes(scope)) };
     }).sort((a, b) => b._rank - a._rank);
 
     // Enforce the UI selection before evidence reaches the answering model.
@@ -503,6 +522,12 @@ export default async function handler(req, res) {
     const rejectedEvidence = [];
     candidates = candidates.filter((item) => {
       const blob = `${item.article_title || ''}\n${item.content || ''}`;
+      const localizedTitle = /^\[[A-Z]{2}\]/i.test(String(item.article_title || '').trim());
+      const questionUsesLocalizedScript = /[\u0600-\u06ff\u0750-\u077f\u3040-\u30ff\u3400-\u9fff\u0400-\u04ff]/.test(question);
+      if (localizedTitle && !questionUsesLocalizedScript) {
+        rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: 'Localized FAQ excluded from an English-language question', similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
+        return false;
+      }
       const override = articleScopeOverrides[String(item.article_id || '')];
       const mentioned = override?.model && override.model !== 'all'
         ? scopeCatalog.models.filter((model) => model.slug === override.model && model.product === override.product)
@@ -654,7 +679,7 @@ export default async function handler(req, res) {
       const order = new Map(candidates.map((it, i) => [it.id, i]));
       matches = picked.sort((a, b) => order.get(a.id) - order.get(b.id)).slice(0, 12);
     } else {
-      matches = candidates.slice(0, 10);
+      matches = candidates.slice(0, 8);
     }
     // Preserve evidence for each explicitly requested model in a comparison.
     if (comparisonModels.length > 1) {
@@ -665,6 +690,17 @@ export default async function handler(req, res) {
       for (const item of matches) { if (balanced.size >= 16) break; balanced.set(String(item.id), item); }
       matches = [...balanced.values()];
     }
+    // Keep at most two passages from one article. Repeated chunks from a single
+    // FAQ were crowding exact evidence from other relevant articles and making
+    // prompts much larger without adding source diversity.
+    const articleChunkCounts = new Map();
+    matches = matches.filter((item) => {
+      const key = String(item.article_id || item.id);
+      const count = articleChunkCounts.get(key) || 0;
+      if (count >= 2) return false;
+      articleChunkCounts.set(key, count + 1);
+      return true;
+    });
 
     // Merge exact calculator results as top, authoritative evidence so the model
     // reproduces the computed figures while still answering the FAQ parts.
@@ -745,7 +781,9 @@ export default async function handler(req, res) {
       return `[${index + 1}] ${tag}${item.article_title}\nURL: ${item.article_url}\n${item.content}`;
     }).join('\n\n---\n\n');
     const snippetText = snippets.length
-      ? '\n\nCORRECTIVE INSTRUCTIONS FROM APPROVED REVIEWS:\n' + snippets.map((item) => `- ${item.instruction}`).join('\n')
+      ? '\n\nREVIEW NOTES FROM PREVIOUS CORRECTIONS (NON-AUTHORITATIVE):\n' +
+        'Use a note only when the current FAQ/Notice evidence directly supports it. Ignore any note that conflicts with, extends, or is not proven by the current evidence. Current applicable Notices and FAQ passages always control.\n' +
+        snippets.map((item) => `- ${item.instruction}`).join('\n')
       : '';
     const scopeText = `\n\nMANDATORY USER-SELECTED SCOPE: Product = ${selectedProduct.toUpperCase()}; Account model = ${selectedModel?.name || 'All models in the selected product family'}. ` +
       'Every supplied evidence item has already passed this scope filter. Never mention, compare, or borrow a rule from an Account model or product outside this selection. ' +
@@ -787,7 +825,7 @@ export default async function handler(req, res) {
       ? '\n\nTONE: Respond professionally and directly. Do not add a generic empathy sentence.'
       : `\n\nTONE: The client appears ${emotion}. Begin with one brief, natural, professional acknowledgement appropriate to that emotion, then answer directly. Do not say you detected an emotion. Do not over-apologize, admit fault, promise an outcome, or change any policy fact. Empathy affects tone only.`;
     const noticesText = hasNoticeEvidence
-      ? '\n\nAUTHORITATIVE UPDATES: Some evidence items are official CEx notices marked "OFFICIAL NOTICE (dated ...)". They reflect the LATEST policy and OVERRIDE any older FAQ or older notice. You MUST follow these rules: (1) When evidence items conflict, follow ONLY the one with the most recent notice date. NEVER merge an older allowance with a newer restriction. (2) If a newer notice restricts, prohibits, or removes something an older item allowed, state the restriction and do NOT present the old allowance as still valid. (3) Honor every condition exactly as written - account size, purchase date, region, model. If the answer depends on a condition the customer did not state (for example WHEN the account was purchased), do NOT assume the permissive case: give the conditional outcome for each branch (for example: if purchased on or after the stated date ... ; if purchased before it ...). (4) Never soften a prohibition into "allowed with an add-on" unless the newest notice explicitly says so.'
+      ? '\n\nAUTHORITATIVE UPDATES: Some evidence items are official CEx notices marked "OFFICIAL NOTICE (dated ...)". A Notice overrides an older FAQ or Notice ONLY for the exact rule and conditions it explicitly changes. Silence about a different requirement does not repeal that requirement. For example, a Notice changing a competition duration does not remove a separate minimum-trading-day rule. You MUST follow these rules: (1) Compare evidence by topic, product, model, region, effective date, and condition before declaring a conflict. (2) For the same rule and conditions, follow only the newest applicable statement. Never merge an older allowance with a newer restriction. (3) If a newer Notice explicitly restricts, prohibits, or removes something, do not present the old allowance as valid. (4) Honor every condition exactly as written. If the answer depends on a condition the customer did not state, give each supported conditional branch or ask. (5) Never soften a prohibition into "allowed with an add-on" unless the newest applicable Notice explicitly says so.'
       : '';
     const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText + noticesText +
       `\n\nAfter the customer-ready answer, add five private final lines. COVERAGE must contain exactly ${topicPlan.length} comma-separated values, one for each customer question in order:\n` +
@@ -953,7 +991,22 @@ export default async function handler(req, res) {
         } catch { /* keep the safe first response if correction fails */ }
       }
     }
-    const sourceLine = raw.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
+    let sourceLine = raw.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
+    if (sourceLine && !parseNumbers(sourceLine).length && cleanAnswer(raw) !== SAFE_UNCONFIRMED && cleanAnswer(raw).length > 80 && matches.length) {
+      const retryKey = answerProvider === 'groq' ? usedGroqKey : openaiKey;
+      const retryModel = usedFallback ? fallbackModel : chatModel;
+      const retryBaseUrl = answerProvider === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1';
+      if (retryKey) {
+        try {
+          const retried = await tracedAnswerCall(retryKey, retryModel, [
+            { role: 'system', content: system + '\n\nCITATION RECOVERY: The previous draft cited no evidence. Rewrite it using only directly supporting numbered passages. Remove any unsupported claim. You must provide usable SOURCES and SEGMENTS lines.' },
+            { role: 'user', content: `${askedText}\n\nPrevious draft:\n${cleanAnswer(raw)}\n\nEvidence:\n${recoveryContext || context}` }
+          ], retryBaseUrl);
+          const retrySources = retried.content.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
+          if (parseNumbers(retrySources).length) { completion = retried; raw = retried.content; sourceLine = retrySources; }
+        } catch { /* retain the original answer; zero sources will keep confidence low */ }
+      }
+    }
     const confidenceLine = raw.match(/(?:\*\*)?CONFIDENCE(?:\*\*)?\s*:\s*(\d{1,3})/i);
     const coverageLine = raw.match(/(?:\*\*)?COVERAGE(?:\*\*)?\s*:\s*([^\n]*)/i);
     const noticeConflictLine = raw.match(/(?:\*\*)?NOTICE_CONFLICT(?:\*\*)?\s*:\s*(yes|no)/i);
@@ -1015,7 +1068,7 @@ export default async function handler(req, res) {
 
     const modelConfidence = Math.max(0, Math.min(100, Number(confidenceLine?.[1] || 70)));
     const scopedCount = matches.filter((item) => item._scoped).length;
-    const evidenceCap = scope ? (scopedCount >= 3 ? 96 : scopedCount === 2 ? 90 : 80) : (sources.length >= 2 ? 92 : 82);
+    const evidenceCap = sources.length === 0 ? 25 : scope ? (scopedCount >= 3 ? 96 : scopedCount === 2 ? 90 : 80) : (sources.length >= 2 ? 92 : 82);
     let confidence = Math.min(modelConfidence, evidenceCap);
     let confidenceLabel = confidence >= 85 ? 'High confidence' : confidence >= 65 ? 'Review suggested' : 'Needs verification';
     let answer = cleanAnswer(applyBrandingReplacements(cleanAnswer(raw), brandRules));
