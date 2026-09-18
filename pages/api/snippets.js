@@ -26,8 +26,17 @@ export default async function handler(req, res) {
     }
     if (req.method === 'DELETE') {
       const id = Number(req.query.id);
+      const { data: snippet, error: readError } = await sb.from('ai_snippets').select('id,source_dispute_id').eq('id', id).maybeSingle();
+      if (readError) throw readError;
       const { error } = await sb.from('ai_snippets').delete().eq('id', id);
       if (error) throw error;
+      if (snippet?.source_dispute_id) {
+        const { error: disputeError } = await sb.from('disputes').update({
+          status: 'approved', generated_title: null, generated_trigger_terms: null,
+          generated_snippet: null, generated_at: null
+        }).eq('id', snippet.source_dispute_id);
+        if (disputeError) throw disputeError;
+      }
       return res.status(200).json({ ok: true });
     }
     return res.status(405).json({ error: 'Method not allowed' });
