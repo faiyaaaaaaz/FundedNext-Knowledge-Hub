@@ -1,7 +1,8 @@
 import {
   authenticateRequest, supabaseAdmin, getKeys, openaiEmbed,
-  openaiChatDetailed, getBrandingRules, brandingInstructions, logActivity
+  openaiChatDetailed, getBrandingRules, brandingInstructions, logActivity, modelsMentioned
 } from '../../lib/server';
+import { retrieveNotices } from '../../lib/notices';
 
 function parseJson(content) {
   const cleaned = String(content || '').replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
@@ -59,7 +60,19 @@ export default async function handler(req, res) {
       if (req.query.status) query = query.eq('status', req.query.status);
       const { data, error } = await query;
       if (error) throw error;
-      return res.status(200).json({ disputes: data || [] });
+      const rows = data || [];
+      const disputeIds = rows.map((item) => item.id);
+      let linked = new Map();
+      if (disputeIds.length) {
+        const { data: snippets, error: snippetError } = await sb.from('ai_snippets').select('id,source_dispute_id,title,trigger_terms,instruction,active,created_at').in('source_dispute_id', disputeIds);
+        if (snippetError) throw snippetError;
+        linked = new Map((snippets || []).map((item) => [String(item.source_dispute_id), item]));
+      }
+      return res.status(200).json({ disputes: rows.map((item) => ({
+        ...item,
+        linked_snippet: linked.get(String(item.id)) || null,
+        snippet_missing: item.status === 'snippet_generated' && !linked.has(String(item.id))
+      })) });
     }
 
     if (req.method === 'PATCH') {
@@ -81,26 +94,78 @@ export default async function handler(req, res) {
         return res.status(200).json({ dispute: data });
       }
 
+      if (action === 'reset-snippet') {
+        const { data: snippets, error: snippetError } = await sb.from('ai_snippets').select('id').eq('source_dispute_id', dispute.id);
+        if (snippetError) throw snippetError;
+        if ((snippets || []).length) return res.status(409).json({ error: 'A linked snippet still exists. Delete it from Snippets first.' });
+        const { data, error } = await sb.from('disputes').update({
+          status: 'approved', generated_title: null, generated_trigger_terms: null,
+          generated_snippet: null, generated_at: null
+        }).eq('id', id).select().single();
+        if (error) throw error;
+        await logActivity({actorRole:access.role,userEmail:access.email,userName:access.name,sessionId:access.sessionId,eventType:'dispute_review',success:true,metadata:{disputeId:id,status:'approved',reason:'Missing deleted snippet restored to approved'}});
+        return res.status(200).json({ dispute: data });
+      }
+
       if (action === 'generate') {
-        if (dispute.status !== 'approved') return res.status(400).json({ error: 'Approve the dispute before generating a snippet.' });
+        if (!['approved', 'snippet_generated'].includes(dispute.status)) return res.status(400).json({ error: 'Approve the dispute before generating a correction draft.' });
         const { openaiKey, groqKey, chatModel, chatProvider } = await getKeys();
-        if (!openaiKey) throw new Error('OpenAI key is required to verify the FAQ.');
-        const [vector] = await openaiEmbed(openaiKey, [dispute.question]);
-        const result = await sb.rpc('match_chunks', { query_embedding: vector, match_threshold: 0.12, match_count: 12 });
-        if (result.error) throw result.error;
+        if (!openaiKey) throw new Error('OpenAI key is required to verify FAQs and Notices.');
+        const { data: linkedSnippets, error: linkedError } = await sb.from('ai_snippets').select('*').eq('source_dispute_id', dispute.id);
+        if (linkedError) throw linkedError;
+        const linkedSnippet = (linkedSnippets || [])[0] || null;
         const recordedScope = (dispute.sources || []).find((item) => item?.type === 'answer_scope');
-        const scopedEvidence = (result.data || []).filter((item) => {
-          if (!recordedScope || recordedScope.product === 'both') return true;
+        const product = ['cfd', 'futures', 'both'].includes(recordedScope?.product) ? recordedScope.product : 'both';
+        const model = String(recordedScope?.model || 'all');
+        const evidenceQueries = [...new Set([
+          dispute.question,
+          `${dispute.question} ${dispute.dispute_reason || ''}`,
+          `${dispute.question} ${dispute.approval_reason || ''}`,
+          linkedSnippet ? `${linkedSnippet.title || ''} ${linkedSnippet.trigger_terms || ''} ${linkedSnippet.instruction || ''}` : ''
+        ].map((item) => String(item || '').trim()).filter(Boolean))].slice(0, 4);
+        const vectors = await openaiEmbed(openaiKey, evidenceQueries);
+        const faqById = new Map();
+        for (const vector of vectors) {
+          const result = await sb.rpc('match_chunks', { query_embedding: vector, match_threshold: 0.12, match_count: 16 });
+          if (result.error) throw result.error;
+          for (const item of result.data || []) {
+            const key = String(item.id || `${item.article_id}:${item.chunk_index || ''}`);
+            const previous = faqById.get(key);
+            if (!previous || Number(item.similarity || 0) > Number(previous.similarity || 0)) faqById.set(key, item);
+          }
+        }
+        const scopedEvidence = [...faqById.values()].filter((item) => {
           const url = String(item.article_url || '');
-          return recordedScope.product === 'futures' ? /helpfutures\.fundednext\.com/i.test(url) : /help\.fundednext\.com/i.test(url);
-        });
-        const evidence = scopedEvidence.map((item, index) =>
-          `[${index + 1}] ${item.article_title}\n${item.content}`
-        ).join('\n\n---\n\n');
+          const correctProduct = !recordedScope || recordedScope.product === 'both' || (recordedScope.product === 'futures' ? /helpfutures\.fundednext\.com/i.test(url) : /help\.fundednext\.com/i.test(url));
+          if (!correctProduct) return false;
+          if (model === 'all') return true;
+          const namedModels = modelsMentioned(`${item.article_title || ''}\n${item.content || ''}`);
+          return !namedModels.length || namedModels.some((itemModel) => itemModel.slug === model);
+        }).sort((a, b) => Number(b.similarity || 0) - Number(a.similarity || 0)).slice(0, 16);
+        const noticeSearch = [dispute.question, dispute.dispute_reason, dispute.approval_reason, linkedSnippet?.instruction].filter(Boolean).join('\n');
+        const noticeResult = await retrieveNotices(sb, { openaiKey, question: noticeSearch, product, model, limit: 6 });
+        const noticeEvidence = (noticeResult.matches || []).slice(0, 6);
+        const evidence = [
+          ...scopedEvidence.map((item, index) => `[FAQ ${index + 1}] ${item.article_title}\nURL: ${item.article_url || 'not recorded'}\n${item.content}`),
+          ...noticeEvidence.map((item, index) => `[NOTICE ${index + 1}] ${item.meta?.title || item.article_title}\nPosted: ${item.meta?.posted_at || 'date not recorded'}\nURL: ${item.meta?.source_url || item.article_url || 'not recorded'}\n${item.meta?.answer_text || item.content}`)
+        ].join('\n\n---\n\n');
+        const capturedAt = new Date().toISOString();
+        const correctionEvidence = scopedEvidence.slice(0, 16).map((item) => ({
+          type: 'correction_evidence', kind: 'faq', id: item.article_id || item.id,
+          title: item.article_title || 'Untitled FAQ', url: item.article_url || '',
+          excerpt: String(item.content || '').slice(0, 2400), capturedAt
+        })).concat(noticeEvidence.map((item) => ({
+          type: 'correction_evidence', kind: 'notice', id: item.article_id,
+          title: item.meta?.title || item.article_title || 'Untitled Notice',
+          url: item.meta?.source_url || item.article_url || '',
+          excerpt: String(item.meta?.answer_text || item.content || '').slice(0, 2400),
+          postedAt: item.meta?.posted_at || null, manuallyEntered: item.meta?.source_type === 'manual' || item.meta?.source_type === 'paste', capturedAt
+        })));
         const rules = await getBrandingRules();
         const system =
           'You are creating a permanent corrective instruction for a support-answering AI. ' +
-          'Re-check the FAQ evidence. Do not accept the original answer or dispute as truth without evidence. ' +
+          'Re-check every supplied FAQ passage and Notice. Do not accept the original answer, dispute, or previous snippet as truth without evidence. ' +
+          'A relevant newer Notice overrides an older FAQ only when it applies to the same product, Account model, region, date, and condition. Never merge incompatible rules. ' +
           'Return strict JSON only with keys title, trigger_terms, instruction. ' +
           'trigger_terms must be a comma-separated list. instruction must be concise, unambiguous, product-scoped, ' +
           'and state what the AI must and must not do in future answers.' + brandingInstructions(rules);
@@ -108,7 +173,8 @@ export default async function handler(req, res) {
           `Original question:\n${dispute.question}\n\nDisputed answer:\n${dispute.answer}\n\n` +
           `Recorded answer scope:\n${recordedScope ? `${recordedScope.product.toUpperCase()} · ${recordedScope.label || recordedScope.model}` : 'Legacy dispute — scope was not recorded'}\n\n` +
           `Agent dispute reason:\n${dispute.dispute_reason}\n\nAdmin approval reason:\n${dispute.approval_reason}\n\n` +
-          `Fresh FAQ evidence:\n${evidence || 'No matching FAQ evidence was found.'}`;
+          `Currently active correction, if any:\n${linkedSnippet?.instruction || 'None'}\n\n` +
+          `Fresh FAQ and Notice evidence:\n${evidence || 'No matching FAQ or Notice evidence was found. Do not invent a correction.'}`;
         let completion;
         if (chatProvider === 'groq' && groqKey) {
           try {
@@ -123,22 +189,36 @@ export default async function handler(req, res) {
         if (!generated.title || !generated.trigger_terms || !generated.instruction) {
           throw new Error('The generated snippet was incomplete. Please try again.');
         }
-        const { data: snippet, error: snippetError } = await sb.from('ai_snippets').insert({
-          title: String(generated.title).trim(),
-          trigger_terms: String(generated.trigger_terms).trim(),
-          instruction: String(generated.instruction).trim(),
-          source_dispute_id: dispute.id,
-          active: true
-        }).select().single();
-        if (snippetError) throw snippetError;
         const { data: updated, error: updateError } = await sb.from('disputes').update({
-          status: 'snippet_generated',
-          generated_title: snippet.title,
-          generated_trigger_terms: snippet.trigger_terms,
-          generated_snippet: snippet.instruction,
-          generated_at: new Date().toISOString()
+          status: 'approved',
+          generated_title: String(generated.title).trim(),
+          generated_trigger_terms: String(generated.trigger_terms).trim(),
+          generated_snippet: String(generated.instruction).trim(),
+          generated_at: new Date().toISOString(),
+          sources: [...(Array.isArray(dispute.sources) ? dispute.sources.filter((item) => item?.type !== 'correction_evidence') : []), ...correctionEvidence]
         }).eq('id', id).select().single();
         if (updateError) throw updateError;
+        await logActivity({actorRole:access.role,userEmail:access.email,userName:access.name,sessionId:access.sessionId,eventType:'snippet_regeneration',success:true,metadata:{disputeId:id,snippetId:linkedSnippet?.id || null,faqEvidenceCount:scopedEvidence.length,noticeEvidenceCount:noticeEvidence.length,activeSnippetPreserved:!!linkedSnippet}});
+        return res.status(200).json({ dispute: { ...updated, linked_snippet: linkedSnippet }, draft: true, replacement: !!linkedSnippet });
+      }
+
+      if (action === 'activate-snippet') {
+        if (dispute.status !== 'approved' || !dispute.generated_snippet) return res.status(400).json({ error: 'Generate and review a correction draft first.' });
+        const title = String(req.body?.title || dispute.generated_title || '').trim();
+        const triggerTerms = String(req.body?.triggerTerms || dispute.generated_trigger_terms || '').trim();
+        const instruction = String(req.body?.instruction || dispute.generated_snippet || '').trim();
+        if (title.length < 4 || triggerTerms.length < 3 || instruction.length < 20) return res.status(400).json({ error: 'Complete the title, trigger terms, and reviewed instruction before activation.' });
+        const { data: existing, error: existingError } = await sb.from('ai_snippets').select('*').eq('source_dispute_id', dispute.id);
+        if (existingError) throw existingError;
+        const current = (existing || [])[0] || null;
+        const snippetWrite = current
+          ? sb.from('ai_snippets').update({ title, trigger_terms: triggerTerms, instruction, active: true }).eq('id', current.id).select().single()
+          : sb.from('ai_snippets').insert({ title, trigger_terms: triggerTerms, instruction, source_dispute_id: dispute.id, active: true }).select().single();
+        const { data: snippet, error: snippetError } = await snippetWrite;
+        if (snippetError) throw snippetError;
+        const { data: updated, error: updateError } = await sb.from('disputes').update({ status: 'snippet_generated', generated_title: title, generated_trigger_terms: triggerTerms, generated_snippet: instruction, generated_at: new Date().toISOString() }).eq('id', id).select().single();
+        if (updateError) throw updateError;
+        await logActivity({actorRole:access.role,userEmail:access.email,userName:access.name,sessionId:access.sessionId,eventType:'dispute_review',success:true,metadata:{disputeId:id,status:'snippet_generated',snippetId:snippet.id,replacedExisting:!!current,reason:current ? 'Admin reviewed and explicitly activated regenerated correction' : 'Admin reviewed and explicitly activated correction'}});
         return res.status(200).json({ dispute: updated, snippet });
       }
 
