@@ -1009,18 +1009,31 @@ export default async function handler(req, res) {
       }
     }
     let sourceLine = raw.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
-    if ((!sourceLine || !parseNumbers(sourceLine).length) && cleanAnswer(raw) !== SAFE_UNCONFIRMED && cleanAnswer(raw).length > 80 && matches.length) {
+    const citationCoverage = (draft) => {
+      const text = cleanAnswer(draft);
+      if (text === SAFE_UNCONFIRMED || !text.trim()) return { complete: true, groups: [] };
+      const paragraphs = text.split(/\n{2,}/).map((item) => item.trim()).filter(Boolean);
+      const segmentLine = draft.match(/(?:\*\*)?SEGMENTS?(?:\*\*)?\s*:\s*([^\n]*)/i);
+      if (!segmentLine) return { complete: false, groups: [] };
+      const groups = segmentLine[1].split(';').map((group) => (group.match(/\d+/g) || []).map(Number));
+      return { complete: groups.length === paragraphs.length && groups.every((group) => group.length > 0 && group.every((number) => !!matches[number - 1])), groups };
+    };
+    // A source card alone is not enough: every factual paragraph has to identify
+    // its own evidence. This prevents an otherwise good first paragraph from
+    // lending false authority to a second, uncited model-specific claim.
+    const needsCitationRecovery = !sourceLine || !parseNumbers(sourceLine).length || !citationCoverage(raw).complete;
+    if (needsCitationRecovery && cleanAnswer(raw) !== SAFE_UNCONFIRMED && cleanAnswer(raw).length > 80 && matches.length) {
       const retryKey = answerProvider === 'groq' ? usedGroqKey : openaiKey;
       const retryModel = usedFallback ? fallbackModel : chatModel;
       const retryBaseUrl = answerProvider === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1';
       if (retryKey) {
         try {
           const retried = await tracedAnswerCall(retryKey, retryModel, [
-            { role: 'system', content: system + '\n\nCITATION RECOVERY: The previous draft cited no evidence. Rewrite it using only directly supporting numbered passages. Remove any unsupported claim. You must provide usable SOURCES and SEGMENTS lines.' },
+            { role: 'system', content: system + '\n\nCITATION RECOVERY: Rewrite using only directly supporting numbered passages. Remove every unsupported claim, including illustrative account-model examples. Every factual answer paragraph must have one or more matching source numbers in its SEGMENTS group; do not leave any group blank. Provide usable SOURCES and SEGMENTS lines.' },
             { role: 'user', content: `${askedText}\n\nPrevious draft:\n${cleanAnswer(raw)}\n\nEvidence:\n${recoveryContext || context}` }
           ], retryBaseUrl);
           const retrySources = retried.content.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
-          if (parseNumbers(retrySources).length) { completion = retried; raw = retried.content; sourceLine = retrySources; }
+          if (parseNumbers(retrySources).length && citationCoverage(retried.content).complete) { completion = retried; raw = retried.content; sourceLine = retrySources; }
         } catch { /* retain the original answer; zero sources will keep confidence low */ }
       }
     }
@@ -1132,6 +1145,24 @@ export default async function handler(req, res) {
         });
         // Only worth sending if at least one paragraph actually has a citation.
         if (!segments.some((s) => s.refs.length)) segments = null;
+      }
+    }
+    // Fail closed if the answer model did not produce a valid paragraph-to-source
+    // map. When only part is mapped, retain just that sourced part; never show an
+    // uncited paragraph underneath a verified-source heading.
+    if (answer !== SAFE_UNCONFIRMED) {
+      const citedSegments = (segments || []).filter((segment) => segment.refs.length > 0);
+      if (!segments || citedSegments.length !== segments.length) {
+        if (citedSegments.length) {
+          segments = citedSegments;
+          answer = citedSegments.map((segment) => segment.text).join('\n\n');
+        } else {
+          answer = SAFE_UNCONFIRMED;
+          sources = [];
+          segments = null;
+          confidence = Math.min(confidence, 22);
+          confidenceLabel = 'Needs verification';
+        }
       }
     }
     sources = sources.map(({ _aid, ...rest }) => {
