@@ -39,6 +39,7 @@ export default async function handler(req, res) {
       noticesUpdatedAt: noticesUpdated?.data?.value || null,
       latestNotice: noticeResult?.data?.[0] || null,
       lastSyncAt: syncMarkers.lastAutoSyncAt || null,
+      lastManualSyncAt: syncMarkers.lastManualSyncAt || null,
       lastSyncSummary: syncMarkers.lastSummary || null,
       pendingDisputes: access.role === 'admin' ? (disputes.count || 0) : undefined,
       answerProvider: keys.chatProvider,
