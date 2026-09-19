@@ -1,5 +1,5 @@
 import {
-  supabaseAdmin, getKeys, authenticateRequest, runAutoSync, getAutoSyncConfig
+  supabaseAdmin, getKeys, authenticateRequest, runAutoSync, getAutoSyncConfig, withSyncLease
 } from '../../lib/server';
 
 // Give the sync loop room to drain work in one invocation. Vercel Pro allows up
@@ -60,10 +60,10 @@ export default async function handler(req, res) {
 
     // Stay safely under the platform limit while draining as much as possible.
     const budgetMs = 50000;
-    const result = await runAutoSync(sb, { intercomToken, openaiKey }, {
-      trigger: manual ? 'manual' : 'auto', budgetMs
-    });
-    return res.status(200).json({ ran: true, trigger: manual ? 'manual' : 'auto', ...result });
+    const trigger = manual ? 'manual' : 'auto';
+    const result = await withSyncLease(sb, trigger, () => runAutoSync(sb, { intercomToken, openaiKey }, { trigger, budgetMs }));
+    if (result.locked) return res.status(202).json({ ran: false, trigger, ...result });
+    return res.status(200).json({ ran: true, trigger, ...result });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
