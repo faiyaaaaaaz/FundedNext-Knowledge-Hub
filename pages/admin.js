@@ -64,7 +64,7 @@ function sourceTypeLabel(source) {
 }
 
 function activityEventLabel(value) {
-  return ({ workspace_acknowledgement: 'Daily acknowledgement', query: 'Assistant query', login: 'Sign in', logout: 'Sign out', sync: 'Knowledge sync', feedback: 'Answer feedback' })[value] || String(value || 'Activity').replace(/_/g, ' ');
+  return ({ workspace_acknowledgement: 'Daily acknowledgement', workspace_tour_completed: 'Workspace tutorial completed', workspace_tour_reset_all: 'Workspace tutorial reset', query: 'Assistant query', login: 'Sign in', logout: 'Sign out', sync: 'Knowledge sync', model_discovery: 'Model discovery', model_review: 'Model review', snippet_usage: 'Legacy snippet use', feedback: 'Answer feedback' })[value] || String(value || 'Activity').replace(/_/g, ' ');
 }
 
 function ActivityLogCard({ log, expanded, onToggle }) {
@@ -78,7 +78,7 @@ function ActivityLogCard({ log, expanded, onToggle }) {
     <button type="button" className="activity-log-summary" onClick={onToggle} aria-expanded={expanded}>
       <span className={`activity-event-icon ${log.success ? 'success' : 'failed'}`}>{acknowledgement ? '✓' : log.event_type === 'query' ? 'Q' : '•'}</span>
       <span className="activity-log-main"><b>{activityEventLabel(log.event_type)}</b><small>{formatDate(log.created_at)}</small></span>
-      <span className="activity-log-person"><b>{log.user_name || (log.actor_role === 'admin' ? 'Master Admin' : 'Unknown user')}</b><small>{log.user_email || 'Email not recorded'}</small></span>
+      <span className="activity-log-person"><b>{log.user_name || (log.actor_role === 'admin' ? 'Master Admin' : log.session_id ? 'Identity recovery needed' : 'Legacy system record')}</b><small>{log.user_email || (log.session_id ? 'No email recorded for this session' : 'No user identity was stored')}</small></span>
       <span className={`activity-result ${log.success ? 'good' : 'bad'}`}>{log.success ? 'Successful' : 'Failed'}</span>
       <span className="activity-expand">{expanded ? 'Hide details −' : 'View all details +'}</span>
     </button>
@@ -302,6 +302,14 @@ export default function Admin() {
   const [activityEmail, setActivityEmail] = useState('');
   const [activityFrom, setActivityFrom] = useState('');
   const [activityTo, setActivityTo] = useState('');
+  const [activityTypes, setActivityTypes] = useState('');
+  const [activityExcludeTypes, setActivityExcludeTypes] = useState('snippet_usage');
+  const [activityRoles, setActivityRoles] = useState('');
+  const [activityStatus, setActivityStatus] = useState('');
+  const [activitySearch, setActivitySearch] = useState('');
+  const [activityDefaultLoading, setActivityDefaultLoading] = useState(false);
+  const [tourReport, setTourReport] = useState(null);
+  const [tourBusy, setTourBusy] = useState(false);
   const [activityPage, setActivityPage] = useState(1);
   const [expandedActivityLog, setExpandedActivityLog] = useState(null);
   const [queryLogs, setQueryLogs] = useState(null);
@@ -487,7 +495,7 @@ export default function Admin() {
 
   useEffect(() => {
     if (!session || role !== 'admin') return;
-    const loaders = { branding: loadTerms, disputes: loadDisputes, snippets: loadSnippets, snippetlogs: loadSnippetUsage, activity: loadActivity, autosync: loadAutoSync, knowledge: loadKnowledge, querylogs: loadQueryLogs, calcdata: loadCalc, groqkeys: loadGroqKeys, notices: loadNotices };
+    const loaders = { branding: loadTerms, disputes: loadDisputes, snippets: loadSnippets, snippetlogs: loadSnippetUsage, activity: loadActivity, access: loadTourReport, autosync: loadAutoSync, knowledge: loadKnowledge, querylogs: loadQueryLogs, calcdata: loadCalc, groqkeys: loadGroqKeys, notices: loadNotices };
     const loader = loaders[tab];
     if (loader) {
       const activeTab = tab;
@@ -878,11 +886,21 @@ export default function Admin() {
     const email = opts.email ?? activityEmail;
     const from = opts.from ?? activityFrom;
     const to = opts.to ?? activityTo;
+    const types = opts.types ?? activityTypes;
+    const excludeTypes = opts.excludeTypes ?? activityExcludeTypes;
+    const roles = opts.roles ?? activityRoles;
+    const status = opts.status ?? activityStatus;
+    const search = opts.search ?? activitySearch;
     try {
       const query = new URLSearchParams();
       if (String(email).trim()) query.set('email', String(email).trim());
       if (from) query.set('from', from);
       if (to) query.set('to', to);
+      if (types) query.set('types', types);
+      if (excludeTypes) query.set('excludeTypes', excludeTypes);
+      if (roles) query.set('roles', roles);
+      if (status) query.set('status', status);
+      if (search) query.set('search', search);
       const response = await fetch(`/api/activity?${query}`, { headers: headers() });
       if (handleAuthLoss(response)) return;
       const data = await response.json(); if (!response.ok) throw new Error(data.error);
@@ -896,8 +914,58 @@ export default function Admin() {
   }
 
   function clearActivityFilters() {
-    setActivityEmail(''); setActivityFrom(''); setActivityTo('');
-    loadActivity({ email: '', from: '', to: '' });
+    setActivityEmail(''); setActivityFrom(''); setActivityTo(''); setActivityTypes(''); setActivityExcludeTypes('snippet_usage'); setActivityRoles(''); setActivityStatus(''); setActivitySearch('');
+    loadActivity({ email: '', from: '', to: '', types: '', excludeTypes: 'snippet_usage', roles: '', status: '', search: '' });
+  }
+
+  async function saveActivityDefault() {
+    try {
+      const filters = { email: activityEmail, from: activityFrom, to: activityTo, types: activityTypes, excludeTypes: activityExcludeTypes, roles: activityRoles, status: activityStatus, search: activitySearch };
+      const response = await fetch('/api/activity', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'save-default', filters }) });
+      const data = await response.json(); if (!response.ok) throw new Error(data.error);
+      setNotice('Your activity-log view is now the default for this Admin account.');
+    } catch (e) { setError(e.message); }
+  }
+
+  async function loadActivityDefault() {
+    setActivityDefaultLoading(true);
+    try {
+      const response = await fetch('/api/activity?action=default', { headers: headers() });
+      const data = await response.json(); if (!response.ok) throw new Error(data.error);
+      const filters = data.filters; if (!filters) return setNotice('No saved activity-log default exists yet.');
+      setActivityEmail(filters.email || ''); setActivityFrom(filters.from || ''); setActivityTo(filters.to || ''); setActivityTypes(filters.types || ''); setActivityExcludeTypes(filters.excludeTypes || ''); setActivityRoles(filters.roles || ''); setActivityStatus(filters.status || ''); setActivitySearch(filters.search || '');
+      await loadActivity(filters);
+      setNotice('Saved activity-log view applied.');
+    } catch (e) { setError(e.message); } finally { setActivityDefaultLoading(false); }
+  }
+
+  async function repairActivityAttribution() {
+    if (!window.confirm('Repair only activity records that have no person recorded but share a session ID with a known signed-in user? Entries with no trustworthy session match will remain marked as legacy system records.')) return;
+    try {
+      const response = await fetch('/api/activity', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'repair-attribution' }) });
+      const data = await response.json(); if (!response.ok) throw new Error(data.error);
+      setNotice(`Repaired ${data.repaired} historical activity record${data.repaired === 1 ? '' : 's'}. ${data.unrecoverable} cannot be safely attributed because no matching session identity was stored.`);
+      await loadActivity();
+    } catch (e) { setError(e.message); }
+  }
+
+  async function loadTourReport() {
+    try {
+      const response = await fetch('/api/workspace?action=tour-report', { headers: headers() });
+      const data = await response.json(); if (!response.ok) throw new Error(data.error);
+      setTourReport(data);
+    } catch (e) { setError(e.message); }
+  }
+
+  async function resetToursForEveryone() {
+    if (!window.confirm('Show the workspace tutorial again to every registered team member? Their next visit will start the guide from the beginning, and each completed step will be logged.')) return;
+    setTourBusy(true);
+    try {
+      const response = await fetch('/api/workspace?action=tour-reset-all', { method: 'POST', headers: headers(true), body: JSON.stringify({}) });
+      const data = await response.json(); if (!response.ok) throw new Error(data.error);
+      setNotice(`Tutorial reset for ${data.usersReset} registered team member${data.usersReset === 1 ? '' : 's'}.`);
+      await loadTourReport();
+    } catch (e) { setError(e.message); } finally { setTourBusy(false); }
   }
 
   async function downloadQueryReport() {
@@ -1087,6 +1155,7 @@ export default function Admin() {
         {tab === 'access' && <div className="settings-stack">
           <section className="settings-card"><div className="settings-head"><div><h2>Google sign-in</h2><p>Access is permanently restricted to nextventures.io Google accounts.</p></div><span className={`state-pill ${status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'ready' : ''}`}>{status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'Configured' : 'Vercel setup needed'}</span></div><div className="permission-table"><div><span>Access rule</span><b>Required value</b><b>Status</b></div><div><span>Allowed domain</span><b>nextventures.io</b><b>Fixed</b></div><div><span>Admin list</span><b>ADMIN_GOOGLE_EMAILS</b><b>{status?.adminGoogleConfigured ? 'Configured' : 'Missing'}</b></div></div></section>
           <section className="settings-card"><div className="settings-head"><div><h2>Workspace roles</h2><p>Every user must authenticate with Google. Admin rights come only from the Vercel Admin email list.</p></div><span className="state-pill ready">Google only</span></div><div className="permission-table"><div><span>Requirement</span><b>Agent</b><b>Admin</b></div><div><span>@nextventures.io Google account</span><b>Required</b><b>Required</b></div><div><span>Listed in ADMIN_GOOGLE_EMAILS</span><b>No</b><b>Required</b></div></div></section>
+          <section className="settings-card"><div className="settings-head"><div><h2>Workspace tutorial</h2><p>New team members see the scope guide on their first visit, then the answer-and-sources guide after their first completed answer. Completion is now recorded in Activity logs.</p></div><button className="btn btn-secondary" onClick={loadTourReport}>Refresh status</button></div>{tourReport ? <><div className="activity-kpis">{[['Registered',tourReport.summary.registered],['Completed',tourReport.summary.completed],['Not started',tourReport.summary.notStarted],['Scope only',tourReport.summary.scopeOnly]].map(([label,value])=><div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><div className="sync-log-list">{tourReport.people.map(person=><div className="sync-log" key={person.email}><div className="sync-log-row" style={{cursor:'default'}}><span className={`sync-badge ${person.status==='Completed'?'success':'partial'}`}>{person.status==='Completed'?'done':'pending'}</span><span className="sync-log-main"><b>{person.name || person.email}</b><small>{person.email}</small></span><span className="sync-log-quick">{person.status} · {person.recordedVersion === 'legacy-unversioned' ? 'completed before version tracking' : person.recordedVersion || 'no completion record'}</span></div></div>)}{!tourReport.people.length&&<div className="empty-admin">No registered workspace users yet.</div>}</div><div className="row" style={{marginTop:14}}><button className="btn btn-primary" disabled={tourBusy} onClick={resetToursForEveryone}>{tourBusy?'Resetting…':'Show tutorial again to everyone'}</button></div><p className="field-help">This resets only the guide status. It does not sign anyone out or alter their conversations. The guide appears on each registered person’s next visit and every new completion is logged.</p></> : <button className="btn btn-secondary" onClick={loadTourReport}>Load tutorial status</button>}</section>
           <section className="settings-card">
             <div className="settings-head"><div><h2>Notices access (experimental)</h2><p>Controls who can use the notices layer in the assistant. Off for everyone by default except the people you list here.</p></div>{noticeAccessCfg && <span className="state-pill ready">{noticeAccessCfg.enabled ? 'Enabled' : 'Globally off'}</span>}</div>
             {!noticeAccessCfg ? <button className="btn btn-secondary" onClick={loadNoticeAccess}>Load notices access</button> : <>
@@ -1137,7 +1206,7 @@ export default function Admin() {
 
         {tab === 'snippetlogs' && <div className="settings-stack snippet-usage-page">{snippetUsage && <><div className="activity-kpis">{[['Snippet uses', snippetUsage.summary.uses], ['Corrective snippets used', snippetUsage.summary.snippets], ['Queries affected', snippetUsage.summary.queriesAffected], ['Team members', snippetUsage.summary.users]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><section className="settings-card"><div className="settings-head"><div><h2>Usage by corrective snippet</h2><p>A use means the matching instruction was injected into an answer request. It does not claim the snippet changed the final wording.</p></div><button className="btn btn-secondary" onClick={loadSnippetUsage}>Refresh</button></div><div className="snippet-usage-summary">{snippetUsage.snippets.map((item) => <article key={item.snippetId || item.title}><div><b>{item.title}</b><small>Snippet #{item.snippetId || 'legacy'} · last used {formatDate(item.lastUsedAt)}</small></div><strong>{item.uses} use{item.uses === 1 ? '' : 's'}</strong><span>{item.queriesAffected} quer{item.queriesAffected === 1 ? 'y' : 'ies'} · {item.users} user{item.users === 1 ? '' : 's'}</span></article>)}{!snippetUsage.snippets.length && <div className="empty-admin">No snippet use has been recorded yet. New uses will appear after this update is deployed.</div>}</div></section><section className="settings-card"><div className="settings-head"><div><h2>Recent snippet-use events</h2><p>Each row links the correction, query, user, scope, and exact instruction version used.</p></div></div><div className="snippet-event-list">{snippetUsage.events.map((event) => <details key={event.id}><summary><div><b>{event.title || `Snippet #${event.snippetId}`}</b><small>{event.questionPreview || 'Question text unavailable'}</small></div><span>{event.userName || event.userEmail || 'Unknown user'}<small>{formatDate(event.createdAt)}</small></span></summary><div><p><b>Question</b>{event.question || event.questionPreview || 'Unavailable'}</p><p><b>Scope</b>{event.selectedProduct?.toUpperCase() || 'Not recorded'} · {event.selectedScopeLabel || event.selectedModel || 'Not recorded'}</p><p><b>Instruction used</b>{event.instruction || 'Unavailable'}</p><p><b>Query log</b>#{event.queryLogId || 'not recorded'} · match score {event.matchScore ?? 'not recorded'}</p></div></details>)}{!snippetUsage.events.length && <div className="empty-admin">No events recorded yet.</div>}</div></section></>}</div>}
 
-        {tab === 'activity' && <div className="settings-stack"><section className="settings-card activity-filters"><div className="settings-head"><div><h2>Filter activity</h2><p>Dates are interpreted in GMT+6.</p></div><DateRangeFilter from={activityFrom} to={activityTo} onApply={applyDateRange} /></div><div className="field-action"><input type="search" value={activityEmail} onChange={(e) => setActivityEmail(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && loadActivity()} placeholder="Search a teammate’s email address" /><div className="row"><button className="btn btn-primary" onClick={() => loadActivity()}>Search</button><button className="btn btn-secondary" onClick={clearActivityFilters}>Clear</button></div></div></section>{activity && <><div className="activity-kpis">{[['Users', activity.summary.users], ['Queries', activity.summary.queries], ['Question words', activity.summary.questionWords.toLocaleString()], ['Input tokens', activity.summary.inputTokens.toLocaleString()], ['Output tokens', activity.summary.outputTokens.toLocaleString()], ['Estimated cost', `$${activity.summary.estimatedCost.toFixed(4)}`]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><section className="settings-card"><div className="settings-head"><div><h2>Activity results</h2><p className="activity-count">{activityLogs.length} event{activityLogs.length === 1 ? '' : 's'} match the current filters.</p></div></div><div className="activity-log-list">{pageLogs.map((log) => <ActivityLogCard key={log.id} log={log} expanded={expandedActivityLog === log.id} onToggle={() => setExpandedActivityLog(expandedActivityLog === log.id ? null : log.id)} />)}{!pageLogs.length && <div className="empty-admin">No activity for this filter.</div>}</div>{totalPages > 1 && <div className="pager"><button disabled={activityPage === 1} onClick={() => setActivityPage((p) => Math.max(1, p - 1))}>‹ Prev</button>{pageNumbers.map((p, i) => p === '…' ? <span key={`e${i}`} className="pager-info">…</span> : <button key={p} className={p === activityPage ? 'current' : ''} onClick={() => setActivityPage(p)}>{p}</button>)}<button disabled={activityPage === totalPages} onClick={() => setActivityPage((p) => Math.min(totalPages, p + 1))}>Next ›</button></div>}</section></>}</div>}
+        {tab === 'activity' && <div className="settings-stack"><section className="settings-card activity-filters"><div className="settings-head"><div><h2>Filter activity</h2><p>Combine categories, exclude noisy entries, then save this view as your default. Dates are interpreted in GMT+6.</p></div><DateRangeFilter from={activityFrom} to={activityTo} onApply={applyDateRange} /></div><div className="query-filter-grid"><label>Person or email<input type="search" value={activityEmail} onChange={(e) => setActivityEmail(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && loadActivity()} placeholder="name@nextventures.io" /></label><label>Search stored details<input type="search" value={activitySearch} onChange={(e) => setActivitySearch(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && loadActivity()} placeholder="Question, model, event…" /></label><label>Include categories<input value={activityTypes} onChange={(e) => setActivityTypes(e.target.value)} placeholder="query,login" /></label><label>Exclude categories<input value={activityExcludeTypes} onChange={(e) => setActivityExcludeTypes(e.target.value)} placeholder="snippet_usage" /></label><label>Roles<select value={activityRoles} onChange={(e) => setActivityRoles(e.target.value)}><option value="">All roles</option><option value="agent">Agents</option><option value="admin">Admins</option></select></label><label>Result<select value={activityStatus} onChange={(e) => setActivityStatus(e.target.value)}><option value="">Successful and failed</option><option value="success">Successful only</option><option value="failed">Failed only</option></select></label><div className="query-filter-actions"><button className="btn btn-secondary" onClick={clearActivityFilters}>Clear</button><button className="btn btn-primary" onClick={() => loadActivity()}>Apply</button></div></div><div className="row" style={{marginTop:12}}><button className="btn btn-secondary" disabled={activityDefaultLoading} onClick={loadActivityDefault}>{activityDefaultLoading?'Loading…':'Use saved default'}</button><button className="btn btn-secondary" onClick={saveActivityDefault}>Save this as my default</button><button className="btn btn-secondary" onClick={repairActivityAttribution}>Repair recoverable legacy users</button></div><p className="field-help">Use comma-separated event names for multiple categories. Snippet-use events are excluded by default because their question-level trace is available in Snippet usage logs.</p></section>{activity && <><div className="activity-kpis">{[['Users', activity.summary.users], ['Queries', activity.summary.queries], ['Question words', activity.summary.questionWords.toLocaleString()], ['Input tokens', activity.summary.inputTokens.toLocaleString()], ['Output tokens', activity.summary.outputTokens.toLocaleString()], ['Estimated cost', `$${activity.summary.estimatedCost.toFixed(4)}`]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><section className="settings-card"><div className="settings-head"><div><h2>Activity results</h2><p className="activity-count">{activityLogs.length} event{activityLogs.length === 1 ? '' : 's'} match the current filters.</p></div></div><div className="activity-log-list">{pageLogs.map((log) => <ActivityLogCard key={log.id} log={log} expanded={expandedActivityLog === log.id} onToggle={() => setExpandedActivityLog(expandedActivityLog === log.id ? null : log.id)} />)}{!pageLogs.length && <div className="empty-admin">No activity for this filter.</div>}</div>{totalPages > 1 && <div className="pager"><button disabled={activityPage === 1} onClick={() => setActivityPage((p) => Math.max(1, p - 1))}>‹ Prev</button>{pageNumbers.map((p, i) => p === '…' ? <span key={`e${i}`} className="pager-info">…</span> : <button key={p} className={p === activityPage ? 'current' : ''} onClick={() => setActivityPage(p)}>{p}</button>)}<button disabled={activityPage === totalPages} onClick={() => setActivityPage((p) => Math.min(totalPages, p + 1))}>Next ›</button></div>}</section></>}</div>}
 
         {tab === 'querylogs' && <div className="settings-stack query-log-page">
           <section className="settings-card answer-feedback-panel"><div className="settings-head"><div><h2>Answer feedback received</h2><p>Optional ratings connected to the exact recorded question and answer.</p></div><button className="btn btn-secondary" disabled={queryLogsBusy} onClick={() => loadQueryLogs()}>{queryLogsBusy ? 'Refreshing…' : 'Refresh feedback'}</button></div><div className="answer-feedback-list">{(queryLogs?.logs || []).filter((log) => log.feedback).map((log) => <button type="button" key={`feedback-${log.id}`} className={`answer-feedback-record ${log.feedback}`} onClick={() => openQueryLog(log.id)}><span className="answer-feedback-rating">{log.feedback === 'great' ? '★ Great answer' : '♥ Helpful'}</span><span className="answer-feedback-question"><b>{log.question || 'Question text unavailable'}</b><small>{log.answer || 'Answer text unavailable'}</small></span><span className="answer-feedback-person"><b>{log.userName || log.feedbackBy || 'Unknown agent'}</b><small>{formatDate(log.feedbackAt || log.createdAt)}</small></span><i>View answer →</i></button>)}{!queryLogsBusy && !(queryLogs?.logs || []).some((log) => log.feedback) && <div className="empty-admin">No rated answers match the current filters.</div>}</div></section>
