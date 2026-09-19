@@ -136,6 +136,17 @@ function explicitQuestionParts(text) {
     .slice(0, 8);
 }
 
+function asksMinimumTradingRequirement(text) {
+  const value = String(text || '').toLowerCase();
+  return /\bminimum\b.{0,45}\b(?:trades?|trading days?)\b|\b(?:trades?|trading days?)\b.{0,45}\bminimum\b|\b(?:how many|number of)\s+days?\b.{0,35}\b(?:must|need|have to|do i)\b.{0,35}\btrade\b/.test(value);
+}
+
+function directlyStatesMinimumTradingRequirement(item) {
+  const value = `${item?.article_title || ''}\n${item?.content || ''}`.toLowerCase();
+  return /\bminimum\b/.test(value) && /\b(?:trades?|trading days?)\b/.test(value) &&
+    /\b(?:separate|calendar|trading) days?\b|\bminimum trading\b|\bminimum of \d+ trades?\b/.test(value);
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   const started = Date.now();
@@ -702,6 +713,18 @@ export default async function handler(req, res) {
       return true;
     });
 
+    // Put evidence that actually states a requested minimum-trading rule ahead
+    // of schedule, registration, or general competition passages. This is an
+    // evidence-ranking rule, not a hardcoded answer: it applies only when the
+    // selected scope and the source passage independently satisfy the request.
+    if (selectedModel?.slug === 'competition' && asksMinimumTradingRequirement(clearQuestion || question)) {
+      const direct = matches.filter(directlyStatesMinimumTradingRequirement);
+      if (direct.length) {
+        const directIds = new Set(direct.map((item) => String(item.id)));
+        matches = [...direct, ...matches.filter((item) => !directIds.has(String(item.id)))];
+      }
+    }
+
     // Merge exact calculator results as top, authoritative evidence so the model
     // reproduces the computed figures while still answering the FAQ parts.
     if (calcResults.length) {
@@ -760,21 +783,15 @@ export default async function handler(req, res) {
     const [basePrompt, brandRules, snippets] = await Promise.all([
       getPrompt(), getBrandingRules(), getRelevantSnippets(question)
     ]);
-    if (snippets.length) {
-      await Promise.allSettled(snippets.map((snippet) => createActivity({
-        actorRole: access.role, sessionId: access.sessionId,
-        userName: access.name, userEmail: access.email, authProvider: access.authProvider,
-        eventType: 'snippet_usage', success: true,
-        metadata: {
-          snippetId: snippet.id, title: snippet.title || '', triggerTerms: snippet.trigger_terms || '',
-          instruction: snippet.instruction || '', instructionHash: sha256(String(snippet.instruction || '')),
-          matchScore: Number(snippet._score || 0), queryLogId: requestLogId,
-          question: question.slice(0, 4000), questionPreview: question.slice(0, 180),
-          selectedProduct, selectedModel: selectedModel?.slug || 'all',
-          selectedScopeLabel: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models`
-        }
-      })));
-    }
+    // Snippet use belongs on the query record itself. Creating one standalone
+    // activity row per snippet flooded the general activity log and obscured
+    // the conversation it influenced. The dedicated snippet view reads this
+    // compact, traceable list from the final query record instead.
+    const snippetsUsed = snippets.map((snippet) => ({
+      snippetId: snippet.id, title: snippet.title || '', triggerTerms: snippet.trigger_terms || '',
+      instruction: String(snippet.instruction || '').slice(0, 4000), instructionHash: sha256(String(snippet.instruction || '')), matchScore: Number(snippet._score || 0),
+      injection: 'included_for_evidence_checked_review', influence: 'not_determinable_from_model_output'
+    }));
     const context = matches.map((item, index) => {
       const nm = noticeMetaByAid[item.article_id];
       const tag = nm ? `OFFICIAL NOTICE (dated ${String(nm.posted_at || '').slice(0, 10)}) - current policy, overrides older evidence:\n` : '';
@@ -992,7 +1009,7 @@ export default async function handler(req, res) {
       }
     }
     let sourceLine = raw.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
-    if (sourceLine && !parseNumbers(sourceLine).length && cleanAnswer(raw) !== SAFE_UNCONFIRMED && cleanAnswer(raw).length > 80 && matches.length) {
+    if ((!sourceLine || !parseNumbers(sourceLine).length) && cleanAnswer(raw) !== SAFE_UNCONFIRMED && cleanAnswer(raw).length > 80 && matches.length) {
       const retryKey = answerProvider === 'groq' ? usedGroqKey : openaiKey;
       const retryModel = usedFallback ? fallbackModel : chatModel;
       const retryBaseUrl = answerProvider === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1';
@@ -1205,6 +1222,7 @@ export default async function handler(req, res) {
           finalSources: sources.slice(0, 12).map((source) => ({ title: source.title, url: source.url, kind: source.kind }))
         },
         processing: { partialAnswerRetryAttempted, partialAnswerRetrySucceeded, fallback: usedFallback, groundingScore },
+        snippetsUsed,
         questionCoverage, coverageSummary,
         noticeConflict: noticeConflictDetected ? { detected: true, resolution: 'A relevant CEx Notice overrode incompatible FAQ information.', noticeSources: sources.filter((source) => source.kind === 'notice').map((source) => source.title), faqSources: sources.filter((source) => source.kind === 'faq').map((source) => source.title) } : { detected: false },
         question, questionPreview: question.slice(0, 180),
