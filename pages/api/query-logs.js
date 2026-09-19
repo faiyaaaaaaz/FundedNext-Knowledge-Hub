@@ -122,8 +122,8 @@ function compactReviewQuery(row, focusIds) {
   };
 }
 
-async function buildReport(ids, filters, compact = true) {
-  const allQueries = await fetchAll(filtersFrom(), null, true);
+export async function buildReport(ids = [], filters = {}, compact = true) {
+  const allQueries = await fetchAll(filtersFrom(filters), null, true);
   const failedRows = allQueries.filter(failedOrIncomplete);
   const focusIds = new Set(ids.map(String));
   const reportQueries = compact ? allQueries.map((row) => compactReviewQuery(row, focusIds)) : allQueries;
