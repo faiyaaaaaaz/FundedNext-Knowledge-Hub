@@ -1,4 +1,4 @@
-import { authenticateRequest, getKeys, supabaseAdmin, syncStep } from '../../lib/server';
+import { authenticateRequest, getKeys, supabaseAdmin, syncStep, withSyncLease } from '../../lib/server';
 
 export const config = { maxDuration: 60 };
 
@@ -28,7 +28,19 @@ export default async function handler(req, res) {
     if (!intercomToken) return res.status(400).json({ error: 'No Intercom key saved yet. Add it in Admin first.' });
     if (!openaiKey) return res.status(400).json({ error: 'No OpenAI key saved yet. Add it in Admin first.' });
 
-    const result = await syncStep(supabaseAdmin(), { intercomToken, openaiKey });
+    const sb = supabaseAdmin();
+    const result = await withSyncLease(sb, 'manual', () => syncStep(sb, { intercomToken, openaiKey }));
+    if (result.locked) return res.status(202).json({ phase: 'waiting', done: false, ...result });
+    // The interactive checker makes several small requests. Record a manual
+    // completion only after its final no-difference verification pass, so the
+    // homepage never mistakes a half-finished batch for a completed update.
+    if (result.done) {
+      const finishedAt = new Date().toISOString();
+      await sb.from('settings').upsert([
+        { key: 'last_manual_sync_at', value: finishedAt },
+        { key: 'last_manual_sync_summary', value: JSON.stringify({ at: finishedAt, trigger: 'manual', status: 'success', changed: 0, indexed: 0, deleted: result.deleted || 0 }) }
+      ]);
+    }
     return res.status(200).json(result);
   } catch (e) {
     return res.status(500).json({ error: e.message });
