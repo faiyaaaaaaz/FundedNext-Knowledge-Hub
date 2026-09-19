@@ -459,6 +459,23 @@ export default async function handler(req, res) {
         .or(expression).limit(80);
       keywordMatches = data || [];
     }
+    const competitionMinimumQuestion = selectedModel?.slug === 'competition' && asksMinimumTradingRequirement(clearQuestion || question);
+    // Competition rules are account-specific. Semantic recall was finding a
+    // general FundedNext Account article about no minimum days, then treating
+    // it as a product-wide policy. Pull only passages whose own URL and text
+    // describe the Competition and the minimum-trading rule into this path.
+    if (competitionMinimumQuestion) {
+      const { data, error } = await sb.from('chunks')
+        .select('id,article_id,article_title,article_url,content')
+        .ilike('article_url', '%competition%')
+        .ilike('content', '%minimum%')
+        .ilike('content', '%trading%')
+        .limit(40);
+      if (!error) {
+        const existing = new Set(keywordMatches.map((item) => String(item.id)));
+        keywordMatches = [...keywordMatches, ...(data || []).filter((item) => !existing.has(String(item.id)))];
+      }
+    }
 
     // ---- Multi-vector semantic recall ---------------------------------------
     // Embed the original + clarified question + each interpretation phrase, then
@@ -556,6 +573,17 @@ export default async function handler(req, res) {
         return false;
       }
       if (!selectedModel) return true;
+      // Unlike general CFD policy, Competition is a distinct event account.
+      // It must be named by the evidence (or explicitly assigned by an Admin);
+      // an article about a FundedNext Account, a Challenge, or a payout cannot
+      // silently become a Competition rule just because all are CFD.
+      if (selectedModel.slug === 'competition') {
+        const explicitlyCompetition = override?.model === 'competition' || /\bcompetition\b/i.test(`${blob}\n${articleUrl}`);
+        if (!explicitlyCompetition) {
+          rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: 'Evidence does not explicitly apply to Competition', similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
+          return false;
+        }
+      }
       const normalizedTitle = String(item.article_title || '').toLowerCase().replace(/[–—]/g, '-');
       if (selectedModel.slug === 'stellar-1-step' && /\b(?:2-step|2 step|two-step|two step)\b/.test(normalizedTitle) && !/\b(?:stellar\s+)?(?:1-step|1 step|one-step|one step)\b/.test(normalizedTitle)) {
         rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: 'FAQ title says 2-Step; question requires Stellar 1-Step', similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
@@ -717,12 +745,31 @@ export default async function handler(req, res) {
     // of schedule, registration, or general competition passages. This is an
     // evidence-ranking rule, not a hardcoded answer: it applies only when the
     // selected scope and the source passage independently satisfy the request.
-    if (selectedModel?.slug === 'competition' && asksMinimumTradingRequirement(clearQuestion || question)) {
+    if (competitionMinimumQuestion) {
       const direct = matches.filter(directlyStatesMinimumTradingRequirement);
       if (direct.length) {
-        const directIds = new Set(direct.map((item) => String(item.id)));
-        matches = [...direct, ...matches.filter((item) => !directIds.has(String(item.id)))];
+        // Do not leave duration or payout passages in the prompt: they are
+        // related to Competition but do not establish its minimum requirement.
+        matches = direct;
+      } else {
+        // A duration, payout, or general-account passage cannot answer this
+        // eligibility requirement. Refuse rather than letting the model infer.
+        matches = [];
       }
+    }
+
+    if (!matches.length) {
+      await logActivity({
+        actorRole: access.role, sessionId: access.sessionId, userName: access.name, userEmail: access.email,
+        authProvider: access.authProvider, questionWordCount: wordCount(question), eventType: 'query', success: true,
+        model: `No answer · Scope: ${selectedProduct.toUpperCase()}/${selectedModel?.name || 'All models'}`,
+        metadata: { question, questionPreview: question.slice(0, 180), selectedProduct, selectedModel: selectedModel?.slug || 'all', selectedScopeLabel: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models`, sourceCount: 0, reason: competitionMinimumQuestion ? 'No direct Competition minimum-trading evidence' : 'No eligible evidence after retrieval', interpretation: interpretationLog, evidenceTrail: { candidateCountBeforeScope, acceptedCandidateCount: candidates.length, rejected: rejectedEvidence.slice(0, 40), selectedForAnswer: [] }, durationMs: Date.now() - started }
+      });
+      return res.status(200).json({
+        answer: SAFE_UNCONFIRMED, sources: [], segments: null, answerProvider: chatProvider,
+        usedFallback: false, confidence: 22, confidenceLabel: 'Needs verification',
+        selectedScope: { product: selectedProduct, model: selectedModel?.slug || 'all', label: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models` }
+      });
     }
 
     // Merge exact calculator results as top, authoritative evidence so the model
