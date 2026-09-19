@@ -65,5 +65,11 @@ button:not(:disabled),[role="button"],summary{cursor:pointer}button:not(:disable
 .snippet-event-list details > div { display:grid; gap:8px; padding:12px; border-top:1px solid var(--line); }
 .snippet-event-list p { margin:0; color:var(--ink-2); font-size:11px; line-height:1.55; white-space:pre-wrap; }
 .snippet-event-list p b { display:block; margin-bottom:3px; color:var(--muted); font-size:9px; letter-spacing:.05em; text-transform:uppercase; }
+.compact-download { padding:8px 11px !important; min-height:34px; font-size:11px; white-space:nowrap; }
+.diagnostic-download-card { display:grid; gap:18px; }
+.diagnostic-download-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+.diagnostic-download-grid > div { display:grid; gap:5px; min-height:96px; padding:14px; border:1px solid var(--line); border-radius:12px; background:var(--surface-2); }
+.diagnostic-download-grid b { color:var(--ink); font:750 12px/1.25 var(--display); }
+.diagnostic-download-grid small { color:var(--muted); font-size:10px; line-height:1.5; }
 @media (max-width: 760px) { .dispute-tools, .review-source-row { grid-template-columns:1fr; } }
-@media (max-width: 760px) { .snippet-usage-summary article { grid-template-columns:1fr; gap:6px; } .snippet-event-list summary { grid-template-columns:1fr; } .snippet-event-list summary > span { text-align:left; } }
+@media (max-width: 760px) { .snippet-usage-summary article { grid-template-columns:1fr; gap:6px; } .snippet-event-list summary { grid-template-columns:1fr; } .snippet-event-list summary > span { text-align:left; } .diagnostic-download-grid { grid-template-columns:1fr; } }
