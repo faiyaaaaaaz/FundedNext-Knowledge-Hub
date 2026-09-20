@@ -15,9 +15,9 @@ function titleRecord(item) {
   return { id: String(item.intercom_id || item.entry_id), title: String(item.title || 'Untitled'), url: String(item.url || item.source_url || ''), updatedAt: item.updated_at || item.posted_at || item.last_indexed_at || null, status: item.status || 'published' };
 }
 
-function addGroup(groups, key, label, product, model, item) {
+function addGroup(groups, key, label, product, model, item = null) {
   if (!groups.has(key)) groups.set(key, { id: key, label, product, model, articles: [] });
-  groups.get(key).articles.push(item);
+  if (item) groups.get(key).articles.push(item);
 }
 
 export default async function handler(req, res) {
@@ -38,6 +38,16 @@ export default async function handler(req, res) {
       if (!modelArticleIds.has(id)) modelArticleIds.set(id, model);
     }
     const faqGroups = new Map();
+    // Preserve the governed product/account-scope tree even where a scope has
+    // no FAQ evidence yet. Hiding it made the explorer look incomplete and
+    // obscured gaps that the team needs to see.
+    for (const [product, label] of [['cfd', 'General CFD policies'], ['futures', 'General Futures policies'], ['policy', 'Policies & rules']]) {
+      addGroup(faqGroups, `${product}:general`, label, product, 'general');
+    }
+    for (const model of catalog.models || []) {
+      if (model.status === 'rejected') continue;
+      addGroup(faqGroups, `${model.product}:${model.slug}`, model.name, model.product, model.slug);
+    }
     for (const article of articles || []) {
       const id = String(article.intercom_id);
       const override = overrides[id];
@@ -48,6 +58,9 @@ export default async function handler(req, res) {
       addGroup(faqGroups, key, label, product, model?.slug || 'general', titleRecord(article));
     }
     const noticeGroups = new Map();
+    for (const [product, label] of [['cfd', 'General CFD notices'], ['futures', 'General Futures notices'], ['policy', 'Policies & rules']]) {
+      addGroup(noticeGroups, `${product}:general`, label, product, 'general');
+    }
     for (const notice of notices) {
       const product = ['cfd', 'futures'].includes(notice.product) ? notice.product : 'policy';
       const model = notice.model && notice.model !== 'all' ? notice.model : 'general';
