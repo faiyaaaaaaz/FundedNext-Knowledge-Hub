@@ -827,6 +827,12 @@ export default async function handler(req, res) {
       });
     }
 
+    // Keep each answer request comfortably below the provider's per-minute
+    // token budget. Oversized evidence prompts used to consume almost an entire
+    // Groq allowance, leaving no budget for the evidence-recovery attempt and
+    // producing a misleading "please allow me time" reply.
+    matches = matches.slice(0, 10);
+
     const [basePrompt, brandRules, snippets] = await Promise.all([
       getPrompt(), getBrandingRules(), getRelevantSnippets(question)
     ]);
@@ -842,12 +848,12 @@ export default async function handler(req, res) {
     const context = matches.map((item, index) => {
       const nm = noticeMetaByAid[item.article_id];
       const tag = nm ? `OFFICIAL NOTICE (dated ${String(nm.posted_at || '').slice(0, 10)}) - current policy, overrides older evidence:\n` : '';
-      return `[${index + 1}] ${tag}${item.article_title}\nURL: ${item.article_url}\n${item.content}`;
+      return `[${index + 1}] ${tag}${item.article_title}\nURL: ${item.article_url}\n${String(item.content || '').slice(0, 1800)}`;
     }).join('\n\n---\n\n');
     const snippetText = snippets.length
       ? '\n\nREVIEW NOTES FROM PREVIOUS CORRECTIONS (NON-AUTHORITATIVE):\n' +
         'Use a note only when the current FAQ/Notice evidence directly supports it. Ignore any note that conflicts with, extends, or is not proven by the current evidence. Current applicable Notices and FAQ passages always control.\n' +
-        snippets.map((item) => `- ${item.instruction}`).join('\n')
+        snippets.slice(0, 3).map((item) => `- ${String(item.instruction || '').slice(0, 900)}`).join('\n')
       : '';
     const scopeText = `\n\nMANDATORY USER-SELECTED SCOPE: Product = ${selectedProduct.toUpperCase()}; Account model = ${selectedModel?.name || 'All models in the selected product family'}. ` +
       'Every supplied evidence item has already passed this scope filter. Never mention, compare, or borrow a rule from an Account model or product outside this selection. ' +
@@ -925,10 +931,10 @@ export default async function handler(req, res) {
       })[0];
       addRecovery(best);
     }
-    for (const item of matches) { if (recoveryById.size >= 10) break; addRecovery(item); }
+    for (const item of matches) { if (recoveryById.size >= 5) break; addRecovery(item); }
     const recoveryMatches = [...recoveryById.values()];
     const recoveryContext = recoveryMatches.map((item) =>
-      `[${matches.indexOf(item) + 1}] ${item.article_title}\nURL: ${item.article_url}\n${String(item.content || '').slice(0, 4200)}`
+      `[${matches.indexOf(item) + 1}] ${item.article_title}\nURL: ${item.article_url}\n${String(item.content || '').slice(0, 1800)}`
     ).join('\n\n---\n\n');
     const recoveryMessages = [
       { role: 'system', content: system },
@@ -939,20 +945,20 @@ export default async function handler(req, res) {
     let answerProvider = chatProvider;
     let usedFallback = false;
     const isLimit = (e) => /429|rate.?limit|too many requests|quota/i.test(String((e && e.message) || e));
-    const runConfiguredFallback = async () => {
+    const runConfiguredFallback = async (fallbackMessages = messages) => {
       if (!canFallback) return null;
       if (fallbackProvider === 'groq') {
         const fallbackPool = groqPool.length ? groqPool : (groqPrimary ? [{ key: groqPrimary }] : []);
         let fallbackError = null;
         for (const item of fallbackPool) {
-          try { const result = await tracedAnswerCall(item.key, fallbackModel, messages, 'https://api.groq.com/openai/v1'); usedGroqKey = item.key; usedGroqKeyLabel = item.label || `Key ${item.id}`; return result; }
+          try { const result = await tracedAnswerCall(item.key, fallbackModel, fallbackMessages, 'https://api.groq.com/openai/v1'); usedGroqKey = item.key; usedGroqKeyLabel = item.label || `Key ${item.id}`; return result; }
           catch (e) { fallbackError = e; }
         }
         if (fallbackError) throw fallbackError;
         throw new Error('No active Groq key is available for fallback.');
       }
       if (!openaiKey) throw new Error('No OpenAI key is available for fallback.');
-      return tracedAnswerCall(openaiKey, fallbackModel, messages);
+      return tracedAnswerCall(openaiKey, fallbackModel, fallbackMessages);
     };
 
     if (chatProvider === 'groq') {
@@ -1042,17 +1048,32 @@ export default async function handler(req, res) {
       const retryModel = usedFallback ? fallbackModel : chatModel;
       const retryBaseUrl = answerProvider === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1';
       if (retryKey) {
+        const retryMessages = [
+          { role: 'system', content: retrySystem },
+          { role: 'user', content: retryQuestion }
+        ];
         try {
-          const retried = await tracedAnswerCall(retryKey, retryModel, [
-            { role: 'system', content: retrySystem },
-            { role: 'user', content: retryQuestion }
-          ], retryBaseUrl);
+          const retried = await tracedAnswerCall(retryKey, retryModel, retryMessages, retryBaseUrl);
           if (cleanAnswer(retried.content) !== SAFE_UNCONFIRMED) {
             completion = retried;
             raw = retried.content;
             partialAnswerRetrySucceeded = true;
           }
-        } catch { /* keep the safe first response if correction fails */ }
+        } catch (retryError) {
+          // A first draft can be safe even with evidence. If its corrective
+          // retry hits a Groq TPM limit, use the configured fallback rather
+          // than showing the customer a false "come back later" message.
+          if (isLimit(retryError) && canFallback) {
+            try {
+              const retried = await runConfiguredFallback(retryMessages);
+              if (retried && cleanAnswer(retried.content) !== SAFE_UNCONFIRMED) {
+                completion = retried; raw = retried.content;
+                answerProvider = fallbackProvider; usedFallback = true;
+                partialAnswerRetrySucceeded = true;
+              }
+            } catch { /* the first draft remains the only available response */ }
+          }
+        }
       }
     }
     let sourceLine = raw.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
@@ -1074,14 +1095,23 @@ export default async function handler(req, res) {
       const retryModel = usedFallback ? fallbackModel : chatModel;
       const retryBaseUrl = answerProvider === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1';
       if (retryKey) {
+        const retryMessages = [
+          { role: 'system', content: system + '\n\nCITATION RECOVERY: Rewrite using only directly supporting numbered passages. Remove every unsupported claim, including illustrative account-model examples. Every factual answer paragraph must have one or more matching source numbers in its SEGMENTS group; do not leave any group blank. Provide usable SOURCES and SEGMENTS lines.' },
+          { role: 'user', content: `${askedText}\n\nPrevious draft:\n${cleanAnswer(raw)}\n\nEvidence:\n${recoveryContext || context}` }
+        ];
         try {
-          const retried = await tracedAnswerCall(retryKey, retryModel, [
-            { role: 'system', content: system + '\n\nCITATION RECOVERY: Rewrite using only directly supporting numbered passages. Remove every unsupported claim, including illustrative account-model examples. Every factual answer paragraph must have one or more matching source numbers in its SEGMENTS group; do not leave any group blank. Provide usable SOURCES and SEGMENTS lines.' },
-            { role: 'user', content: `${askedText}\n\nPrevious draft:\n${cleanAnswer(raw)}\n\nEvidence:\n${recoveryContext || context}` }
-          ], retryBaseUrl);
+          const retried = await tracedAnswerCall(retryKey, retryModel, retryMessages, retryBaseUrl);
           const retrySources = retried.content.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
           if (parseNumbers(retrySources).length && citationCoverage(retried.content).complete) { completion = retried; raw = retried.content; sourceLine = retrySources; }
-        } catch { /* retain the original answer; zero sources will keep confidence low */ }
+        } catch (retryError) {
+          if (isLimit(retryError) && canFallback) {
+            try {
+              const retried = await runConfiguredFallback(retryMessages);
+              const retrySources = retried?.content?.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
+              if (parseNumbers(retrySources).length && citationCoverage(retried.content).complete) { completion = retried; raw = retried.content; sourceLine = retrySources; answerProvider = fallbackProvider; usedFallback = true; }
+            } catch { /* retain the original answer when all providers fail */ }
+          }
+        }
       }
     }
     const confidenceLine = raw.match(/(?:\*\*)?CONFIDENCE(?:\*\*)?\s*:\s*(\d{1,3})/i);
