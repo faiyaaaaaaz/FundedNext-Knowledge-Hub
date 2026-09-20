@@ -42,7 +42,10 @@ export default function KnowledgeMap({ session }) {
   const [zoom, setZoom] = useState(1);
   const [collapsed, setCollapsed] = useState({ faq: false, notices: false });
   const drag = useRef(null);
-  const headers = useMemo(() => ({ Authorization: `Bearer ${session}` }), [session]);
+  // Admin APIs authenticate with the same session header used throughout the
+  // Admin console.  Using a Bearer header here made the map look logged out
+  // even while the rest of the console had a valid session.
+  const headers = useMemo(() => ({ 'x-app-session': session }), [session]);
   const load = async () => {
     setError('');
     try {
