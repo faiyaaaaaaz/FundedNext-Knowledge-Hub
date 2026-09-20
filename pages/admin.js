@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { getSupabaseBrowser } from '../lib/supabaseBrowser';
 import {AdminMessages,AdminOverview} from '../components/Workspace';
 import ModelReview from '../components/ModelReview';
+import KnowledgeMap from '../components/KnowledgeMap';
 
 const OPENAI_MODELS = ['gpt-4o', 'gpt-4o-mini', 'o3', 'o3-mini'];
 const GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.6-27b'];
@@ -1118,7 +1119,7 @@ export default function Admin() {
     ['overview','▦','Overview'],
     ['messages','✉','Team inbox & reports'], ['modelreview','◎','Model discovery'],
     ['access', '⌁', 'Team access'], ['ai', '✦', 'AI & model'], ['branding', 'Aa', 'Brand Language'],
-    ['disputes', '⚑', 'Disputes'], ['snippets', '⌘', 'Snippets'], ['snippetlogs', '↳', 'Snippet usage logs'], ['knowledge', '▤', 'Knowledge'], ['querylogs', '◧', 'Query & answer logs'], ['reports', '⇩', 'Downloads & diagnostics'], ['calcdata', '∑', 'Calculator data'], ['activity', '◫', 'Activity logs'],
+    ['disputes', '⚑', 'Disputes'], ['snippets', '⌘', 'Snippets'], ['snippetlogs', '↳', 'Snippet usage logs'], ['knowledge', '▤', 'Knowledge'], ['brain', '◉', 'Knowledge brain'], ['querylogs', '◧', 'Query & answer logs'], ['reports', '⇩', 'Downloads & diagnostics'], ['calcdata', '∑', 'Calculator data'], ['activity', '◫', 'Activity logs'],
     ['autosync', '↻', 'Automatic sync'], ['groqkeys', '⚿', 'Groq keys'], ['notices', '❖', 'Notices'], ['keys', '◇', 'API vault']
   ];
   const titles = Object.fromEntries(navigation.map(([id,, title]) => [id, title]));
@@ -1167,6 +1168,7 @@ export default function Admin() {
         {tab === 'overview' && <AdminOverview session={session} onNavigate={setTab} />}
         {tab === 'messages' && <AdminMessages session={session} />}
         {tab === 'modelreview' && <ModelReview session={session} />}
+        {tab === 'brain' && <KnowledgeMap session={session} />}
         {tab === 'access' && <div className="settings-stack">
           <section className="settings-card"><div className="settings-head"><div><h2>Google sign-in</h2><p>Access is permanently restricted to nextventures.io Google accounts.</p></div><span className={`state-pill ${status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'ready' : ''}`}>{status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'Configured' : 'Vercel setup needed'}</span></div><div className="permission-table"><div><span>Access rule</span><b>Required value</b><b>Status</b></div><div><span>Allowed domain</span><b>nextventures.io</b><b>Fixed</b></div><div><span>Admin list</span><b>ADMIN_GOOGLE_EMAILS</b><b>{status?.adminGoogleConfigured ? 'Configured' : 'Missing'}</b></div></div></section>
           <section className="settings-card"><div className="settings-head"><div><h2>Workspace roles</h2><p>Every user must authenticate with Google. Admin rights come only from the Vercel Admin email list.</p></div><span className="state-pill ready">Google only</span></div><div className="permission-table"><div><span>Requirement</span><b>Agent</b><b>Admin</b></div><div><span>@nextventures.io Google account</span><b>Required</b><b>Required</b></div><div><span>Listed in ADMIN_GOOGLE_EMAILS</span><b>No</b><b>Required</b></div></div></section>
