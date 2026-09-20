@@ -1,8 +1,8 @@
 /* ============================================================
    FundedNext Knowledge Hub — premium interface system
-   Display: Plus Jakarta Sans · Body/Answers: DM Sans · Accent: FN violet
+   Titillium Web throughout · Accent: FN violet
    ============================================================ */
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Titillium+Web:wght@300;400;600;700&display=swap');
 
 :root {
   --bg: #eeedf1;
@@ -34,9 +34,9 @@
   --shadow-sm: 0 8px 22px -16px rgba(41, 27, 92, .30);
   --ring: 0 0 0 4px rgba(108, 77, 246, .16);
   --radius: 16px;
-  --font: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --display: 'Plus Jakarta Sans', var(--font);
-  --answer-font: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font: 'Titillium Web', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --display: 'Titillium Web', var(--font);
+  --answer-font: 'Titillium Web', var(--font);
 }
 [data-theme="dark"] {
   --bg: #0a0912;
