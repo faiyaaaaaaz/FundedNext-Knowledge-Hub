@@ -398,10 +398,16 @@ export default async function handler(req, res) {
 
     // The visible product/model controls now provide this missing scope. Do not
     // open a redundant Account-model clarification dialog.
+    const modelSensitiveTradePermission = !selectedModel && questionModels.length === 0 &&
+      /\b(?:can|could|am i|is (?:this|it)|would|will)\b/i.test(probe) &&
+      /\b(?:open|place|hold|submit|execute)\b.{0,48}\b(?:orders?|positions?|trades?)\b|\b(?:maximum|max|simultaneous|open)\s+(?:positions?|orders?)\b|\b(?:max(?:imum)?\s+)?lot(?:\s+(?:size|limit|usage))?\b|\b(?:grid|mass|copy|mirror|latency|tick)\s+trading\b|\b(?:hedg(?:e|ing)|arbitrage|scalp(?:ing)?)\b|\b(?:expert advisors?|eas?)\b/i.test(probe);
     const accountDependent = !selectedModel && questionModels.length === 0 &&
-      /\b(?:daily loss|maximum loss|mll|drawdown|profit target|minimum trading days?|consistency rule|trading cycle|first performance reward|first payout|reward cycle|reset|merge|news trading|ea trading|expert advisor|risk limit)\b/i.test(probe);
+      (/\b(?:daily loss|maximum loss|mll|drawdown|profit target|minimum trading days?|consistency rule|trading cycle|first performance reward|first payout|reward cycle|reset|merge|news trading|ea trading|expert advisor|risk limit)\b/i.test(probe) || modelSensitiveTradePermission);
     const asksAcrossModels = /\b(all|each|every|compare|comparison|different models?|by model)\b/i.test(question);
-    if (accountDependent && !asksAcrossModels && !explicitMultiPart && !req.body?.clarification) {
+    // The Account choice determines the answer even when the helper has split
+    // a customer message into several parts. Previously that split suppressed
+    // clarification and allowed one model's rule to answer an All-model query.
+    if (accountDependent && !asksAcrossModels && !req.body?.clarification) {
       return res.status(200).json({
         needsClarification: true,
         originalQuestion: question,
@@ -572,7 +578,21 @@ export default async function handler(req, res) {
         rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: `Wrong product: ${sourceProduct || 'unknown'} evidence for ${selectedProduct}`, similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
         return false;
       }
-      if (!selectedModel) return true;
+      if (!selectedModel) {
+        // An All-model selection is not permission to use a rule that belongs
+        // to only one Account model. Keep genuinely product-wide policy, but
+        // reject scoped FAQs unless the customer is explicitly comparing the
+        // named models. This makes an unscoped question clarify or remain
+        // safely unanswered instead of borrowing a convenient model answer.
+        const namedInSelectedProduct = mentioned.filter((model) => selectedProduct === 'both' || model.product === selectedProduct);
+        const specificallyAssigned = override?.model && override.model !== 'all';
+        if (!comparisonModels.length && (specificallyAssigned || namedInSelectedProduct.length)) {
+          const named = specificallyAssigned ? override.model : namedInSelectedProduct.map((model) => model.slug).join(', ');
+          rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: `Model-specific FAQ excluded until the customer selects or names an Account model (${named})`, similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
+          return false;
+        }
+        return true;
+      }
       // Unlike general CFD policy, Competition is a distinct event account.
       // It must be named by the evidence (or explicitly assigned by an Admin);
       // an article about a FundedNext Account, a Challenge, or a payout cannot
