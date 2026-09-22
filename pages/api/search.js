@@ -37,6 +37,8 @@ const CORE_GUARDRAILS =
   '- For a multi-part question, answer every part supported by direct evidence and say only that the specific unsupported part needs checking.\n' +
   `- Reply exactly "${SAFE_UNCONFIRMED}" only when direct evidence supports none of the requested parts.\n` +
   '- Factual numbers, dates, percentages, time periods, and conditions must be directly supported by the selected FAQ evidence.\n' +
+  '- Do not infer that two instruments are correlated or uncorrelated unless the evidence explicitly states that relationship. A list of asset groups is not enough.\n' +
+  '- Do not apply consequences from a named program, review process, or risk framework unless the evidence explicitly says the customer or violation is governed by it.\n' +
   '- Never treat a generic rule as proof that it applies to every Account model. When evidence differs by model, label each model separately.\n' +
   '- A Challenge Phase does not itself receive a Performance Reward. If the customer says "Challenge Account" while asking to withdraw, explain the stage distinction or ask which FundedNext Account they mean.\n' +
   '- For KYC nationality or country eligibility, a generic list of accepted document types is not proof that a country is eligible. Confirm only when the evidence explicitly covers that country or restriction.\n' +
@@ -130,10 +132,29 @@ function wordCount(text) {
 }
 
 function explicitQuestionParts(text) {
-  const parts = String(text || '').match(/[^?]+\?/g) || [];
+  const source = String(text || '');
+  const allMarkers = [...source.matchAll(/(?:^|\s)(\d{1,2})[.)]\s+/g)];
+  const markers = allMarkers.filter((match, index) => index === 0
+    ? Number(match[1]) === 1
+    : Number(match[1]) === Number(allMarkers[index - 1][1]) + 1);
+  if (markers.length >= 2) {
+    return markers.map((marker, index) => {
+      const start = marker.index + marker[0].length;
+      const end = markers[index + 1]?.index ?? source.length;
+      return source.slice(start, end).trim();
+    }).filter((part) => part.length > 8).slice(0, 8);
+  }
+  const parts = source.match(/[^?]+\?/g) || [];
   return parts.map((part) => part.replace(/^\s*(?:good\s+(?:morning|afternoon|evening)[,.]?\s*)/i, '').trim())
     .filter((part) => part.length > 8)
     .slice(0, 8);
+}
+
+function conciseQuestionLabel(text) {
+  const cleaned = String(text || '').replace(/[*_#]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const questions = cleaned.match(/[^.!?]{8,}[?]/g);
+  const label = questions?.length ? questions[questions.length - 1].trim() : cleaned;
+  return label.length > 240 ? `${label.slice(0, 237).trim()}…` : label;
 }
 
 function asksMinimumTradingRequirement(text) {
@@ -155,6 +176,7 @@ export default async function handler(req, res) {
   let usedGroqKey = null;
   let partialAnswerRetryAttempted = false;
   let partialAnswerRetrySucceeded = false;
+  let citationMappingRecovered = false;
   let requestLogId = null;
   let requestMetadata = {};
   const reviewTrace = { version: 1, prompts: {}, attempts: [] };
@@ -402,7 +424,7 @@ export default async function handler(req, res) {
       /\b(?:can|could|am i|is (?:this|it)|would|will)\b/i.test(probe) &&
       /\b(?:open|place|hold|submit|execute)\b.{0,48}\b(?:orders?|positions?|trades?)\b|\b(?:maximum|max|simultaneous|open)\s+(?:positions?|orders?)\b|\b(?:max(?:imum)?\s+)?lot(?:\s+(?:size|limit|usage))?\b|\b(?:grid|mass|copy|mirror|latency|tick)\s+trading\b|\b(?:hedg(?:e|ing)|arbitrage|scalp(?:ing)?)\b|\b(?:expert advisors?|eas?)\b/i.test(probe);
     const accountDependent = !selectedModel && questionModels.length === 0 &&
-      (/\b(?:daily loss|maximum loss|mll|drawdown|profit target|minimum trading days?|consistency rule|trading cycle|first performance reward|first payout|reward cycle|reset|merge|news trading|ea trading|expert advisor|risk limit)\b/i.test(probe) || modelSensitiveTradePermission);
+      (/\b(?:daily loss|maximum loss|mll|drawdown|profit target|minimum trading days?|consistency rule|trading cycle|first performance reward|first payout|reward cycle|reset|merge|scal(?:e|ing)|scale[ -]?up|grow(?:ing)? (?:the |my |an? )?account|news trading|ea trading|expert advisor|risk limit)\b/i.test(probe) || modelSensitiveTradePermission);
     const asksAcrossModels = /\b(all|each|every|compare|comparison|different models?|by model)\b/i.test(question);
     // The Account choice determines the answer even when the helper has split
     // a customer message into several parts. Previously that split suppressed
@@ -980,6 +1002,31 @@ export default async function handler(req, res) {
       if (!openaiKey) throw new Error('No OpenAI key is available for fallback.');
       return tracedAnswerCall(openaiKey, fallbackModel, fallbackMessages);
     };
+    const runAnswerRecovery = async (retryMessages) => {
+      if (answerProvider !== 'groq') {
+        const model = usedFallback ? fallbackModel : chatModel;
+        return tracedAnswerCall(openaiKey, model, retryMessages);
+      }
+      const model = usedFallback ? fallbackModel : chatModel;
+      const pool = (groqPool.length ? groqPool : (groqPrimary ? [{ key: groqPrimary }] : []))
+        .slice().sort((a, b) => Number(a.key === usedGroqKey) - Number(b.key === usedGroqKey));
+      let lastError = null;
+      for (const item of pool) {
+        try {
+          const result = await tracedAnswerCall(item.key, model, retryMessages, 'https://api.groq.com/openai/v1');
+          usedGroqKey = item.key;
+          usedGroqKeyLabel = item.label || `Key ${item.id}`;
+          return result;
+        } catch (error) { lastError = error; }
+      }
+      if (canFallback && fallbackProvider !== 'groq') {
+        const result = await runConfiguredFallback(retryMessages);
+        answerProvider = fallbackProvider;
+        usedFallback = true;
+        return result;
+      }
+      throw lastError || new Error('No answer-recovery provider is available.');
+    };
 
     if (chatProvider === 'groq') {
       // Rotate over the key pool in a random order so concurrent users spread
@@ -1064,16 +1111,13 @@ export default async function handler(req, res) {
       const retryQuestion =
         `Customer questions:\n${topicPlan.map((topic, index) => `${index + 1}. ${topic.question}`).join('\n')}\n\n` +
         `FAQ evidence:\n${recoveryContext || context}`;
-      const retryKey = answerProvider === 'groq' ? usedGroqKey : openaiKey;
-      const retryModel = usedFallback ? fallbackModel : chatModel;
-      const retryBaseUrl = answerProvider === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1';
-      if (retryKey) {
+      if (answerProvider === 'groq' ? (groqPool.length || usedGroqKey) : openaiKey) {
         const retryMessages = [
           { role: 'system', content: retrySystem },
           { role: 'user', content: retryQuestion }
         ];
         try {
-          const retried = await tracedAnswerCall(retryKey, retryModel, retryMessages, retryBaseUrl);
+          const retried = await runAnswerRecovery(retryMessages);
           if (cleanAnswer(retried.content) !== SAFE_UNCONFIRMED) {
             completion = retried;
             raw = retried.content;
@@ -1083,7 +1127,7 @@ export default async function handler(req, res) {
           // A first draft can be safe even with evidence. If its corrective
           // retry hits a Groq TPM limit, use the configured fallback rather
           // than showing the customer a false "come back later" message.
-          if (isLimit(retryError) && canFallback) {
+          if (isLimit(retryError) && canFallback && fallbackProvider !== answerProvider) {
             try {
               const retried = await runConfiguredFallback(retryMessages);
               if (retried && cleanAnswer(retried.content) !== SAFE_UNCONFIRMED) {
@@ -1106,21 +1150,21 @@ export default async function handler(req, res) {
       const groups = segmentLine[1].split(';').map((group) => (group.match(/\d+/g) || []).map(Number));
       return { complete: groups.length === paragraphs.length && groups.every((group) => group.length > 0 && group.every((number) => !!matches[number - 1])), groups };
     };
-    // A source card alone is not enough: every factual paragraph has to identify
-    // its own evidence. This prevents an otherwise good first paragraph from
-    // lending false authority to a second, uncited model-specific claim.
-    const needsCitationRecovery = !sourceLine || !parseNumbers(sourceLine).length || !citationCoverage(raw).complete;
+    // Recover only when the model omitted all usable source declarations. A
+    // paragraph-map formatting defect is repaired locally below.
+    // A valid global SOURCES declaration is enough to preserve a usable first
+    // draft. Missing paragraph groups are filled deterministically below; do
+    // not spend another large request merely to repair private formatting.
+    const declaredSourceNumbers = parseNumbers(sourceLine).filter((number) => !!matches[number - 1]);
+    const needsCitationRecovery = !declaredSourceNumbers.length;
     if (needsCitationRecovery && cleanAnswer(raw) !== SAFE_UNCONFIRMED && cleanAnswer(raw).length > 80 && matches.length) {
-      const retryKey = answerProvider === 'groq' ? usedGroqKey : openaiKey;
-      const retryModel = usedFallback ? fallbackModel : chatModel;
-      const retryBaseUrl = answerProvider === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1';
-      if (retryKey) {
+      if (answerProvider === 'groq' ? (groqPool.length || usedGroqKey) : openaiKey) {
         const retryMessages = [
           { role: 'system', content: system + '\n\nCITATION RECOVERY: Rewrite using only directly supporting numbered passages. Remove every unsupported claim, including illustrative account-model examples. Every factual answer paragraph must have one or more matching source numbers in its SEGMENTS group; do not leave any group blank. Provide usable SOURCES and SEGMENTS lines.' },
           { role: 'user', content: `${askedText}\n\nPrevious draft:\n${cleanAnswer(raw)}\n\nEvidence:\n${recoveryContext || context}` }
         ];
         try {
-          const retried = await tracedAnswerCall(retryKey, retryModel, retryMessages, retryBaseUrl);
+          const retried = await runAnswerRecovery(retryMessages);
           const retrySources = retried.content.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
           if (parseNumbers(retrySources).length && citationCoverage(retried.content).complete) { completion = retried; raw = retried.content; sourceLine = retrySources; }
         } catch (retryError) {
@@ -1137,7 +1181,7 @@ export default async function handler(req, res) {
     const confidenceLine = raw.match(/(?:\*\*)?CONFIDENCE(?:\*\*)?\s*:\s*(\d{1,3})/i);
     const coverageLine = raw.match(/(?:\*\*)?COVERAGE(?:\*\*)?\s*:\s*([^\n]*)/i);
     const noticeConflictLine = raw.match(/(?:\*\*)?NOTICE_CONFLICT(?:\*\*)?\s*:\s*(yes|no)/i);
-    const sourceNumbers = parseNumbers(sourceLine);
+    const sourceNumbers = parseNumbers(sourceLine).filter((number) => !!matches[number - 1]);
     const exactExcerpt = (item) => {
       const content = String(item?.content || '').trim();
       if (content.length <= 900) return content;
@@ -1227,14 +1271,16 @@ export default async function handler(req, res) {
     // if the model's mapping doesn't line up with the paragraphs, we skip it.
     let segments = null;
     const segLine = raw.match(/(?:\*\*)?SEGMENTS?(?:\*\*)?\s*:\s*([^\n]*)/i);
-    if (segLine && answer !== SAFE_UNCONFIRMED) {
+    if (answer !== SAFE_UNCONFIRMED) {
       const paras = answer.split(/\n{2,}/).map((s) => s.trim()).filter(Boolean);
-      const groups = segLine[1].split(';').map((g) => (g.match(/\d+/g) || []).map(Number));
-      if (paras.length >= 1 && groups.length === paras.length) {
+      const groups = segLine ? segLine[1].split(';').map((g) => (g.match(/\d+/g) || []).map(Number)) : [];
+      if (paras.length >= 1 && sourceNumbers.length) {
         segments = paras.map((text, i) => {
           const refs = [];
           const usedRef = new Set();
-          for (const n of groups[i]) {
+          const paragraphSources = (groups.length === paras.length ? groups[i] : []).filter((number) => !!matches[number - 1]);
+          if (!paragraphSources.length) citationMappingRecovered = true;
+          for (const n of (paragraphSources.length ? paragraphSources : sourceNumbers)) {
             const idx = refFor(matches[n - 1]);
             if (idx && !usedRef.has(idx)) { usedRef.add(idx); refs.push(idx); }
           }
@@ -1243,6 +1289,10 @@ export default async function handler(req, res) {
         // Only worth sending if at least one paragraph actually has a citation.
         if (!segments.some((s) => s.refs.length)) segments = null;
       }
+    }
+    if (citationMappingRecovered) {
+      confidence = Math.min(confidence, 80);
+      confidenceLabel = confidence >= 65 ? 'Review suggested' : 'Needs verification';
     }
     // Fail closed if the answer model did not produce a valid paragraph-to-source
     // map. When only part is mapped, retain just that sourced part; never show an
@@ -1260,6 +1310,19 @@ export default async function handler(req, res) {
           confidence = Math.min(confidence, 22);
           confidenceLabel = 'Needs verification';
         }
+      }
+    }
+    // Never silently omit a customer concern. The model already reports
+    // per-question coverage; turn every unsupported part into a visible,
+    // focused statement instead of making the customer infer what was skipped.
+    if (answer !== SAFE_UNCONFIRMED && notConfirmedCount) {
+      const unresolved = questionCoverage.filter((item) => item.status === 'not_confirmed')
+        .map((item) => `I could not confirm this part from the current verified sources: ${conciseQuestionLabel(item.question)}`);
+      if (unresolved.length) {
+        answer = `${answer}\n\n${unresolved.join('\n\n')}`;
+        segments = [...(segments || []), ...unresolved.map((text) => ({ text, refs: [] }))];
+        confidence = Math.min(confidence, 70);
+        confidenceLabel = confidence >= 65 ? 'Review suggested' : 'Needs verification';
       }
     }
     sources = sources.map(({ _aid, ...rest }) => {
@@ -1311,6 +1374,7 @@ export default async function handler(req, res) {
     if (multiPart && sources.length < topicPlan.length) confidenceReasons.push({ code: 'partial_coverage', label: 'Some question parts have limited source coverage', impact: 'down' });
     if (groundingScore != null && groundingScore < 65) confidenceReasons.push({ code: 'grounding_reduced', label: `Grounding verification scored ${groundingScore}%`, impact: 'down' });
     if (groundingScore != null && groundingScore >= 85) confidenceReasons.push({ code: 'grounding_strong', label: `Grounding verification scored ${groundingScore}%`, impact: 'up' });
+    if (citationMappingRecovered) confidenceReasons.push({ code: 'citation_map_recovered', label: 'Paragraph citations were recovered from the answer’s declared source list', impact: 'down' });
 
     const usage = completion.usage || {};
     const inputTokens = Number(usage.prompt_tokens || usage.input_tokens || 0);
@@ -1349,7 +1413,7 @@ export default async function handler(req, res) {
           sourceDeclarationPresent: !!sourceLine,
           finalSources: sources.slice(0, 12).map((source) => ({ title: source.title, url: source.url, kind: source.kind }))
         },
-        processing: { partialAnswerRetryAttempted, partialAnswerRetrySucceeded, fallback: usedFallback, groundingScore },
+        processing: { partialAnswerRetryAttempted, partialAnswerRetrySucceeded, citationMappingRecovered, fallback: usedFallback, groundingScore },
         snippetsUsed,
         questionCoverage, coverageSummary,
         noticeConflict: noticeConflictDetected ? { detected: true, resolution: 'A relevant CEx Notice overrode incompatible FAQ information.', noticeSources: sources.filter((source) => source.kind === 'notice').map((source) => source.title), faqSources: sources.filter((source) => source.kind === 'faq').map((source) => source.title) } : { detected: false },
