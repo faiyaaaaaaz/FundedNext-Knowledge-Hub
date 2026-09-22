@@ -17,11 +17,11 @@ export default async function handler(req, res) {
     if (access.role !== 'admin') return res.status(403).json({ error: 'Admin access is required.' });
     const sb = supabaseAdmin();
     const [review, notices, snippetUsage] = await Promise.all([
-      buildReport([], {}, true), listNotices(sb), buildSnippetUsageReport(sb)
+      buildReport([], {}, true, { reviewPassageLimit: 250 }), listNotices(sb), buildSnippetUsageReport(sb)
     ]);
     const bundle = {
       schema: 'fundednext-admin-diagnostics', version: 1, exportedAt: new Date().toISOString(),
-      description: 'Compact combined admin download: query evaluation, Notice knowledge, and question-level snippet-use traces.',
+      description: 'Compact combined admin download: all query outcomes and source identities, detailed retrieved passages when applicable within the newest 250 queries and for every failed query, Notice knowledge, and question-level snippet-use traces.',
       summaries: { queryReview: review.counts, notices: { total: notices.length, active: notices.filter((item) => item.status === 'active').length }, snippetUsage: snippetUsage.summary },
       queryReview: review,
       noticeKnowledge: { records: notices },
