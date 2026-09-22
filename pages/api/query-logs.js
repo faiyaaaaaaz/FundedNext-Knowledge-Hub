@@ -86,7 +86,7 @@ function failedOrIncomplete(row) {
   return !!row.error || (!row.answer && (!row.success || ['processing','failed_or_incomplete','error','timeout'].includes(row.status)));
 }
 
-function compactReviewQuery(row, focusIds) {
+function compactReviewQuery(row, focusIds, retainReviewPassages = true) {
   if (focusIds.has(String(row.id)) || failedOrIncomplete(row)) return { ...row, diagnosticDetail: 'full' };
   const needsReview = !!row.reviewCandidate;
   const trail = row.evidenceTrail || null;
@@ -100,7 +100,7 @@ function compactReviewQuery(row, focusIds) {
     contextHash: row.evidenceSnapshot.contextHash,
     passages: (row.evidenceSnapshot.passages || []).map((item) => ({
       position: item.position, chunkId: item.chunkId, articleId: item.articleId,
-      title: item.title, url: item.url, ...(needsReview ? { content: item.content } : {}), contentHash: item.contentHash,
+      title: item.title, url: item.url, ...(needsReview && retainReviewPassages ? { content: item.content } : {}), contentHash: item.contentHash,
       sourceUpdatedAt: item.sourceUpdatedAt, notice: item.notice ? {
         entry_id: item.notice.entry_id, title: item.notice.title, category: item.notice.category,
         topic_key: item.notice.topic_key, product: item.notice.product, model: item.notice.model,
@@ -122,11 +122,12 @@ function compactReviewQuery(row, focusIds) {
   };
 }
 
-export async function buildReport(ids = [], filters = {}, compact = true) {
+export async function buildReport(ids = [], filters = {}, compact = true, options = {}) {
   const allQueries = await fetchAll(filtersFrom(filters), null, true);
   const failedRows = allQueries.filter(failedOrIncomplete);
   const focusIds = new Set(ids.map(String));
-  const reportQueries = compact ? allQueries.map((row) => compactReviewQuery(row, focusIds)) : allQueries;
+  const reviewPassageLimit = Number.isFinite(options.reviewPassageLimit) ? Math.max(0, options.reviewPassageLimit) : Infinity;
+  const reportQueries = compact ? allQueries.map((row, index) => compactReviewQuery(row, focusIds, index < reviewPassageLimit)) : allQueries;
   const approvedDisputes = [];
   for (let offset = 0; ; offset += 500) {
     const { data, error } = await supabaseAdmin().from('disputes')
@@ -152,7 +153,7 @@ export async function buildReport(ids = [], filters = {}, compact = true) {
       'Snippet-generated disputes passed approval in this application and are included. Pending and rejected disputes are excluded.',
       'Interpretation and verification model calls are summarized where recorded; detailed request traces cover answer generation and its retries.'
     ],
-    selection: { manuallySelectedQueryIds: ids, automaticallyIncludedFailedQueryIds: failedIds, filtersVisibleWhenExported: filters, queryScope: 'all recorded queries regardless of confidence or active filters', compact, detailPolicy: compact ? 'Full traces for focus and failed records; review candidates retain retrieved passage text with compact request traces; other answers retain exact final cited passages and compact trace summaries.' : 'Full traces for every query.' },
+    selection: { manuallySelectedQueryIds: ids, automaticallyIncludedFailedQueryIds: failedIds, filtersVisibleWhenExported: filters, queryScope: 'all recorded queries regardless of confidence or active filters', compact, detailPolicy: compact ? `Full traces for focus and failed records; retrieved passage text is retained when applicable within the newest ${reviewPassageLimit === Infinity ? 'all' : reviewPassageLimit} queries; older answers retain source identities, hashes, final cited excerpts, and compact request traces.` : 'Full traces for every query.' },
     requestedQueryIds: ids, missingQueryIds: ids.filter(id => !found.has(id)),
     counts: {
       queries: reportQueries.length, failedOrIncompleteQueries: failedIds.length,
