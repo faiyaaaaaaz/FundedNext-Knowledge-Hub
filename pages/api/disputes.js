@@ -27,7 +27,7 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'The question and answer are required.' });
       }
       const selectedScope = body.scope && ['cfd', 'futures', 'both'].includes(body.scope.product)
-        ? { type: 'answer_scope', product: body.scope.product, model: String(body.scope.model || 'all'), label: String(body.scope.label || '').slice(0, 160), title: `Answer scope: ${body.scope.product.toUpperCase()} · ${String(body.scope.label || body.scope.model || 'All models').slice(0, 160)}`, url: '' }
+        ? { type: 'answer_scope', product: body.scope.product, model: String(body.scope.model || 'all'), label: String(body.scope.label || '').slice(0, 160), title: `Answer scope: ${body.scope.product.toUpperCase()} Â· ${String(body.scope.label || body.scope.model || 'All models').slice(0, 160)}`, url: '' }
         : null;
       const recordedSources = Array.isArray(body.sources) ? body.sources.slice(0, 30) : [];
       if (selectedScope) recordedSources.unshift(selectedScope);
@@ -109,7 +109,7 @@ export default async function handler(req, res) {
 
       if (action === 'generate') {
         if (!['approved', 'snippet_generated'].includes(dispute.status)) return res.status(400).json({ error: 'Approve the dispute before generating a correction draft.' });
-        const { openaiKey, groqKey, chatModel, chatProvider } = await getKeys();
+        const { openaiKey } = await getKeys();
         if (!openaiKey) throw new Error('OpenAI key is required to verify FAQs and Notices.');
         const { data: linkedSnippets, error: linkedError } = await sb.from('ai_snippets').select('*').eq('source_dispute_id', dispute.id);
         if (linkedError) throw linkedError;
@@ -134,14 +134,24 @@ export default async function handler(req, res) {
             if (!previous || Number(item.similarity || 0) > Number(previous.similarity || 0)) faqById.set(key, item);
           }
         }
-        const scopedEvidence = [...faqById.values()].filter((item) => {
+        const questionUsesLocalizedScript = /[\u0600-\u06ff\u0750-\u077f\u3040-\u30ff\u3400-\u9fff\u0400-\u04ff]/.test(dispute.question || '');
+        const scopedCandidates = [...faqById.values()].filter((item) => {
           const url = String(item.article_url || '');
           const correctProduct = !recordedScope || recordedScope.product === 'both' || (recordedScope.product === 'futures' ? /helpfutures\.fundednext\.com/i.test(url) : /help\.fundednext\.com/i.test(url));
           if (!correctProduct) return false;
-          if (model === 'all') return true;
+          if (/^\[[A-Z]{2}\]/i.test(String(item.article_title || '').trim()) && !questionUsesLocalizedScript) return false;
           const namedModels = modelsMentioned(`${item.article_title || ''}\n${item.content || ''}`);
+          if (model === 'all') return namedModels.length === 0;
           return !namedModels.length || namedModels.some((itemModel) => itemModel.slug === model);
-        }).sort((a, b) => Number(b.similarity || 0) - Number(a.similarity || 0)).slice(0, 16);
+        }).sort((a, b) => Number(b.similarity || 0) - Number(a.similarity || 0));
+        const perArticleCount = new Map();
+        const scopedEvidence = scopedCandidates.filter((item) => {
+          const key = String(item.article_id || item.id || '');
+          const count = perArticleCount.get(key) || 0;
+          if (count >= 2) return false;
+          perArticleCount.set(key, count + 1);
+          return true;
+        }).slice(0, 12);
         const noticeSearch = [dispute.question, dispute.dispute_reason, dispute.approval_reason, linkedSnippet?.instruction].filter(Boolean).join('\n');
         const noticeResult = await retrieveNotices(sb, { openaiKey, question: noticeSearch, product, model, limit: 6 });
         const noticeEvidence = (noticeResult.matches || []).slice(0, 6);
@@ -164,28 +174,31 @@ export default async function handler(req, res) {
         const rules = await getBrandingRules();
         const system =
           'You are creating a permanent corrective instruction for a support-answering AI. ' +
-          'Re-check every supplied FAQ passage and Notice. Do not accept the original answer, dispute, or previous snippet as truth without evidence. ' +
+          'The disputed answer is the claim under review, not the default truth. First identify the exact correction asserted by the Agent dispute reason and Admin approval reason, including whether it concerns one account, multiple accounts, one phase, or later phases. ' +
+          'Re-check every supplied FAQ passage and Notice. The Agent/Admin correction is not authoritative unless the fresh evidence directly supports it. ' +
+          'Never produce a correction that merely repeats the material claim being disputed. Never collapse "each EA must use a distinct strategy" into "only one EA or one strategy is allowed" unless the evidence explicitly says that. Preserve account, phase, EA, strategy, instrument, and copy-trading distinctions exactly. ' +
           'A relevant newer Notice overrides an older FAQ only when it applies to the same product, Account model, region, date, and condition. Never merge incompatible rules. ' +
-          'Return strict JSON only with keys title, trigger_terms, instruction. ' +
+          'If the correction is unsupported, conflicts with the evidence, or addresses a different scenario than the original question, do not draft a snippet. Return {"decision":"needs_review","review_note":"specific reason","title":"","trigger_terms":"","instruction":""}. ' +
+          'Otherwise return strict JSON with {"decision":"draft","review_note":"","title":"...","trigger_terms":"...","instruction":"..."}. ' +
           'trigger_terms must be a comma-separated list. instruction must be concise, unambiguous, product-scoped, ' +
           'and state what the AI must and must not do in future answers.' + brandingInstructions(rules);
         const user =
           `Original question:\n${dispute.question}\n\nDisputed answer:\n${dispute.answer}\n\n` +
-          `Recorded answer scope:\n${recordedScope ? `${recordedScope.product.toUpperCase()} · ${recordedScope.label || recordedScope.model}` : 'Legacy dispute — scope was not recorded'}\n\n` +
+          `Recorded answer scope:\n${recordedScope ? `${recordedScope.product.toUpperCase()} Â· ${recordedScope.label || recordedScope.model}` : 'Legacy dispute â€” scope was not recorded'}\n\n` +
           `Agent dispute reason:\n${dispute.dispute_reason}\n\nAdmin approval reason:\n${dispute.approval_reason}\n\n` +
           `Currently active correction, if any:\n${linkedSnippet?.instruction || 'None'}\n\n` +
           `Fresh FAQ and Notice evidence:\n${evidence || 'No matching FAQ or Notice evidence was found. Do not invent a correction.'}`;
-        let completion;
-        if (chatProvider === 'groq' && groqKey) {
-          try {
-            completion = await openaiChatDetailed(groqKey, chatModel, [{ role: 'system', content: system }, { role: 'user', content: user }], 'https://api.groq.com/openai/v1');
-          } catch {
-            completion = await openaiChatDetailed(openaiKey, 'gpt-4.1', [{ role: 'system', content: system }, { role: 'user', content: user }]);
-          }
-        } else {
-          completion = await openaiChatDetailed(openaiKey, chatModel, [{ role: 'system', content: system }, { role: 'user', content: user }]);
-        }
+        // Correction drafting is a low-volume, high-impact Admin action. Use the
+        // stronger verifier directly instead of inheriting the fast answering
+        // model, which previously restated the disputed answer as a correction.
+        const completion = await openaiChatDetailed(openaiKey, 'gpt-4.1', [{ role: 'system', content: system }, { role: 'user', content: user }]);
         const generated = parseJson(completion.content);
+        if (generated.decision !== 'draft') {
+          return res.status(422).json({
+            error: String(generated.review_note || 'The approved correction is not directly supported by the retrieved FAQ and Notice evidence. Review the dispute wording or source coverage before generating a snippet.'),
+            needsReview: true
+          });
+        }
         if (!generated.title || !generated.trigger_terms || !generated.instruction) {
           throw new Error('The generated snippet was incomplete. Please try again.');
         }
