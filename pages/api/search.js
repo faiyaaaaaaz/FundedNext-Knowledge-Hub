@@ -907,6 +907,43 @@ export default async function handler(req, res) {
     const [basePrompt, brandRules, snippets] = await Promise.all([
       getPrompt(), getBrandingRules(), getRelevantSnippets(question)
     ]);
+    // Activation is an explicit Admin approval. Promote only the strongest,
+    // phrase-matched correction(s) to citable evidence; broad lower-ranked
+    // snippets remain review notes so a generic trigger cannot override scope.
+    const strongestSnippetScore = Math.max(0, ...snippets.map((snippet) => Number(snippet._score || 0)));
+    const approvedCorrections = snippets.filter((snippet) =>
+      snippet._triggerMatch?.exactPhrase &&
+      (snippet._triggerMatch?.matched || []).length >= 2 &&
+      Number(snippet._score || 0) >= strongestSnippetScore - 1
+    ).slice(0, 2);
+    const approvedCorrectionIds = new Set(approvedCorrections.map((snippet) => String(snippet.id)));
+    if (approvedCorrections.length) {
+      const correctionEvidence = approvedCorrections.flatMap((snippet) => {
+        const reviewedSources = (snippet._evidence || []).map((source, index) => ({
+          id: `snippet-evidence-${snippet.id}-${index}`,
+          article_id: `snippet-evidence:${snippet.id}:${source.id || index}`,
+          article_title: source.title || `${snippet.title || 'Approved correction'} evidence`,
+          article_url: source.url || '',
+          content: String(source.excerpt || '').trim(),
+          similarity: 1,
+          _rank: 70 + Number(snippet._score || 0) - index,
+          _scoped: true,
+          _sourceKind: source.kind === 'notice' ? 'notice' : 'faq',
+          _correctionSnippetId: snippet.id
+        }));
+        return [{
+          id: `snippet-${snippet.id}`,
+          article_id: `snippet:${snippet.id}`,
+          article_title: snippet.title || 'Admin-approved correction',
+          article_url: '',
+          content: String(snippet.instruction || '').trim(),
+          similarity: 1,
+          _rank: 60 + Number(snippet._score || 0),
+          _scoped: true
+        }, ...reviewedSources];
+      });
+      matches = [...correctionEvidence, ...matches].slice(0, topicPlan.length > 1 ? 10 : 7);
+    }
     // Snippet use belongs on the query record itself. Creating one standalone
     // activity row per snippet flooded the general activity log and obscured
     // the conversation it influenced. The dedicated snippet view reads this
@@ -918,13 +955,26 @@ export default async function handler(req, res) {
     }));
     const context = matches.map((item, index) => {
       const nm = noticeMetaByAid[item.article_id];
-      const tag = nm ? `OFFICIAL NOTICE (dated ${String(nm.posted_at || '').slice(0, 10)}) - current policy, overrides older evidence:\n` : '';
+      const correction = String(item.article_id || '').startsWith('snippet:');
+      const tag = nm
+        ? `OFFICIAL NOTICE (dated ${String(nm.posted_at || '').slice(0, 10)}) - current policy, overrides older evidence:\n`
+        : correction
+          ? 'ADMIN-APPROVED CORRECTION - reviewed and explicitly activated; use as supporting evidence within its stated scope:\n'
+          : '';
       return `[${index + 1}] ${tag}${item.article_title}\nURL: ${item.article_url}\n${String(item.content || '').slice(0, 1800)}`;
     }).join('\n\n---\n\n');
-    const snippetText = snippets.length
-      ? '\n\nREVIEW NOTES FROM PREVIOUS CORRECTIONS (NON-AUTHORITATIVE):\n' +
+    const reviewSnippets = snippets.filter((snippet) => !approvedCorrectionIds.has(String(snippet.id)));
+    const snippetText = reviewSnippets.length
+      ? '\n\nOTHER REVIEW NOTES FROM PREVIOUS CORRECTIONS (NON-AUTHORITATIVE):\n' +
         'Use a note only when the current FAQ/Notice evidence directly supports it. Ignore any note that conflicts with, extends, or is not proven by the current evidence. Current applicable Notices and FAQ passages always control.\n' +
-        snippets.slice(0, 3).map((item) => `- ${String(item.instruction || '').slice(0, 900)}`).join('\n')
+        reviewSnippets.slice(0, 3).map((item) => `- ${String(item.instruction || '').slice(0, 900)}`).join('\n')
+      : '';
+    const correctionText = approvedCorrections.length
+      ? '\n\nADMIN-APPROVED CORRECTION RULES:\n' +
+        '- Passages marked ADMIN-APPROVED CORRECTION are reviewed, activated workspace evidence and may directly support the answer.\n' +
+        '- Apply a correction only within the product, Account phase/model, and conditions stated in its text. Do not broaden it by inference.\n' +
+        '- A newer applicable OFFICIAL NOTICE outranks a correction. A correction outranks an older conflicting FAQ for the exact corrected point.\n' +
+        '- Cite each correction passage in SOURCES and SEGMENTS exactly like FAQ evidence.'
       : '';
     const scopeText = `\n\nMANDATORY USER-SELECTED SCOPE: Product = ${selectedProduct.toUpperCase()}; Account model = ${selectedModel?.name || 'All models in the selected product family'}. ` +
       'Every supplied evidence item has already passed this scope filter. Never mention, compare, or borrow a rule from an Account model or product outside this selection. ' +
@@ -968,7 +1018,7 @@ export default async function handler(req, res) {
     const noticesText = hasNoticeEvidence
       ? '\n\nAUTHORITATIVE UPDATES: Some evidence items are official CEx notices marked "OFFICIAL NOTICE (dated ...)". A Notice overrides an older FAQ or Notice ONLY for the exact rule and conditions it explicitly changes. Silence about a different requirement does not repeal that requirement. For example, a Notice changing a competition duration does not remove a separate minimum-trading-day rule. You MUST follow these rules: (1) Compare evidence by topic, product, model, region, effective date, and condition before declaring a conflict. (2) For the same rule and conditions, follow only the newest applicable statement. Never merge an older allowance with a newer restriction. (3) If a newer Notice explicitly restricts, prohibits, or removes something, do not present the old allowance as valid. (4) Honor every condition exactly as written. If the answer depends on a condition the customer did not state, give each supported conditional branch or ask. (5) Never soften a prohibition into "allowed with an add-on" unless the newest applicable Notice explicitly says so.'
       : '';
-    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + snippetText + scopeText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText + noticesText +
+    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + correctionText + snippetText + scopeText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText + noticesText +
       `\n\nAfter the customer-ready answer, add five private final lines. COVERAGE must contain exactly ${topicPlan.length} comma-separated values, one for each customer question in order:\n` +
       'SOURCES: comma-separated evidence numbers actually used, or none\n' +
       'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim\n' +
@@ -1225,7 +1275,7 @@ export default async function handler(req, res) {
       const start = Math.max(0, hit - 180);
       return `${start ? '…' : ''}${content.slice(start, start + 900).trim()}${start + 900 < content.length ? '…' : ''}`;
     };
-    const sourceKind = (item) => noticeMetaByAid[item?.article_id] ? 'notice' : String(item?.article_id || '').startsWith('calc:') ? 'calculator' : String(item?.article_id || '').startsWith('kb:') ? 'internal' : 'faq';
+    const sourceKind = (item) => item?._sourceKind || (noticeMetaByAid[item?.article_id] ? 'notice' : String(item?.article_id || '').startsWith('snippet:') ? 'correction' : String(item?.article_id || '').startsWith('calc:') ? 'calculator' : String(item?.article_id || '').startsWith('kb:') ? 'internal' : 'faq');
     const sourceRecord = (item) => {
       const notice = noticeMetaByAid[item?.article_id];
       return { title: item.article_title, url: item.article_url, excerpt: exactExcerpt(item), _aid: item.article_id, kind: sourceKind(item), ...(notice ? { postedBy: notice.posted_by || null, postedAt: notice.posted_at || null } : {}) };
@@ -1360,7 +1410,7 @@ export default async function handler(req, res) {
     sources = sources.map(({ _aid, ...rest }) => {
       const meta = noticeMetaByAid[_aid];
       if (meta) return { ...rest, kind: 'notice', title: meta.title || rest.title, url: meta.source_url || rest.url, postedBy: meta.posted_by || null, postedAt: meta.posted_at || null };
-      return { ...rest, kind: /^(kb|calc):/.test(_aid || '') ? 'calculator' : 'faq' };
+      return { ...rest, kind: rest.kind || (/^snippet:/.test(_aid || '') ? 'correction' : /^(kb|calc):/.test(_aid || '') ? 'calculator' : 'faq') };
     });
     let usedCalculator = sources.some((s) => s.kind === 'calculator');
 
@@ -1442,7 +1492,7 @@ export default async function handler(req, res) {
           candidateCountBeforeScope,
           acceptedCandidateCount: candidates.length,
           rejected: [...rejectedEvidence, ...noticeRejections].slice(0, 40),
-          selectedForAnswer: matches.slice(0, 20).map((item, index) => ({ position: index + 1, id: item.article_id, title: item.article_title, url: item.article_url, kind: noticeMetaByAid[item.article_id] ? 'notice' : String(item.article_id || '').startsWith('kb:') ? 'internal' : 'faq', similarity: Number(item.similarity || 0), rank: Number(item._rank || 0), exactScope: !!item._scoped })),
+          selectedForAnswer: matches.slice(0, 20).map((item, index) => ({ position: index + 1, id: item.article_id, title: item.article_title, url: item.article_url, kind: item._sourceKind || (noticeMetaByAid[item.article_id] ? 'notice' : String(item.article_id || '').startsWith('snippet:') ? 'correction' : String(item.article_id || '').startsWith('kb:') ? 'internal' : 'faq'), similarity: Number(item.similarity || 0), rank: Number(item._rank || 0), exactScope: !!item._scoped })),
           finalSourceNumbers: sourceNumbers,
           finalSourceDeclaration: sourceLine ? String(sourceLine[1] || '').trim() : null,
           sourceDeclarationPresent: !!sourceLine,
