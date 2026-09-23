@@ -24,6 +24,7 @@ const ACCOUNT_SCOPES = [
 
 const SAFE_UNCONFIRMED =
   'I’m unable to confirm this accurately right now. Please allow me some time to verify it for you.';
+const VALID_COVERAGE = new Set(['answered', 'partial', 'not_confirmed']);
 const CORE_GUARDRAILS =
   '\n\nNON-OVERRIDABLE QUALITY RULES:\n' +
   '- Write only a customer-ready reply. Never mention excerpts, source numbers, context, retrieval, database, or knowledge base.\n' +
@@ -155,6 +156,29 @@ function conciseQuestionLabel(text) {
   const questions = cleaned.match(/[^.!?]{8,}[?]/g);
   const label = questions?.length ? questions[questions.length - 1].trim() : cleaned;
   return label.length > 240 ? `${label.slice(0, 237).trim()}…` : label;
+}
+
+function coverageFromDraft(raw, expectedCount) {
+  const line = String(raw || '').match(/(?:\*\*)?COVERAGE(?:\*\*)?\s*:\s*([^\n]*)/i);
+  const statuses = String(line?.[1] || '').toLowerCase().split(',')
+    .map((item) => item.trim().replace(/[ -]+/g, '_'))
+    .filter((item) => VALID_COVERAGE.has(item));
+  return statuses.length === expectedCount ? statuses : null;
+}
+
+function verifiedSourceGapAnswer(topics) {
+  const labels = (topics || []).map((topic) => {
+    const raw = conciseQuestionLabel(topic.question || topic)
+      .replace(/\s+User clarification:\s*/i, ' — ')
+      .trim();
+    if (!raw) return '';
+    const label = raw.charAt(0).toUpperCase() + raw.slice(1);
+    return /[.?!]$/.test(label) ? label : `${label}.`;
+  }).filter(Boolean);
+  if (labels.length <= 1) {
+    return `I could not confirm this specific detail from the current verified sources: ${labels[0] || 'the requested information'}`;
+  }
+  return `I could not confirm these specific details from the current verified sources:\n\n${labels.map((label, index) => `${index + 1}. ${label}`).join('\n')}`;
 }
 
 function asksMinimumTradingRequirement(text) {
@@ -542,10 +566,12 @@ export default async function handler(req, res) {
     for (const item of keywordMatches) combined.set(String(item.id), item);
 
     const perQueryCount = embedTexts.length > 10 ? 6 : embedTexts.length > 4 ? 8 : 12;
-    for (const vector of vectors) {
-      const vres = await sb.rpc('match_chunks', {
+    // Vector searches are independent. Running them concurrently removes the
+    // query-count latency penalty without changing recall or ranking.
+    const vectorResponses = await Promise.all(vectors.map((vector) => sb.rpc('match_chunks', {
         query_embedding: vector, match_threshold: 0.14, match_count: perQueryCount
-      });
+      })));
+    for (const vres of vectorResponses) {
       if (vres.error) throw new Error('Search failed: ' + vres.error.message);
       vectorMatches.push(vres.data || []);
       for (const item of vres.data || []) {
@@ -680,7 +706,7 @@ export default async function handler(req, res) {
           success: true, metadata: { scope, confidence: 28, reason: 'No exact Account evidence', durationMs: Date.now() - started }
         });
         return res.status(200).json({
-          answer: SAFE_UNCONFIRMED, sources: [], answerProvider: chatProvider,
+          answer: verifiedSourceGapAnswer(topicPlan), sources: [], answerProvider: chatProvider,
           usedFallback: false, confidence: 28, confidenceLabel: 'Needs verification'
         });
       }
@@ -808,7 +834,7 @@ export default async function handler(req, res) {
         metadata: { question, questionPreview: question.slice(0, 180), selectedProduct, selectedModel: selectedModel?.slug || 'all', selectedScopeLabel: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models`, sourceCount: 0, reason: competitionMinimumQuestion ? 'No direct Competition minimum-trading evidence' : 'No eligible evidence after retrieval', interpretation: interpretationLog, evidenceTrail: { candidateCountBeforeScope, acceptedCandidateCount: candidates.length, rejected: rejectedEvidence.slice(0, 40), selectedForAnswer: [] }, durationMs: Date.now() - started }
       });
       return res.status(200).json({
-        answer: SAFE_UNCONFIRMED, sources: [], segments: null, answerProvider: chatProvider,
+        answer: verifiedSourceGapAnswer(topicPlan), sources: [], segments: null, answerProvider: chatProvider,
         usedFallback: false, confidence: 22, confidenceLabel: 'Needs verification',
         selectedScope: { product: selectedProduct, model: selectedModel?.slug || 'all', label: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models` }
       });
@@ -864,7 +890,7 @@ export default async function handler(req, res) {
 
     if (!matches.length) {
       return res.status(200).json({
-        answer: SAFE_UNCONFIRMED, sources: [], answerProvider: chatProvider,
+        answer: verifiedSourceGapAnswer(topicPlan), sources: [], answerProvider: chatProvider,
         usedFallback: false, confidence: 20, confidenceLabel: 'Needs verification'
       });
     }
@@ -873,7 +899,10 @@ export default async function handler(req, res) {
     // token budget. Oversized evidence prompts used to consume almost an entire
     // Groq allowance, leaving no budget for the evidence-recovery attempt and
     // producing a misleading "please allow me time" reply.
-    matches = matches.slice(0, 10);
+    // A single-part question does not need the same evidence budget as a broad
+    // multi-part comparison. This reduces answer latency and token use while
+    // preserving the larger budget where it is useful.
+    matches = matches.slice(0, topicPlan.length > 1 ? 10 : 7);
 
     const [basePrompt, brandRules, snippets] = await Promise.all([
       getPrompt(), getBrandingRules(), getRelevantSnippets(question)
@@ -1098,9 +1127,11 @@ export default async function handler(req, res) {
     }
 
     let raw = completion.content;
+    let draftCoverage = coverageFromDraft(raw, topicPlan.length);
+    let allDraftTopicsUnconfirmed = !!draftCoverage?.length && draftCoverage.every((status) => status === 'not_confirmed');
     // Correct the occasional whole-answer refusal when at least part of a
     // multi-part question has evidence. Genuine no-evidence cases are not retried.
-    if ((cleanAnswer(raw) === SAFE_UNCONFIRMED || (cleanAnswer(raw).length < 300 && /(?:unable|cannot|can't|could not).{0,65}(?:confirm|answer)|allow me some time|please.*time.*verify/i.test(cleanAnswer(raw)))) && matches.length) {
+    if (topicPlan.length > 1 && !allDraftTopicsUnconfirmed && (cleanAnswer(raw) === SAFE_UNCONFIRMED || (cleanAnswer(raw).length < 300 && /(?:unable|cannot|can't|could not).{0,65}(?:confirm|answer)|allow me some time|please.*time.*verify/i.test(cleanAnswer(raw)))) && matches.length) {
       partialAnswerRetryAttempted = true;
       const retrySystem = system +
         '\n\nREQUIRED PARTIAL-ANSWER RECOVERY: The first draft refused despite relevant evidence. ' +
@@ -1121,7 +1152,7 @@ export default async function handler(req, res) {
           if (cleanAnswer(retried.content) !== SAFE_UNCONFIRMED) {
             completion = retried;
             raw = retried.content;
-            partialAnswerRetrySucceeded = true;
+              partialAnswerRetrySucceeded = true;
           }
         } catch (retryError) {
           // A first draft can be safe even with evidence. If its corrective
@@ -1140,6 +1171,8 @@ export default async function handler(req, res) {
         }
       }
     }
+    draftCoverage = coverageFromDraft(raw, topicPlan.length);
+    allDraftTopicsUnconfirmed = !!draftCoverage?.length && draftCoverage.every((status) => status === 'not_confirmed');
     let sourceLine = raw.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
     const citationCoverage = (draft) => {
       const text = cleanAnswer(draft);
@@ -1157,7 +1190,7 @@ export default async function handler(req, res) {
     // not spend another large request merely to repair private formatting.
     const declaredSourceNumbers = parseNumbers(sourceLine).filter((number) => !!matches[number - 1]);
     const needsCitationRecovery = !declaredSourceNumbers.length;
-    if (needsCitationRecovery && cleanAnswer(raw) !== SAFE_UNCONFIRMED && cleanAnswer(raw).length > 80 && matches.length) {
+    if (needsCitationRecovery && !allDraftTopicsUnconfirmed && cleanAnswer(raw) !== SAFE_UNCONFIRMED && cleanAnswer(raw).length > 80 && matches.length) {
       if (answerProvider === 'groq' ? (groqPool.length || usedGroqKey) : openaiKey) {
         const retryMessages = [
           { role: 'system', content: system + '\n\nCITATION RECOVERY: Rewrite using only directly supporting numbered passages. Remove every unsupported claim, including illustrative account-model examples. Every factual answer paragraph must have one or more matching source numbers in its SEGMENTS group; do not leave any group blank. Provide usable SOURCES and SEGMENTS lines.' },
@@ -1243,8 +1276,7 @@ export default async function handler(req, res) {
     let confidence = Math.min(modelConfidence, evidenceCap);
     let confidenceLabel = confidence >= 85 ? 'High confidence' : confidence >= 65 ? 'Review suggested' : 'Needs verification';
     let answer = cleanAnswer(applyBrandingReplacements(cleanAnswer(raw), brandRules));
-    const validCoverage = new Set(['answered', 'partial', 'not_confirmed']);
-    let coverageStatuses = String(coverageLine?.[1] || '').toLowerCase().split(',').map((item) => item.trim().replace(/[ -]+/g, '_')).filter((item) => validCoverage.has(item));
+    let coverageStatuses = String(coverageLine?.[1] || '').toLowerCase().split(',').map((item) => item.trim().replace(/[ -]+/g, '_')).filter((item) => VALID_COVERAGE.has(item));
     if (coverageStatuses.length !== topicPlan.length) {
       const fallbackStatus = 'not_confirmed';
       coverageStatuses = topicPlan.map(() => fallbackStatus);
@@ -1350,7 +1382,7 @@ export default async function handler(req, res) {
         // Replace only when the verifier AND retrieval agree there's little support:
         // near-zero grounding score and no strongly matching FAQ evidence.
         if (check.score < 30 && topSimilarity < 0.5) {
-          answer = 'I could not find a clear answer to this in the current FAQ knowledge, so I will not give an unverified answer. Please check the source directly or rephrase — and consider adding this to the FAQ if customers ask it often.';
+          answer = SAFE_UNCONFIRMED;
           sources = [];
           segments = null;
           usedCalculator = false;
@@ -1361,6 +1393,9 @@ export default async function handler(req, res) {
         confidenceLabel = confidence >= 85 ? 'High confidence' : confidence >= 65 ? 'Review suggested' : 'Needs verification';
       }
     }
+
+    const verifiedSourceGap = answer === SAFE_UNCONFIRMED;
+    if (verifiedSourceGap) answer = verifiedSourceGapAnswer(questionCoverage);
 
     // Structured, auditable confidence explanations. These are derived from
     // actual retrieval/verification measurements; the answer model cannot
@@ -1401,7 +1436,7 @@ export default async function handler(req, res) {
         fallback: usedFallback, grounding: groundingScore, durationMs: Date.now() - started,
         smart: !!clarity, ambiguous: isAmbiguous, groqKeyLabel: usedGroqKeyLabel,
         scopeSource: selectedModelFromUi ? 'selector' : inferredModel ? 'question' : 'all_models',
-        refusalReason: answer === SAFE_UNCONFIRMED ? (sourceNumbers.length ? 'answer_model_refused_despite_citations' : 'no_cited_evidence') : null,
+        refusalReason: verifiedSourceGap ? 'verified_source_gap' : null,
         interpretation: interpretationLog,
         evidenceTrail: {
           candidateCountBeforeScope,
