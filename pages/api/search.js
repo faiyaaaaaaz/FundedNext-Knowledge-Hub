@@ -3,7 +3,8 @@ import {
   openaiChatDetailed, getBrandingRules, brandingInstructions,
   applyBrandingReplacements, getRelevantSnippets, logActivity as createActivity,
   expandConcepts, clarifyQuery, correctTypos, runCalculators,
-  sha256, getGroqKeys, verifyGrounding, getPublishedScopeCatalog, modelsMentioned, getArticleScopeOverrides
+  sha256, getGroqKeys, verifyGrounding, getPublishedScopeCatalog, modelsMentioned, getArticleScopeOverrides,
+  getArticleRegionScopes, questionRegionIntent
 } from '../../lib/server';
 import { retrieveNotices, noticesAccess } from '../../lib/notices';
 
@@ -29,6 +30,7 @@ const CORE_GUARDRAILS =
   '\n\nNON-OVERRIDABLE QUALITY RULES:\n' +
   '- Write only a customer-ready reply. Never mention excerpts, source numbers, context, retrieval, database, or knowledge base.\n' +
   '- Never transfer a rule from one Account type to another.\n' +
+  '- Never transfer a country- or region-specific rule to customers outside that region or to a question whose region is unknown.\n' +
   '- In comparisons, cover the same requested dimensions for each named model. Distinguish shared rules from differences. A fact available for only one model is not proof of a difference.\n' +
   '- If the user says monthly loss but evidence describes maximum or overall loss, explain the terminology distinction using that evidence and ask whether they mean maximum overall loss. Do not invent a monthly limit or silently equate monthly with maximum.\n' +
   '- Name the specific unresolved question when requesting clarification; never use a standalone vague sentence such as This specific detail needs to be confirmed.\n' +
@@ -297,8 +299,13 @@ export default async function handler(req, res) {
     if (chatProvider === 'groq' && !groqPool.length && !groqPrimary) return res.status(400).json({ error: 'Groq is selected, but no Groq key is saved. Add one in Admin → Groq keys.' });
 
     const sb = supabaseAdmin();
-    const scopeCatalog = await getPublishedScopeCatalog(sb);
-    const articleScopeOverrides = await getArticleScopeOverrides(sb);
+    const [scopeCatalog, articleScopeOverrides, articleRegionScopes] = await Promise.all([
+      getPublishedScopeCatalog(sb), getArticleScopeOverrides(sb), getArticleRegionScopes(sb)
+    ]);
+    const regionIntent = questionRegionIntent(question);
+    const regionScopeFor = (articleId) => articleRegionScopes[String(articleId || '')] || null;
+    const regionIsApplicable = (regionScope) => !regionScope?.regions?.length ||
+      regionScope.regions.some((region) => regionIntent.included.includes(region));
     const selectedProduct = ['cfd', 'futures', 'both'].includes(req.body?.scope?.product) ? req.body.scope.product : 'cfd';
     const selectedModelSlug = String(req.body?.scope?.model || 'all');
     const selectedModelFromUi = selectedModelSlug === 'all' ? null : scopeCatalog.models.find((item) =>
@@ -554,6 +561,7 @@ export default async function handler(req, res) {
       selectedModel: selectedModel?.slug || 'all',
       selectedModelLabel: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models`,
       scopeSource: selectedModelFromUi ? 'selector' : inferredModel ? 'question' : 'all_models',
+      geographicScope: regionIntent,
       topics: topicPlan.map((topic) => ({ question: topic.question, queries: topic.queries || [] })).slice(0, 8),
       conceptGroups: concepts.groups.slice(0, 12),
       searchQueries: embedTexts
@@ -610,6 +618,14 @@ export default async function handler(req, res) {
         rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: 'Localized FAQ excluded from an English-language question', similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
         return false;
       }
+      const regionScope = regionScopeFor(item.article_id);
+      if (!regionIsApplicable(regionScope)) {
+        const regionLabel = (regionScope.labels || regionScope.regions || []).join(', ');
+        const requested = regionIntent.included.length ? `; question region: ${regionIntent.included.join(', ')}` : '; customer region was not stated';
+        rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: `Regional FAQ excluded (${regionLabel || 'region-specific'}${requested})`, similarity: Number(item.similarity || 0), rank: Number(item._rank || 0), regionScope });
+        return false;
+      }
+      if (regionScope) item._regionScope = regionScope;
       const override = articleScopeOverrides[String(item.article_id || '')];
       const mentioned = override?.model && override.model !== 'all'
         ? scopeCatalog.models.filter((model) => model.slug === override.model && model.product === override.product)
@@ -904,9 +920,20 @@ export default async function handler(req, res) {
     // preserving the larger budget where it is useful.
     matches = matches.slice(0, topicPlan.length > 1 ? 10 : 7);
 
-    const [basePrompt, brandRules, snippets] = await Promise.all([
+    const [basePrompt, brandRules, rawSnippets] = await Promise.all([
       getPrompt(), getBrandingRules(), getRelevantSnippets(question)
     ]);
+    const sourceArticleId = (source) => String(source?.id || String(source?.url || '').match(/\/articles\/(\d+)/)?.[1] || '');
+    // Reviewed corrections can carry captured FAQ evidence. Apply the same
+    // regional gate to that provenance so snippets cannot re-introduce an FAQ
+    // that the main retrieval filter correctly rejected.
+    const snippets = rawSnippets.map((snippet) => {
+      const evidence = snippet._evidence || [];
+      const annotated = evidence.map((source) => ({ ...source, _regionScope: regionScopeFor(sourceArticleId(source)) }));
+      const applicable = annotated.filter((source) => regionIsApplicable(source._regionScope));
+      const allEvidenceRegional = annotated.length > 0 && annotated.every((source) => source._regionScope?.regions?.length);
+      return { ...snippet, _evidence: applicable, _blockedByRegion: allEvidenceRegional && applicable.length === 0 };
+    }).filter((snippet) => !snippet._blockedByRegion);
     // Activation is an explicit Admin approval. Promote only the strongest,
     // phrase-matched correction(s) to citable evidence; broad lower-ranked
     // snippets remain review notes so a generic trigger cannot override scope.
@@ -929,7 +956,8 @@ export default async function handler(req, res) {
           _rank: 70 + Number(snippet._score || 0) - index,
           _scoped: true,
           _sourceKind: source.kind === 'notice' ? 'notice' : 'faq',
-          _correctionSnippetId: snippet.id
+          _correctionSnippetId: snippet.id,
+          ...(source._regionScope ? { _regionScope: source._regionScope } : {})
         }));
         return [{
           id: `snippet-${snippet.id}`,
@@ -956,11 +984,15 @@ export default async function handler(req, res) {
     const context = matches.map((item, index) => {
       const nm = noticeMetaByAid[item.article_id];
       const correction = String(item.article_id || '').startsWith('snippet:');
-      const tag = nm
+      const sourceTag = nm
         ? `OFFICIAL NOTICE (dated ${String(nm.posted_at || '').slice(0, 10)}) - current policy, overrides older evidence:\n`
         : correction
           ? 'ADMIN-APPROVED CORRECTION - reviewed and explicitly activated; use as supporting evidence within its stated scope:\n'
           : '';
+      const regionalTag = item._regionScope?.regions?.length
+        ? `REGIONAL SCOPE - applies only to ${(item._regionScope.labels || item._regionScope.regions).join(', ')} clients (Help Center path: ${(item._regionScope.collectionPath || []).join(' > ')}):\n`
+        : '';
+      const tag = sourceTag + regionalTag;
       return `[${index + 1}] ${tag}${item.article_title}\nURL: ${item.article_url}\n${String(item.content || '').slice(0, 1800)}`;
     }).join('\n\n---\n\n');
     const reviewSnippets = snippets.filter((snippet) => !approvedCorrectionIds.has(String(snippet.id)));
@@ -979,6 +1011,9 @@ export default async function handler(req, res) {
     const scopeText = `\n\nMANDATORY USER-SELECTED SCOPE: Product = ${selectedProduct.toUpperCase()}; Account model = ${selectedModel?.name || 'All models in the selected product family'}. ` +
       'Every supplied evidence item has already passed this scope filter. Never mention, compare, or borrow a rule from an Account model or product outside this selection. ' +
       'Product-wide policy evidence may be used only when it does not conflict with model-specific evidence. If a model-specific FAQ states an exception, restriction, or prohibition, it always overrides a general FAQ. Never infer permission for the selected model merely because a general article allows it for another model.';
+    const regionText = regionIntent.included.length
+      ? `\n\nMANDATORY GEOGRAPHIC SCOPE: The customer explicitly referred to ${regionIntent.included.join(', ')}. Regional evidence may be used only when its REGIONAL SCOPE tag matches. State the regional condition in the answer whenever it changes the result.`
+      : '\n\nMANDATORY GEOGRAPHIC SCOPE: The customer did not identify a region. Regional-only Help Center evidence has been excluded. Answer from globally applicable evidence only; never infer that a regional restriction applies to everyone.';
     const allocationText = allocationQuestion && !selectedModel
       ? '\n\nALLOCATION OVERVIEW: The user selected all models. Do not answer from one Account perspective. Give a concise overall comparison of every materially different allocation rule supported by the evidence: standard aggregate FundedNext Account allocation, model-specific exceptions such as Stellar Lite, Challenge-phase treatment, regional limits, Stellar Instant purchase/scaling limits, and any verified U.S. exception. Clearly separate purchase allocation from scaled balance and do not merge them into one limit.'
       : '';
@@ -1018,7 +1053,7 @@ export default async function handler(req, res) {
     const noticesText = hasNoticeEvidence
       ? '\n\nAUTHORITATIVE UPDATES: Some evidence items are official CEx notices marked "OFFICIAL NOTICE (dated ...)". A Notice overrides an older FAQ or Notice ONLY for the exact rule and conditions it explicitly changes. Silence about a different requirement does not repeal that requirement. For example, a Notice changing a competition duration does not remove a separate minimum-trading-day rule. You MUST follow these rules: (1) Compare evidence by topic, product, model, region, effective date, and condition before declaring a conflict. (2) For the same rule and conditions, follow only the newest applicable statement. Never merge an older allowance with a newer restriction. (3) If a newer Notice explicitly restricts, prohibits, or removes something, do not present the old allowance as valid. (4) Honor every condition exactly as written. If the answer depends on a condition the customer did not state, give each supported conditional branch or ask. (5) Never soften a prohibition into "allowed with an add-on" unless the newest applicable Notice explicitly says so.'
       : '';
-    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + correctionText + snippetText + scopeText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText + noticesText +
+    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + correctionText + snippetText + scopeText + regionText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText + noticesText +
       `\n\nAfter the customer-ready answer, add five private final lines. COVERAGE must contain exactly ${topicPlan.length} comma-separated values, one for each customer question in order:\n` +
       'SOURCES: comma-separated evidence numbers actually used, or none\n' +
       'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim\n' +
@@ -1032,7 +1067,7 @@ export default async function handler(req, res) {
       { role: 'system', content: system },
       { role: 'user', content: `${askedText}\n\nFAQ evidence:\n${context}` }
     ];
-    await logActivity({ provider: chatProvider, model: chatModel, metadata: { stage: 'Generating answer', durationMs: Date.now() - started, interpretation: interpretationLog, evidenceSnapshot: { capturedAt: new Date().toISOString(), kind: 'retrieved_passages_at_request_time', contextHash: sha256(context), passages: matches.map((item, index) => ({ position: index + 1, chunkId: item.id, articleId: item.article_id, title: item.article_title, url: item.article_url, content: String(item.content || ''), contentHash: sha256(String(item.content || '')), sourceUpdatedAt: item.article_updated_at || null, notice: noticeMetaByAid[item.article_id] || null })) } } });
+    await logActivity({ provider: chatProvider, model: chatModel, metadata: { stage: 'Generating answer', durationMs: Date.now() - started, interpretation: interpretationLog, evidenceSnapshot: { capturedAt: new Date().toISOString(), kind: 'retrieved_passages_at_request_time', contextHash: sha256(context), passages: matches.map((item, index) => ({ position: index + 1, chunkId: item.id, articleId: item.article_id, title: item.article_title, url: item.article_url, content: String(item.content || ''), contentHash: sha256(String(item.content || '')), sourceUpdatedAt: item.article_updated_at || null, regionScope: item._regionScope || null, notice: noticeMetaByAid[item.article_id] || null })) } } });
     // A smaller, evidence-preserving recovery request is used only after every
     // normal Groq attempt fails. It keeps the highest-ranked scoped evidence and
     // all calculator evidence, avoiding an unnecessary provider switch when a
@@ -1278,7 +1313,7 @@ export default async function handler(req, res) {
     const sourceKind = (item) => item?._sourceKind || (noticeMetaByAid[item?.article_id] ? 'notice' : String(item?.article_id || '').startsWith('snippet:') ? 'correction' : String(item?.article_id || '').startsWith('calc:') ? 'calculator' : String(item?.article_id || '').startsWith('kb:') ? 'internal' : 'faq');
     const sourceRecord = (item) => {
       const notice = noticeMetaByAid[item?.article_id];
-      return { title: item.article_title, url: item.article_url, excerpt: exactExcerpt(item), _aid: item.article_id, kind: sourceKind(item), ...(notice ? { postedBy: notice.posted_by || null, postedAt: notice.posted_at || null } : {}) };
+      return { title: item.article_title, url: item.article_url, excerpt: exactExcerpt(item), _aid: item.article_id, kind: sourceKind(item), ...(item._regionScope ? { regionScope: item._regionScope } : {}), ...(notice ? { postedBy: notice.posted_by || null, postedAt: notice.posted_at || null } : {}) };
     };
     const seen = new Set();
     let sources = [];
@@ -1492,7 +1527,7 @@ export default async function handler(req, res) {
           candidateCountBeforeScope,
           acceptedCandidateCount: candidates.length,
           rejected: [...rejectedEvidence, ...noticeRejections].slice(0, 40),
-          selectedForAnswer: matches.slice(0, 20).map((item, index) => ({ position: index + 1, id: item.article_id, title: item.article_title, url: item.article_url, kind: item._sourceKind || (noticeMetaByAid[item.article_id] ? 'notice' : String(item.article_id || '').startsWith('snippet:') ? 'correction' : String(item.article_id || '').startsWith('kb:') ? 'internal' : 'faq'), similarity: Number(item.similarity || 0), rank: Number(item._rank || 0), exactScope: !!item._scoped })),
+          selectedForAnswer: matches.slice(0, 20).map((item, index) => ({ position: index + 1, id: item.article_id, title: item.article_title, url: item.article_url, kind: item._sourceKind || (noticeMetaByAid[item.article_id] ? 'notice' : String(item.article_id || '').startsWith('snippet:') ? 'correction' : String(item.article_id || '').startsWith('kb:') ? 'internal' : 'faq'), similarity: Number(item.similarity || 0), rank: Number(item._rank || 0), exactScope: !!item._scoped, regionScope: item._regionScope || null })),
           finalSourceNumbers: sourceNumbers,
           finalSourceDeclaration: sourceLine ? String(sourceLine[1] || '').trim() : null,
           sourceDeclarationPresent: !!sourceLine,
