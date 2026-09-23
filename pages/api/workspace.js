@@ -1,4 +1,4 @@
-import { authenticateRequest, logActivity, supabaseAdmin } from '../../lib/server';
+import { authenticateRequest, logActivity, MASTER_PRINCIPAL, supabaseAdmin } from '../../lib/server';
 
 const TOUR_VERSION = 'workspace-tour-2026-09-v3';
 function checked(result) { if (result.error) throw result.error; return result.data; }
@@ -13,7 +13,11 @@ export default async function handler(req, res) {
   try {
     const user = await authenticateRequest(req);
     if (!user) return res.status(401).json({ error: 'Please sign in again.' });
-    const sb = supabaseAdmin(), email = user.email.toLowerCase();
+    // Master-password sessions do not have a Google profile. Keep this endpoint
+    // defensive as well as relying on authenticateRequest's legacy-cookie upgrade.
+    const email = String(user.email || (user.authProvider === 'master_password' ? MASTER_PRINCIPAL : '')).trim().toLowerCase();
+    if (!email) return res.status(401).json({ error: 'Your account identity is unavailable. Please sign in again.' });
+    const sb = supabaseAdmin();
     const action = req.query.action || req.body?.action || 'inbox';
     checked(await sb.from('workspace_people').upsert({ email, name: user.name }, { onConflict: 'email' }));
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
