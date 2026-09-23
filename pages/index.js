@@ -51,7 +51,7 @@ function Brand() {
 function SourcePreview({ source, number, open, onToggle }) {
   return <article className={`source-preview ${source.kind === 'calculator' ? 'src-calc' : ''} ${open ? 'open' : ''}`}>
     <button type="button" className="source-preview-head" onClick={onToggle}>
-      <span className="src-num">{number}</span><span className="src-title"><b>{source.title}</b><small>{source.kind === 'calculator' ? 'Verified calculator evidence' : source.kind === 'notice' ? ('Notice' + (source.postedBy ? ' · ' + source.postedBy : '') + (source.postedAt ? ' · ' + String(source.postedAt).slice(0, 10) : '')) : 'Verified FAQ evidence'}</small></span><span className="source-preview-action">{open ? 'Hide excerpt −' : 'View exact excerpt +'}</span>
+      <span className="src-num">{number}</span><span className="src-title"><b>{source.title}</b><small>{source.kind === 'calculator' ? 'Verified calculator evidence' : source.kind === 'correction' ? 'Admin-approved correction' : source.kind === 'notice' ? ('Notice' + (source.postedBy ? ' · ' + source.postedBy : '') + (source.postedAt ? ' · ' + String(source.postedAt).slice(0, 10) : '')) : 'Verified FAQ evidence'}</small></span><span className="source-preview-action">{open ? 'Hide excerpt −' : 'View exact excerpt +'}</span>
     </button>
     {open && <div className="source-excerpt"><span>Relevant passage</span><p>{source.excerpt || 'The exact saved passage is unavailable for this older answer.'}</p>{source.url && <a href={source.url} target="_blank" rel="noreferrer">{source.kind === 'notice' ? 'Open notice in ClickUp ↗' : 'Open full article ↗'}</a>}</div>}
   </article>;
@@ -118,7 +118,7 @@ function SourceCites({ refs, sources }) {
       {refs.map((n) => {
         const source = sources?.[n - 1];
         if (!source) return null;
-        const typeLabel = source.kind === 'calculator' ? 'Calculator' : source.kind === 'notice' ? 'CEx Notice' : source.kind === 'internal' ? 'Internal knowledge' : 'FAQ';
+        const typeLabel = source.kind === 'calculator' ? 'Calculator' : source.kind === 'correction' ? 'Approved correction' : source.kind === 'notice' ? 'CEx Notice' : source.kind === 'internal' ? 'Internal knowledge' : 'FAQ';
         return (
           <a key={n} className={`seg-cite${source.kind === 'calculator' ? ' calc' : ''}`} data-n={n} href={source.url || undefined} target="_blank" rel="noreferrer"
             aria-label={`${typeLabel} ${n}: ${source.title}`}>
@@ -233,6 +233,7 @@ export default function Home() {
   const [identity, setIdentity] = useState({ name: '', email: '' });
   const [loginError, setLoginError] = useState('');
   const [loggingIn, setLoggingIn] = useState(false);
+  const [masterPassword, setMasterPasswordInput] = useState('');
   const [theme, setTheme] = useState('dark');
   const [scopeCatalog, setScopeCatalog] = useState({ products: [], models: [] });
   const [scopeProduct, setScopeProduct] = useState('cfd');
@@ -392,10 +393,23 @@ export default function Home() {
     if (error) setLoginError(error.message);
   }
 
+  async function masterLogin() {
+    if (!masterPassword || loggingIn) return;
+    setLoggingIn(true); setLoginError('');
+    try {
+      const response = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ masterPassword }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Master access was not accepted.');
+      setMasterPasswordInput('');
+      storeLogin(result);
+    } catch (error) { setLoginError(error.message); } finally { setLoggingIn(false); }
+  }
+
   function logout() {
     localStorage.removeItem('appSession'); localStorage.removeItem('appRole'); localStorage.removeItem('appPw');
     localStorage.removeItem('appName'); localStorage.removeItem('appEmail');
     getSupabaseBrowser()?.auth.signOut().catch(() => {});
+    fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ logout: true }) }).catch(() => {});
     setSession(''); setRole(''); setIdentity({ name: '', email: '' }); setMessages([]); setStats(null);
   }
 
@@ -623,7 +637,7 @@ export default function Home() {
   if (!session) return (
     <main className="login-page"><section className="login-panel"><div className="login-glow" /><Brand />
       <div className="login-copy"><span className="status-chip">Internal knowledge workspace</span><h1>Answers your team can trust.</h1><p>Clear, source-backed support answers for every FundedNext client conversation.</p></div>
-      <div className="login-form"><button className="google-button" onClick={googleLogin} disabled={loggingIn}><GoogleG />{loggingIn ? 'Finishing sign-in…' : 'Continue with Google'}</button>{loginError && <div className="inline-error">{loginError}</div>}<p className="field-help" style={{ textAlign: 'center' }}>Only nextventures.io Google accounts are permitted.</p></div>
+      <div className="login-form"><button className="google-button" onClick={googleLogin} disabled={loggingIn}><GoogleG />{loggingIn ? 'Finishing sign-in…' : 'Continue with Google'}</button><div className="login-divider">Master access</div><label htmlFor="master-password">Master password</label><input id="master-password" type="password" value={masterPassword} maxLength={256} autoComplete="current-password" placeholder="Enter Master password" onChange={(event) => setMasterPasswordInput(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && masterLogin()} /><button className="btn btn-primary" onClick={masterLogin} disabled={loggingIn || !masterPassword}>{loggingIn ? 'Signing in…' : 'Continue with Master access'}</button>{loginError && <div className="inline-error">{loginError}</div>}<p className="field-help" style={{ textAlign: 'center' }}>Team members use Google. Master password access is restricted to the workspace owner.</p></div>
       <div className="login-foot">For authorized FundedNext team members only</div>
     </section></main>
   );
