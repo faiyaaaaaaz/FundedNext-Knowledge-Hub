@@ -61,7 +61,7 @@ function sourceType(source = {}) {
 }
 
 function sourceTypeLabel(source) {
-  return ({ faq: 'FAQ', notice: 'CEx Notice', internal: 'Internal knowledge', calculator: 'Calculator', answer_scope: 'Answer scope', query_log: 'Query record' })[sourceType(source)] || 'Type not recorded';
+  return ({ faq: 'FAQ', notice: 'CEx Notice', correction: 'Approved correction', internal: 'Internal knowledge', calculator: 'Calculator', answer_scope: 'Answer scope', query_log: 'Query record' })[sourceType(source)] || 'Type not recorded';
 }
 
 function activityEventLabel(value) {
@@ -274,6 +274,7 @@ export default function Admin() {
   const [session, setSession] = useState('');
   const [role, setRole] = useState('');
   const [loginError, setLoginError] = useState('');
+  const [masterLoginPassword, setMasterLoginPassword] = useState('');
   const [tab, setTab] = useState('overview');
   const [status, setStatus] = useState(null);
   const [settingsLoading, setSettingsLoading] = useState(true);
@@ -326,6 +327,8 @@ export default function Admin() {
   const [queryLogDisputeReason, setQueryLogDisputeReason] = useState('');
   const [submittingQueryLogDispute, setSubmittingQueryLogDispute] = useState(false);
   const [allowedGoogleDomains, setAllowedGoogleDomains] = useState('');
+  const [newMasterPassword, setNewMasterPassword] = useState('');
+  const [confirmMasterPassword, setConfirmMasterPassword] = useState('');
   const [smartRetrieval, setSmartRetrieval] = useState(true);
   const [normalUserGptFallback, setNormalUserGptFallback] = useState(true);
   const [adminAutoFallback, setAdminAutoFallback] = useState(true);
@@ -542,6 +545,19 @@ export default function Admin() {
     sessionStorage.setItem('workspaceGooglePending','1');
     const { error } = await client.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: `${window.location.origin}/admin`, queryParams:{prompt:'select_account'} } });
     if (error) setLoginError(error.message);
+  }
+
+  async function masterLogin() {
+    if (!masterLoginPassword) return;
+    setLoginError('');
+    try {
+      const response = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ masterPassword: masterLoginPassword }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Master access was not accepted.');
+      if (result.role !== 'admin') throw new Error('Master access did not receive the Admin role.');
+      localStorage.setItem('appSession', result.token); localStorage.setItem('appRole', result.role);
+      setMasterLoginPassword(''); setSession(result.token); setRole(result.role); loadSettings(result.token);
+    } catch (e) { setLoginError(e.message); }
   }
 
   async function loadSettings(token = session) {
@@ -1098,10 +1114,11 @@ export default function Admin() {
   function logout() {
     localStorage.removeItem('appSession'); localStorage.removeItem('appRole'); localStorage.removeItem('appPw');
     setSession(''); setRole(''); setStatus(null);
+    fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ logout: true }) }).catch(() => {});
   }
 
   async function signEveryoneOut() {
-    if (!window.confirm('Sign out every user? Everyone — agents and admins — will need to sign in with Google again. Your own session will end too.')) return;
+    if (!window.confirm('Sign out every user? Google users must authenticate again, and Master password users must re-enter the password. Your own session will end too.')) return;
     const ok = await settingsSave({ logoutAgents: true }, 'Everyone has been signed out. Redirecting you to sign in…');
     if (ok) setTimeout(logout, 1200);
   }
@@ -1112,7 +1129,7 @@ export default function Admin() {
   }
 
   if (!session || role !== 'admin') return (
-    <main className="login-page"><section className="login-panel admin-login"><Brand /><div className="login-copy"><span className="status-chip">Restricted area</span><h1>Admin access</h1><p>Sign in with an approved nextventures.io Google account.</p></div><div className="login-form"><button className="google-button" onClick={googleLogin}>Continue with Google</button>{loginError && <div className="inline-error">{loginError}</div>}<Link href="/" className="back-link">← Back to assistant</Link></div></section></main>
+    <main className="login-page"><section className="login-panel admin-login"><Brand /><div className="login-copy"><span className="status-chip">Restricted area</span><h1>Admin access</h1><p>Use an approved Google identity or the separately protected Master password.</p></div><div className="login-form"><button className="google-button" onClick={googleLogin}>Continue with Google</button><div className="login-divider">Master access</div><label htmlFor="admin-master-password">Master password</label><input id="admin-master-password" type="password" value={masterLoginPassword} maxLength={256} autoComplete="current-password" placeholder="Enter Master password" onChange={(event) => setMasterLoginPassword(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && masterLogin()} /><button className="btn btn-primary" disabled={!masterLoginPassword} onClick={masterLogin}>Continue with Master access</button>{loginError && <div className="inline-error">{loginError}</div>}<Link href="/" className="back-link">← Back to assistant</Link></div></section></main>
   );
 
   const navigation = [
@@ -1171,8 +1188,9 @@ export default function Admin() {
         {tab === 'brain' && <KnowledgeMap session={session} kind="faq" />}
         {tab === 'noticebrain' && <KnowledgeMap session={session} kind="notices" />}
         {tab === 'access' && <div className="settings-stack">
-          <section className="settings-card"><div className="settings-head"><div><h2>Google sign-in</h2><p>Access is permanently restricted to nextventures.io Google accounts.</p></div><span className={`state-pill ${status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'ready' : ''}`}>{status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'Configured' : 'Vercel setup needed'}</span></div><div className="permission-table"><div><span>Access rule</span><b>Required value</b><b>Status</b></div><div><span>Allowed domain</span><b>nextventures.io</b><b>Fixed</b></div><div><span>Admin list</span><b>ADMIN_GOOGLE_EMAILS</b><b>{status?.adminGoogleConfigured ? 'Configured' : 'Missing'}</b></div></div></section>
-          <section className="settings-card"><div className="settings-head"><div><h2>Workspace roles</h2><p>Every user must authenticate with Google. Admin rights come only from the Vercel Admin email list.</p></div><span className="state-pill ready">Google only</span></div><div className="permission-table"><div><span>Requirement</span><b>Agent</b><b>Admin</b></div><div><span>@nextventures.io Google account</span><b>Required</b><b>Required</b></div><div><span>Listed in ADMIN_GOOGLE_EMAILS</span><b>No</b><b>Required</b></div></div></section>
+          <section className="settings-card"><div className="settings-head"><div><h2>Google sign-in</h2><p>Team access remains restricted to nextventures.io Google accounts.</p></div><span className={`state-pill ${status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'ready' : ''}`}>{status?.googleAuthConfigured && status?.adminGoogleConfigured ? 'Configured' : 'Vercel setup needed'}</span></div><div className="permission-table"><div><span>Access rule</span><b>Required value</b><b>Status</b></div><div><span>Allowed domain</span><b>nextventures.io</b><b>Fixed</b></div><div><span>Admin list</span><b>ADMIN_GOOGLE_EMAILS</b><b>{status?.adminGoogleConfigured ? 'Configured' : 'Missing'}</b></div></div></section>
+          <section className="settings-card"><div className="settings-head"><div><h2>Master password access</h2><p>A separate owner recovery path. The password is peppered with the server secret, hashed with scrypt, rate-limited, and never stored or returned as plaintext.</p></div><span className={`state-pill ${status?.masterPasswordSet ? 'ready' : ''}`}>{status?.masterPasswordSet ? 'Enabled' : 'Disabled'}</span></div>{status?.canManageMasterPassword ? <><div className="autosync-grid"><div className="field-block"><label>New Master password</label><input type="password" value={newMasterPassword} maxLength={256} autoComplete="new-password" placeholder="At least 16 characters" onChange={(event) => setNewMasterPassword(event.target.value)} /></div><div className="field-block"><label>Confirm Master password</label><input type="password" value={confirmMasterPassword} maxLength={256} autoComplete="new-password" placeholder="Enter it again" onChange={(event) => setConfirmMasterPassword(event.target.value)} /></div></div><div className="row"><button className="btn btn-primary" disabled={saving || !newMasterPassword || newMasterPassword !== confirmMasterPassword} onClick={async () => { if (newMasterPassword !== confirmMasterPassword) return setError('The Master passwords do not match.'); if (await settingsSave({ masterPassword: newMasterPassword }, 'Master password access updated. All previous Master password sessions were revoked.')) { setNewMasterPassword(''); setConfirmMasterPassword(''); } }}>Set Master password</button>{status?.masterPasswordSet && <button className="btn btn-secondary" disabled={saving} onClick={async () => { if (!window.confirm('Disable Master password access and revoke every Master password session? Google sign-in will remain available.')) return; await settingsSave({ disableMasterPassword: true }, 'Master password access disabled and its sessions revoked.'); }}>Disable Master password</button>}</div></> : <div className="empty-admin">Sign in with an approved Google Admin identity to set, replace, or disable the Master password.</div>}<p className="field-help">Use a unique password-manager-generated value. Master sessions expire after 8 hours and use an HttpOnly, SameSite=Strict cookie. Closing the browser ends the cookie session sooner.</p></section>
+          <section className="settings-card"><div className="settings-head"><div><h2>Workspace roles</h2><p>Agents must use Google. Admins may use an approved Google identity; the workspace owner may also use Master password access.</p></div><span className="state-pill ready">Controlled access</span></div><div className="permission-table"><div><span>Requirement</span><b>Agent</b><b>Admin</b></div><div><span>@nextventures.io Google account</span><b>Required</b><b>Google path</b></div><div><span>Listed in ADMIN_GOOGLE_EMAILS</span><b>No</b><b>Google path</b></div><div><span>Master password</span><b>Not accepted</b><b>Owner-only alternative</b></div></div></section>
           <section className="settings-card"><div className="settings-head"><div><h2>Workspace tutorial</h2><p>New team members see the scope guide on their first visit, then the answer-and-sources guide after their first completed answer. Completion is now recorded in Activity logs.</p></div><button className="btn btn-secondary" onClick={loadTourReport}>Refresh status</button></div>{tourReport ? <><div className="activity-kpis">{[['Registered',tourReport.summary.registered],['Completed',tourReport.summary.completed],['Not started',tourReport.summary.notStarted],['Scope only',tourReport.summary.scopeOnly]].map(([label,value])=><div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><div className="sync-log-list">{tourReport.people.map(person=><div className="sync-log" key={person.email}><div className="sync-log-row" style={{cursor:'default'}}><span className={`sync-badge ${person.status==='Completed'?'success':'partial'}`}>{person.status==='Completed'?'done':'pending'}</span><span className="sync-log-main"><b>{person.name || person.email}</b><small>{person.email}</small></span><span className="sync-log-quick">{person.status} · {person.recordedVersion === 'legacy-unversioned' ? 'completed before version tracking' : person.recordedVersion || 'no completion record'}</span></div></div>)}{!tourReport.people.length&&<div className="empty-admin">No registered workspace users yet.</div>}</div><div className="row" style={{marginTop:14}}><button className="btn btn-primary" disabled={tourBusy} onClick={resetToursForEveryone}>{tourBusy?'Resetting…':'Show tutorial again to everyone'}</button></div><p className="field-help">This resets only the guide status. It does not sign anyone out or alter their conversations. The guide appears on each registered person’s next visit and every new completion is logged.</p></> : <button className="btn btn-secondary" onClick={loadTourReport}>Load tutorial status</button>}</section>
           <section className="settings-card">
             <div className="settings-head"><div><h2>Notices access (experimental)</h2><p>Controls who can use the notices layer in the assistant. Off for everyone by default except the people you list here.</p></div>{noticeAccessCfg && <span className="state-pill ready">{noticeAccessCfg.enabled ? 'Enabled' : 'Globally off'}</span>}</div>
