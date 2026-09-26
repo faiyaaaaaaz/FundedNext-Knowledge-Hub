@@ -115,14 +115,19 @@ export default async function handler(req, res) {
         if (linkedError) throw linkedError;
         const linkedSnippet = (linkedSnippets || [])[0] || null;
         const recordedScope = (dispute.sources || []).find((item) => item?.type === 'answer_scope');
+        const passageAnnotations = (dispute.sources || []).filter((item) => item?.type === 'query_annotation');
+        const annotationContext = passageAnnotations.map((item, index) =>
+          `${index + 1}. ${String(item.target || 'passage').toUpperCase()} characters ${item.start ?? '?'}-${item.end ?? '?'}\nExact quote: "${String(item.quote || '').slice(0, 1800)}"\nReviewer note: ${String(item.note || '').slice(0, 1800)}`
+        ).join('\n\n');
         const product = ['cfd', 'futures', 'both'].includes(recordedScope?.product) ? recordedScope.product : 'both';
         const model = String(recordedScope?.model || 'all');
         const evidenceQueries = [...new Set([
           dispute.question,
           `${dispute.question} ${dispute.dispute_reason || ''}`,
           `${dispute.question} ${dispute.approval_reason || ''}`,
+          ...passageAnnotations.map((item) => `${item.quote || ''} ${item.note || ''}`),
           linkedSnippet ? `${linkedSnippet.title || ''} ${linkedSnippet.trigger_terms || ''} ${linkedSnippet.instruction || ''}` : ''
-        ].map((item) => String(item || '').trim()).filter(Boolean))].slice(0, 4);
+        ].map((item) => String(item || '').trim()).filter(Boolean))].slice(0, 8);
         const vectors = await openaiEmbed(openaiKey, evidenceQueries);
         const faqById = new Map();
         for (const vector of vectors) {
@@ -175,6 +180,7 @@ export default async function handler(req, res) {
         const system =
           'You are creating a permanent corrective instruction for a support-answering AI. ' +
           'The disputed answer is the claim under review, not the default truth. First identify the exact correction asserted by the Agent dispute reason and Admin approval reason, including whether it concerns one account, multiple accounts, one phase, or later phases. ' +
+          'Exact passage annotations identify the precise words the reviewer is discussing. Treat their quoted ranges as location context and their notes as concerns to investigate, not as authoritative policy facts. Address every annotation explicitly when deciding whether a correction is supported. ' +
           'Re-check every supplied FAQ passage and Notice. The Agent/Admin correction is not authoritative unless the fresh evidence directly supports it. ' +
           'Never produce a correction that merely repeats the material claim being disputed. Never collapse "each EA must use a distinct strategy" into "only one EA or one strategy is allowed" unless the evidence explicitly says that. Preserve account, phase, EA, strategy, instrument, and copy-trading distinctions exactly. ' +
           'A relevant newer Notice overrides an older FAQ only when it applies to the same product, Account model, region, date, and condition. Never merge incompatible rules. ' +
@@ -186,6 +192,7 @@ export default async function handler(req, res) {
           `Original question:\n${dispute.question}\n\nDisputed answer:\n${dispute.answer}\n\n` +
           `Recorded answer scope:\n${recordedScope ? `${recordedScope.product.toUpperCase()} Â· ${recordedScope.label || recordedScope.model}` : 'Legacy dispute â€” scope was not recorded'}\n\n` +
           `Agent dispute reason:\n${dispute.dispute_reason}\n\nAdmin approval reason:\n${dispute.approval_reason}\n\n` +
+          `Exact passage annotations:\n${annotationContext || 'None'}\n\n` +
           `Currently active correction, if any:\n${linkedSnippet?.instruction || 'None'}\n\n` +
           `Fresh FAQ and Notice evidence:\n${evidence || 'No matching FAQ or Notice evidence was found. Do not invent a correction.'}`;
         // Correction drafting is a low-volume, high-impact Admin action. Use the
