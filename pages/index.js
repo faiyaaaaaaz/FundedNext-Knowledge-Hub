@@ -13,6 +13,16 @@ const THINKING_STEPS = [
   'Verifying support'
 ];
 
+async function fetchWithDeadline(url, options = {}, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try { return await fetch(url, { ...options, signal: controller.signal }); }
+  catch (error) {
+    if (error?.name === 'AbortError') throw new Error('The acknowledgement service took too long. Please retry; if it finished in the background, reloading will confirm it.');
+    throw error;
+  } finally { clearTimeout(timer); }
+}
+
 /* Theme-aware FN mark — letters inherit the ink colour, triangle stays violet. */
 function Logo({ className = '' }) {
   return (
@@ -292,7 +302,7 @@ export default function Home() {
   async function loadWorkspaceEntry(token = session) {
     setEntryChecking(true); setAcknowledgementError('');
     try {
-      const response = await fetch('/api/workspace-entry', { headers: { 'x-app-session': token } });
+      const response = await fetchWithDeadline('/api/workspace-entry', { headers: { 'x-app-session': token } });
       const data = await response.json();
       if (response.status === 401) { logout(); return; }
       if (!response.ok) throw new Error(data.error || 'The daily acknowledgement could not be loaded.');
@@ -422,7 +432,7 @@ export default function Home() {
     if (!workspaceEntry || acknowledging) return;
     setAcknowledging(true); setAcknowledgementError('');
     try {
-      const response = await fetch('/api/workspace-entry', { method: 'POST', headers: headers(session, true), body: JSON.stringify({ releaseVersion: workspaceEntry.release.version }) });
+      const response = await fetchWithDeadline('/api/workspace-entry', { method: 'POST', headers: headers(session, true), body: JSON.stringify({ releaseVersion: workspaceEntry.release.version }) });
       const data = await response.json();
       if (response.status === 401) { logout(); return; }
       if (!response.ok) throw new Error(data.error || 'The acknowledgement could not be recorded.');
