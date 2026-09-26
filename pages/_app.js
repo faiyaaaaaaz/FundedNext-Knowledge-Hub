@@ -5,6 +5,7 @@ import '../styles/knowledge-map.css';
 import { useEffect } from 'react';
 import Head from 'next/head';
 import InteractionFeedback from '../components/InteractionFeedback';
+import AppVersionGuard from '../components/AppVersionGuard';
 
 export default function App({ Component, pageProps }) {
   useEffect(() => {
@@ -21,6 +22,7 @@ export default function App({ Component, pageProps }) {
       <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     </Head>
     <Component {...pageProps} />
+    <AppVersionGuard />
     <InteractionFeedback />
   </>;
 }
