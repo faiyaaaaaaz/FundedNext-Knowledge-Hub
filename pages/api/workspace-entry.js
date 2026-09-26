@@ -24,26 +24,28 @@ function dhakaDay(value = new Date()) {
 }
 
 export default async function handler(req, res) {
+  res.setHeader('Cache-Control', 'no-store');
   try {
     const access = await authenticateRequest(req);
     if (!access) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
     if (!['GET', 'POST'].includes(req.method)) return res.status(405).json({ error: 'Method not allowed' });
 
     const today = dhakaDay();
+    const sb = supabaseAdmin();
     if (req.method === 'POST') {
       const releaseVersion = String(req.body?.releaseVersion || '');
       if (releaseVersion !== CURRENT_RELEASE.version) return res.status(400).json({ error: 'The acknowledgement is out of date. Please refresh.' });
-      const id = await logActivity({
+      const recorded = await logActivity({
         actorRole: access.role, sessionId: access.sessionId, userName: access.name,
         userEmail: access.email, authProvider: access.authProvider,
         eventType: 'workspace_acknowledgement', success: true,
         metadata: { day: today, acknowledgementVersion: ACK_VERSION, releaseVersion: CURRENT_RELEASE.version, disclaimer: DISCLAIMER }
-      });
-      if (!id) throw new Error('The acknowledgement could not be recorded. Please try again.');
+      }, { sb, returnId: false });
+      if (!recorded) throw new Error('The acknowledgement could not be recorded. Please try again.');
       return res.status(200).json({ ok: true, recorded: true });
     }
 
-    const { data, error } = await supabaseAdmin().from('activity_logs')
+    const { data, error } = await sb.from('activity_logs')
       .select('created_at,metadata').eq('event_type', 'workspace_acknowledgement')
       .eq('user_email', access.email).order('created_at', { ascending: false }).limit(30);
     if (error) throw error;
