@@ -38,6 +38,9 @@ const CORE_GUARDRAILS =
   '- Use plain text only. Do not use Markdown, bold text, italics, headings, asterisks, underscores, or decorative symbols.\n' +
   '- Keep paragraphs short and separated by one blank line. Use simple numbered steps only when a sequence is genuinely needed.\n' +
   '- For a multi-part question, answer every part supported by direct evidence and say only that the specific unsupported part needs checking.\n' +
+  '- Explain before concluding: state the governing rule and why it applies to the customer’s described facts, then give the practical result. Never open with a bare prohibition when the reason is available.\n' +
+  '- Sound like a thoughtful support specialist, not a verdict generator. Connect related points, avoid repeating the same conclusion for every account size, and never produce a robotic chain of “needs checking” sentences.\n' +
+  '- When a detail depends on an Account model, payout option, purchase date, region, or platform the customer did not identify, name that missing detail and ask one focused clarification. Do not imply the policy itself is unknowable.\n' +
   `- Reply exactly "${SAFE_UNCONFIRMED}" only when direct evidence supports none of the requested parts.\n` +
   '- Factual numbers, dates, percentages, time periods, and conditions must be directly supported by the selected FAQ evidence.\n' +
   '- Do not infer that two instruments are correlated or uncorrelated unless the evidence explicitly states that relationship. A list of asset groups is not enough.\n' +
@@ -145,12 +148,12 @@ function explicitQuestionParts(text) {
       const start = marker.index + marker[0].length;
       const end = markers[index + 1]?.index ?? source.length;
       return source.slice(start, end).trim();
-    }).filter((part) => part.length > 8).slice(0, 8);
+    }).filter((part) => part.length > 8).slice(0, 24);
   }
   const parts = source.match(/[^?]+\?/g) || [];
   return parts.map((part) => part.replace(/^\s*(?:good\s+(?:morning|afternoon|evening)[,.]?\s*)/i, '').trim())
     .filter((part) => part.length > 8)
-    .slice(0, 8);
+    .slice(0, 24);
 }
 
 function conciseQuestionLabel(text) {
@@ -562,7 +565,7 @@ export default async function handler(req, res) {
       selectedModelLabel: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models`,
       scopeSource: selectedModelFromUi ? 'selector' : inferredModel ? 'question' : 'all_models',
       geographicScope: regionIntent,
-      topics: topicPlan.map((topic) => ({ question: topic.question, queries: topic.queries || [] })).slice(0, 8),
+      topics: topicPlan.map((topic) => ({ question: topic.question, queries: topic.queries || [] })).slice(0, 24),
       conceptGroups: concepts.groups.slice(0, 12),
       searchQueries: embedTexts
     };
@@ -1032,7 +1035,7 @@ export default async function handler(req, res) {
     const multiPartText = multiPart
       ? '\n\nThis question has several parts. Answer them in this exact order and do not merge topics:\n' +
         topicPlan.map((topic, index) => `${index + 1}. ${topic.question}`).join('\n') +
-        '\nAnswer each supported concern in its own short natural paragraph. Use varied, brief transitions such as "Regarding your withdrawal," or "As for opening another trade," only where useful. Do not mechanically number the answers or repeat the same introductory phrase. Keep everything plain text. For an unsupported part, say only that the specific detail needs checking; do not defer the entire answer.'
+        '\nOrganize the reply into a small number of natural, descriptive sections by subject (for example EA use, trade management, risk limits, and Performance Rewards). Explain the governing rule before the result, then answer related questions together without repeating the same conclusion. Use bullets only where they make a dense list easier to scan. For an unsupported part, identify the exact missing customer detail or missing policy fact; do not repeat a generic “needs checking” line and do not defer the entire answer.'
       : '';
     // Exact computed results are provided as evidence — reproduce them verbatim.
     const calcMergeText = calcResults.length
@@ -1150,7 +1153,8 @@ export default async function handler(req, res) {
       let lastErr = null;
       // Try every key once, then retry one complete pass after a short pause.
       // This absorbs brief 429/5xx bursts without repeatedly hammering one key.
-      for (let round = 0; round < 2 && !completion; round++) {
+      let promptTooLarge = false;
+      answerAttempts: for (let round = 0; round < 2 && !completion; round++) {
         if (round) await new Promise((resolve) => setTimeout(resolve, 700));
         for (const idx of order) {
           try {
@@ -1159,12 +1163,21 @@ export default async function handler(req, res) {
             usedGroqKeyLabel = pool[idx].label || `Key ${pool[idx].id}`;
             answerProvider = 'groq';
             break;
-          } catch (e) { lastErr = e; completion = null; }
+          } catch (e) {
+            lastErr = e; completion = null;
+            // A 413/TPM request-size rejection is deterministic for this
+            // prompt. Rotating keys only wastes time; immediately switch to
+            // the smaller evidence-preserving recovery prompt.
+            if (/\b413\b|request too large|requested \d+.*limit \d+/i.test(String(e?.message || e))) {
+              promptTooLarge = true;
+              break answerAttempts;
+            }
+          }
         }
       }
       // Last Groq-only recovery. OpenAI is not considered until this has failed.
       if (!completion && recoveryContext.length < context.length) {
-        await new Promise((resolve) => setTimeout(resolve, 900));
+        if (!promptTooLarge) await new Promise((resolve) => setTimeout(resolve, 900));
         for (const idx of order) {
           try {
             completion = await tracedAnswerCall(pool[idx].key, chatModel, recoveryMessages, 'https://api.groq.com/openai/v1');
