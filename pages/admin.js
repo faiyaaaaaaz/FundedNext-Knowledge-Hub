@@ -51,6 +51,44 @@ function initials(name, email) {
   return base.slice(0, 2).toUpperCase();
 }
 
+function AnnotatablePassage({ label, target, text, annotations = [], onAdd, onRemove }) {
+  const passageRef = useRef(null);
+  const [selection, setSelection] = useState(null);
+  const [note, setNote] = useState('');
+  const relevant = annotations.filter((item) => item.target === target).sort((a, b) => a.start - b.start);
+  const captureSelection = () => {
+    const selected = window.getSelection();
+    if (!selected || selected.isCollapsed || !selected.rangeCount) return;
+    const range = selected.getRangeAt(0);
+    const container = passageRef.current;
+    if (!container || !container.contains(range.commonAncestorContainer)) return;
+    const before = range.cloneRange();
+    before.selectNodeContents(container);
+    before.setEnd(range.startContainer, range.startOffset);
+    const quote = range.toString();
+    if (!quote.trim()) return;
+    const start = before.toString().length;
+    setSelection({ quote, start, end: start + quote.length });
+    setNote('');
+  };
+  const rendered = [];
+  let cursor = 0;
+  for (const item of relevant) {
+    const start = Math.max(cursor, Math.min(Number(item.start) || 0, text.length));
+    const end = Math.max(start, Math.min(Number(item.end) || start, text.length));
+    if (start > cursor) rendered.push(text.slice(cursor, start));
+    rendered.push(<mark key={item.id} title={item.note}>{text.slice(start, end)}</mark>);
+    cursor = end;
+  }
+  if (cursor < text.length) rendered.push(text.slice(cursor));
+  return <section className={`annotatable-passage ${target}`}>
+    <header><span>{label}</span><small>Select exact text to annotate</small></header>
+    <div ref={passageRef} className="annotation-text" onMouseUp={captureSelection}>{rendered.length ? rendered : text}</div>
+    {selection && <div className="annotation-capture"><blockquote>{selection.quote}</blockquote><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="What is wrong, unclear, missing, or especially important about this exact passage?" autoFocus /><div><button className="btn btn-secondary" onClick={() => setSelection(null)}>Cancel</button><button className="btn btn-primary" disabled={note.trim().length < 3} onClick={() => { onAdd({ id: crypto.randomUUID(), target, ...selection, note: note.trim() }); setSelection(null); setNote(''); window.getSelection()?.removeAllRanges(); }}>Add annotation</button></div></div>}
+    {!!relevant.length && <div className="annotation-list">{relevant.map((item, index) => <article key={item.id}><span>{index + 1}</span><div><q>{item.quote}</q><p>{item.note}</p></div><button aria-label="Remove annotation" onClick={() => onRemove(item.id)}>×</button></article>)}</div>}
+  </section>;
+}
+
 function sourceType(source = {}) {
   if (source.type === 'answer_scope' || source.type === 'query_log') return source.type;
   if (source.kind) return source.kind;
@@ -325,6 +363,7 @@ export default function Admin() {
   const [deletingQueryLogs, setDeletingQueryLogs] = useState(false);
   const [disputingQueryLog, setDisputingQueryLog] = useState(null);
   const [queryLogDisputeReason, setQueryLogDisputeReason] = useState('');
+  const [queryLogAnnotations, setQueryLogAnnotations] = useState({});
   const [submittingQueryLogDispute, setSubmittingQueryLogDispute] = useState(false);
   const [allowedGoogleDomains, setAllowedGoogleDomains] = useState('');
   const [newMasterPassword, setNewMasterPassword] = useState('');
@@ -1067,6 +1106,29 @@ export default function Admin() {
     }, 80);
   }
 
+  function annotationsFor(logId) {
+    return queryLogAnnotations[String(logId)] || [];
+  }
+
+  function addQueryAnnotation(logId, annotation) {
+    setQueryLogAnnotations((current) => ({
+      ...current,
+      [String(logId)]: [...(current[String(logId)] || []), annotation]
+    }));
+  }
+
+  function removeQueryAnnotation(logId, annotationId) {
+    setQueryLogAnnotations((current) => ({
+      ...current,
+      [String(logId)]: (current[String(logId)] || []).filter((item) => item.id !== annotationId)
+    }));
+  }
+
+  function beginQueryLogDispute(log) {
+    setDisputingQueryLog(log);
+    setQueryLogDisputeReason('');
+  }
+
   async function deleteQueryLogs(mode) {
     const count = mode === 'filter' ? (queryLogs?.logs?.length || 0) : selectedQueryLogs.length;
     if (!count) return;
@@ -1088,17 +1150,23 @@ export default function Admin() {
   }
 
   async function submitQueryLogDispute() {
-    if (!disputingQueryLog || queryLogDisputeReason.trim().length < 10) return;
+    if (!disputingQueryLog) return;
+    const annotations = annotationsFor(disputingQueryLog.id);
+    if (queryLogDisputeReason.trim().length < 10 && !annotations.length) return;
     setSubmittingQueryLogDispute(true); setError('');
     try {
       const log = disputingQueryLog;
+      const annotationSummary = annotations.map((item, index) =>
+        `${index + 1}. ${item.target.toUpperCase()} characters ${item.start}-${item.end}\nQuoted passage: "${item.quote}"\nAnnotation: ${item.note}`
+      ).join('\n\n');
+      const reason = [queryLogDisputeReason.trim(), annotationSummary && `Exact passage annotations:\n${annotationSummary}`].filter(Boolean).join('\n\n');
       const response = await fetch('/api/disputes', {
         method: 'POST', headers: { ...headers(), 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          question: log.question, answer: log.answer, reason: queryLogDisputeReason.trim(),
+          question: log.question, answer: log.answer, reason,
           confidence: log.confidence, provider: log.provider,
           scope: log.product ? { product: log.product, model: log.accountModel || 'all', label: log.scopeLabel || log.accountModel || 'All models' } : undefined,
-          sources: [{ type: 'query_log', id: log.id, title: `Stored query log · ${formatDate(log.createdAt)}`, url: '', model: log.model || null, originalUserEmail: log.userEmail || null, recordedAt: log.createdAt }, ...(log.sources || [])]
+          sources: [{ type: 'query_log', id: log.id, title: `Stored query log · ${formatDate(log.createdAt)}`, url: '', model: log.model || null, originalUserEmail: log.userEmail || null, recordedAt: log.createdAt }, ...annotations.map((item, index) => ({ type: 'query_annotation', title: `${item.target === 'question' ? 'Customer query' : 'Assistant answer'} annotation ${index + 1}`, target: item.target, quote: item.quote, start: item.start, end: item.end, note: item.note, url: '' })), ...(log.sources || [])]
         })
       });
       if (handleAuthLoss(response)) return;
@@ -1106,6 +1174,7 @@ export default function Admin() {
       if (!response.ok) throw new Error(data.error || 'Could not submit the dispute.');
       setNotice('Dispute submitted from the stored query and answer with its original scope and model context.');
       setDisputingQueryLog(null); setQueryLogDisputeReason('');
+      setQueryLogAnnotations((current) => { const next = { ...current }; delete next[String(log.id)]; return next; });
       await loadDisputes();
     } catch (e) { setError(e.message); }
     finally { setSubmittingQueryLogDispute(false); }
@@ -1279,11 +1348,15 @@ export default function Admin() {
                     <i>{expanded ? '−' : '+'}</i>
                   </button>
                 </div>
-                <div className="query-record-actions"><button type="button" className="btn btn-danger" disabled={!log.question || !log.answer} onClick={() => { setDisputingQueryLog(log); setQueryLogDisputeReason(''); }}>⚑ Dispute answer</button></div>
+                <div className="query-record-actions"><button type="button" className="btn btn-danger" disabled={!log.question || !log.answer} onClick={() => beginQueryLogDispute(log)}>⚑ Dispute answer</button></div>
                 {expanded && <div className="query-log-detail">
                   {log.feedback && <div className={`query-feedback-detail ${log.feedback}`}><span>{feedbackLabel}</span><div><b>Answer feedback received</b><small>Submitted by {log.feedbackBy || log.userName || log.userEmail || 'the agent'} · {formatDate(log.feedbackAt || log.createdAt)}</small></div></div>}
                   <div className="query-log-facts"><span>Product<b>{log.product ? log.product.toUpperCase() : 'Legacy record'}</b></span><span>Account model<b>{log.scopeLabel || log.accountModel || 'Not recorded'}</b></span><span>Answer model<b>{log.model || 'Not recorded'}</b></span><span>Confidence<b>{log.confidence == null ? 'Not recorded' : `${log.confidence}% · ${log.confidenceLabel}`}</b></span><span>Answer feedback<b>{feedbackLabel || 'No feedback received'}</b></span><span>Question words<b>{log.questionWordCount.toLocaleString()}</b></span><span>Answer words<b>{log.answerWordCount.toLocaleString()}</b></span><span>Tokens<b>{log.inputTokens.toLocaleString()} in · ${log.outputTokens.toLocaleString()} out</b></span><span>Response time<b>{log.durationMs ? `${(log.durationMs / 1000).toFixed(1)}s` : 'Not recorded'}</b></span></div>
-                  <div className="query-log-copy"><label>Complete query</label><div>{log.question || 'Not retained in this older record.'}</div><label>Complete answer</label><div>{log.answer || 'Not retained in this older record.'}</div></div>
+                  <div className="query-conversation">
+                    <AnnotatablePassage label="Customer query" target="question" text={log.question || 'Not retained in this older record.'} annotations={annotationsFor(log.id)} onAdd={(item) => addQueryAnnotation(log.id, item)} onRemove={(id) => removeQueryAnnotation(log.id, id)} />
+                    <AnnotatablePassage label="FundedNext Assistant" target="answer" text={log.answer || 'Not retained in this older record.'} annotations={annotationsFor(log.id)} onAdd={(item) => addQueryAnnotation(log.id, item)} onRemove={(id) => removeQueryAnnotation(log.id, id)} />
+                    {!!annotationsFor(log.id).length && <div className="annotation-dispute-bar"><div><b>{annotationsFor(log.id).length} exact passage annotation{annotationsFor(log.id).length === 1 ? '' : 's'} ready</b><small>Each quote, character range, and note will be attached to the dispute.</small></div><button type="button" className="btn btn-danger" onClick={() => beginQueryLogDispute(log)}>Review and dispute →</button></div>}
+                  </div>
                   {(log.interpretation || log.evidenceTrail || log.processing) && <details className="query-audit-details"><summary>Processing and evidence details · {log.evidenceTrail?.selectedForAnswer?.length || 0} selected · {log.evidenceTrail?.rejected?.length || 0} rejected</summary><div className="interpretation-trail">{log.interpretation && <>
                     <div className="interpretation-title"><div><span className="eyebrow">Interpretation and evidence trail</span><h3>How this answer was produced</h3></div><span className={`state-pill ${log.interpretation.helperUsed ? 'ready' : ''}`}>{log.interpretation.helperUsed ? 'AI interpretation used' : 'Rule-based interpretation'}</span></div>
                     <div className="interpretation-summary"><span>Cleaned meaning<b>{log.interpretation.cleaned || log.question}</b></span><span>Detected scope<b>{log.interpretation.selectedProduct?.toUpperCase()} · {log.interpretation.selectedModelLabel}</b><small>Chosen from {log.interpretation.scopeSource === 'selector' ? 'the Agent selector' : log.interpretation.scopeSource === 'question' ? 'the question wording' : 'the full product family'}</small></span></div>
@@ -1520,7 +1593,7 @@ export default function Admin() {
 
         {tab === 'keys' && <div className="settings-stack"><section className="settings-card"><div className="settings-head"><div><h2>Encrypted API keys</h2><p>Keys are encrypted before storage and never displayed again.</p></div></div>{[['Intercom API key',intercom,setIntercom,status?.intercomSet],['OpenAI API key',openai,setOpenai,status?.openaiSet],['Groq API key',groq,setGroq,status?.groqSet]].map(([label,value,setter,isSet]) => <div className="vault-field" key={label}><div><label>{label}</label><span className={`state-pill ${isSet ? 'ready' : ''}`}>{isSet ? 'Connected' : 'Not set'}</span></div><input type="password" value={value} onChange={(e) => setter(e.target.value)} placeholder="Paste to set or replace" /></div>)}<button className="btn btn-primary" disabled={saving} onClick={async () => { const body = {}; if (intercom.trim()) body.intercomToken = intercom.trim(); if (openai.trim()) body.openaiKey = openai.trim(); if (groq.trim()) body.groqKey = groq.trim(); if (await settingsSave(body, 'API keys saved securely.')) { setIntercom(''); setOpenai(''); setGroq(''); } }}>Save API keys</button></section></div>}
       </section>
-      {disputingQueryLog && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !submittingQueryLogDispute && setDisputingQueryLog(null)}><div className="modal-card"><div className="modal-icon">⚑</div><h2>Dispute this stored answer?</h2><p>The complete stored query, answer, sources, answering model, and selected product scope will be attached automatically.</p><label htmlFor="query-log-dispute-reason">Reason for dispute</label><textarea id="query-log-dispute-reason" value={queryLogDisputeReason} onChange={(event) => setQueryLogDisputeReason(event.target.value)} placeholder="Explain exactly what is incorrect, incomplete, or outside the selected scope…" autoFocus /><div className="modal-actions"><button className="btn btn-secondary" disabled={submittingQueryLogDispute} onClick={() => setDisputingQueryLog(null)}>Cancel</button><button className="btn btn-danger" disabled={submittingQueryLogDispute || queryLogDisputeReason.trim().length < 10} onClick={submitQueryLogDispute}>{submittingQueryLogDispute ? 'Submitting…' : 'Submit dispute'}</button></div></div></div>}
+      {disputingQueryLog && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !submittingQueryLogDispute && setDisputingQueryLog(null)}><div className="modal-card query-dispute-modal"><div className="modal-icon">⚑</div><h2>Dispute this stored answer?</h2><p>The complete conversation, sources, model, scope, and every exact-text annotation will be attached automatically.</p>{annotationsFor(disputingQueryLog.id).length > 0 && <div className="modal-annotation-summary"><b>{annotationsFor(disputingQueryLog.id).length} annotated passage{annotationsFor(disputingQueryLog.id).length === 1 ? '' : 's'}</b>{annotationsFor(disputingQueryLog.id).map((item, index) => <div key={item.id}><span>{index + 1} · {item.target}</span><q>{item.quote}</q><small>{item.note}</small></div>)}</div>}<label htmlFor="query-log-dispute-reason">Additional dispute notes {annotationsFor(disputingQueryLog.id).length ? '(optional)' : ''}</label><textarea id="query-log-dispute-reason" value={queryLogDisputeReason} onChange={(event) => setQueryLogDisputeReason(event.target.value)} placeholder={annotationsFor(disputingQueryLog.id).length ? 'Add broader context or another concern…' : 'Explain exactly what is incorrect, incomplete, or outside the selected scope…'} autoFocus /><div className="modal-actions"><button className="btn btn-secondary" disabled={submittingQueryLogDispute} onClick={() => setDisputingQueryLog(null)}>Cancel</button><button className="btn btn-danger" disabled={submittingQueryLogDispute || (queryLogDisputeReason.trim().length < 10 && !annotationsFor(disputingQueryLog.id).length)} onClick={submitQueryLogDispute}>{submittingQueryLogDispute ? 'Submitting…' : 'Submit dispute'}</button></div></div></div>}
     </main>
   );
 }
