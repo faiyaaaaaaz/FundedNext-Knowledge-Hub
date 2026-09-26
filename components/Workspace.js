@@ -3,10 +3,16 @@ import Link from 'next/link';
 
 export function stamp(value) { return value ? new Date(value).toLocaleString('en-GB',{timeZone:'Asia/Dhaka',day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'})+' GMT+6' : 'Not opened'; }
 export async function workspaceRequest(session,action,body,params='') {
- const response=await fetch('/api/workspace?action='+action+params,{method:body?'POST':'GET',headers:{'x-app-session':session,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});
- const text=await response.text(); let data;
- try{data=JSON.parse(text);}catch{throw new Error('The server could not complete this request. Try again.');}
- if(!response.ok)throw new Error(data.error||'Request failed');return data;
+ const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);
+ try {
+  const response=await fetch('/api/workspace?action='+action+params,{method:body?'POST':'GET',headers:{'x-app-session':session,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),signal:controller.signal});
+  const text=await response.text(); let data;
+  try{data=JSON.parse(text);}catch{throw new Error('The server could not complete this request. Try again.');}
+  if(!response.ok)throw new Error(data.error||'Request failed');return data;
+ } catch(error) {
+  if(error?.name==='AbortError')throw new Error('Saving took too long. Please retry; if it finished in the background, the guide will close after reloading.');
+  throw error;
+ } finally { clearTimeout(timer); }
 }
 
 export function WorkspaceSidebar({session,role,onOpen,onNew,busy,refreshKey}) {
