@@ -54,7 +54,9 @@ function initials(name, email) {
 function AnnotatablePassage({ label, target, text, annotations = [], onAdd, onRemove }) {
   const passageRef = useRef(null);
   const [selection, setSelection] = useState(null);
+  const [annotating, setAnnotating] = useState(false);
   const [note, setNote] = useState('');
+  const [copied, setCopied] = useState('');
   const relevant = annotations.filter((item) => item.target === target).sort((a, b) => a.start - b.start);
   const captureSelection = () => {
     const selected = window.getSelection();
@@ -69,7 +71,19 @@ function AnnotatablePassage({ label, target, text, annotations = [], onAdd, onRe
     if (!quote.trim()) return;
     const start = before.toString().length;
     setSelection({ quote, start, end: start + quote.length });
+    setAnnotating(false);
     setNote('');
+  };
+  const copyText = async (value, kind) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(kind);
+      window.setTimeout(() => setCopied(''), 1600);
+      if (kind === 'selection') setSelection(null);
+    } catch {
+      setCopied('failed');
+      window.setTimeout(() => setCopied(''), 2200);
+    }
   };
   const rendered = [];
   let cursor = 0;
@@ -82,9 +96,10 @@ function AnnotatablePassage({ label, target, text, annotations = [], onAdd, onRe
   }
   if (cursor < text.length) rendered.push(text.slice(cursor));
   return <section className={`annotatable-passage ${target}`}>
-    <header><span>{label}</span><small>Select exact text to annotate</small></header>
-    <div ref={passageRef} className="annotation-text" onMouseUp={captureSelection}>{rendered.length ? rendered : text}</div>
-    {selection && <div className="annotation-capture"><blockquote>{selection.quote}</blockquote><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="What is wrong, unclear, missing, or especially important about this exact passage?" autoFocus /><div><button className="btn btn-secondary" onClick={() => setSelection(null)}>Cancel</button><button className="btn btn-primary" disabled={note.trim().length < 3} onClick={() => { onAdd({ id: crypto.randomUUID(), target, ...selection, note: note.trim() }); setSelection(null); setNote(''); window.getSelection()?.removeAllRanges(); }}>Add annotation</button></div></div>}
+    <header><div><span>{label}</span><small>Select text to copy or annotate</small></div><button type="button" className="passage-copy" onClick={() => copyText(text, 'all')}>{copied === 'all' ? '✓ Copied' : copied === 'failed' ? 'Copy failed' : `⧉ Copy ${target === 'question' ? 'query' : 'answer'}`}</button></header>
+    <div ref={passageRef} className="annotation-text" onPointerUp={captureSelection} onKeyUp={captureSelection}>{rendered.length ? rendered : text}</div>
+    {selection && !annotating && <div className="selection-toolbar" role="toolbar" aria-label="Selected text actions"><div><small>Selected passage</small><q>{selection.quote}</q></div><button type="button" onClick={() => copyText(selection.quote, 'selection')}>{copied === 'selection' ? '✓ Copied' : '⧉ Copy selection'}</button><button type="button" className="annotate-action" onClick={() => setAnnotating(true)}>✎ Annotate</button><button type="button" className="selection-dismiss" aria-label="Close selected text actions" onClick={() => { setSelection(null); window.getSelection()?.removeAllRanges(); }}>×</button></div>}
+    {selection && annotating && <div className="annotation-capture"><blockquote>{selection.quote}</blockquote><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="What is wrong, unclear, missing, or especially important about this exact passage?" autoFocus /><div><button className="btn btn-secondary" onClick={() => { setAnnotating(false); setNote(''); }}>Back</button><button className="btn btn-primary" disabled={note.trim().length < 3} onClick={() => { onAdd({ id: crypto.randomUUID(), target, ...selection, note: note.trim() }); setSelection(null); setAnnotating(false); setNote(''); window.getSelection()?.removeAllRanges(); }}>Add annotation</button></div></div>}
     {!!relevant.length && <div className="annotation-list">{relevant.map((item, index) => <article key={item.id}><span>{index + 1}</span><div><q>{item.quote}</q><p>{item.note}</p></div><button aria-label="Remove annotation" onClick={() => onRemove(item.id)}>×</button></article>)}</div>}
   </section>;
 }
