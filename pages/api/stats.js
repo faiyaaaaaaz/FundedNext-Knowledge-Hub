@@ -1,6 +1,16 @@
 import { authenticateRequest, supabaseAdmin, getKeys, getLastSyncMarkers } from '../../lib/server';
 import { noticesAccess } from '../../lib/notices';
 
+export function databaseHealthReading(response) {
+  const row = Array.isArray(response?.data) ? response.data[0] : response?.data;
+  const bytes = Number(row?.database_bytes);
+  const limit = Number(row?.database_limit_bytes);
+  if (response?.error || !Number.isSafeInteger(bytes) || bytes < 1) return null;
+  const validLimit = Number.isSafeInteger(limit) && limit > 0;
+  return { databaseBytes: bytes, databaseLimitBytes: validLimit ? limit : null,
+    percentUsed: validLimit ? (bytes / limit) * 100 : null };
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
   try {
@@ -20,9 +30,6 @@ export default async function handler(req, res) {
       sb.rpc('get_database_health'),
       sb.from('settings').select('value').eq('key', 'notices_indexed_at').maybeSingle()
     ]);
-    const healthRow = Array.isArray(databaseHealth.data) ? databaseHealth.data[0] : databaseHealth.data;
-    const databaseBytes = Number(healthRow?.database_bytes || 0);
-    const databaseLimitBytes = Number(healthRow?.database_limit_bytes || 0);
     const latestFaq = latest.data?.[0] || null;
     if (latestFaq?.updated_at) {
       const raw = latestFaq.updated_at;
@@ -45,11 +52,8 @@ export default async function handler(req, res) {
       answerProvider: keys.chatProvider,
       answerModel: keys.chatModel,
       automaticFallback: false,
-      storageHealth: !databaseHealth.error && databaseBytes > 0 && databaseLimitBytes > 0 ? {
-        databaseBytes,
-        databaseLimitBytes,
-        percentUsed: Math.min(100, Math.max(0, (databaseBytes / databaseLimitBytes) * 100))
-      } : null,
+      storageHealth: databaseHealthReading(databaseHealth),
+      storageHealthStatus: databaseHealth.error ? (databaseHealth.error.code === 'PGRST202' || databaseHealth.error.code === '42883' ? 'setup_required' : 'unavailable') : databaseHealthReading(databaseHealth) ? 'ready' : 'unavailable',
       healthy: !articles.error && !chunks.error && !queued.error
     });
   } catch (error) {
