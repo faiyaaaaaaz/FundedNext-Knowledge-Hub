@@ -1,5 +1,5 @@
 import {
-  authenticateRequest, getKeys, getPrompt, supabaseAdmin, openaiEmbed,
+  authenticateRequest, getKeys, getPrompt, supabaseAdmin, openaiEmbed, getEmbeddings,
   openaiChatDetailed, getBrandingRules, brandingInstructions,
   applyBrandingReplacements, getRelevantSnippets, logActivity as createActivity,
   expandConcepts, clarifyQuery, correctTypos, runCalculators,
@@ -259,7 +259,7 @@ export default async function handler(req, res) {
       return sendJson({ ...body, queryLogId: requestLogId });
     };
 
-    const { openaiKey, groqKey, chatModel, chatProvider, smartRetrieval, normalUserGptFallback, adminAutoFallback, fallbackProvider, fallbackModel } = await getKeys();
+    const { openaiKey, groqKey, geminiKey, embeddingProvider, chatModel, chatProvider, smartRetrieval, normalUserGptFallback, adminAutoFallback, fallbackProvider, fallbackModel } = await getKeys();
 
     // Groq key pool for rotation; a single primary key powers the small helper
     // calls (query clarify, calculator extraction, grounding check).
@@ -298,7 +298,8 @@ export default async function handler(req, res) {
         confidence, confidenceLabel: label, usedCalculator: true
       });
     }
-    if (!openaiKey) return res.status(400).json({ error: 'No OpenAI key is saved yet.' });
+    const embeddingKey = embeddingProvider === 'gemini' ? geminiKey : openaiKey;
+    if (!embeddingKey) return res.status(400).json({ error: `No ${embeddingProvider === 'gemini' ? 'Gemini' : 'OpenAI'} embedding key is saved yet. Add it in Admin.` });
     if (chatProvider === 'groq' && !groqPool.length && !groqPrimary) return res.status(400).json({ error: 'Groq is selected, but no Groq key is saved. Add one in Admin → Groq keys.' });
 
     const sb = supabaseAdmin();
@@ -571,7 +572,7 @@ export default async function handler(req, res) {
     };
 
     await logActivity({ metadata: { stage: 'Searching source articles', durationMs: Date.now() - started } });
-    const vectors = await openaiEmbed(openaiKey, embedTexts);
+    const vectors = await getEmbeddings(embeddingProvider, embeddingKey, embedTexts);
     const combined = new Map();
     const vectorMatches = [];
     for (const item of keywordMatches) combined.set(String(item.id), item);
@@ -880,7 +881,8 @@ export default async function handler(req, res) {
     try {
       if (await noticesAccess(access, sb)) {
         const { matches: nMatches, escalations, rejected: nRejected } = await retrieveNotices(sb, {
-          openaiKey,
+          openaiKey: embeddingKey,
+          embeddingProvider,
           question: clearQuestion || question,
           product: selectedProduct,
           model: selectedModel?.slug || 'all',
