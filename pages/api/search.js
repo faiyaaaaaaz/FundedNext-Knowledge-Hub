@@ -209,15 +209,15 @@ export default async function handler(req, res) {
   let requestLogId = null;
   let requestMetadata = {};
   const reviewTrace = { version: 1, prompts: {}, attempts: [] };
-  async function tracedAnswerCall(key, model, messages, baseUrl) {
+  async function tracedAnswerCall(key, model, messages, baseUrl, geminiPool) {
     const promptId = sha256(JSON.stringify(messages));
     reviewTrace.prompts[promptId] = messages;
-    const attempt = { model, provider: /groq/.test(baseUrl || '') ? 'groq' : 'openai', promptId, startedAt: new Date().toISOString(), status: 'started' };
+    const attempt = { model, provider: geminiPool ? 'gemini' : /groq/.test(baseUrl || '') ? 'groq' : 'openai', promptId, startedAt: new Date().toISOString(), status: 'started' };
     reviewTrace.attempts.push(attempt);
     await logActivity({ metadata: { reviewTrace } });
     const attemptStart = Date.now();
     try {
-      const result = await openaiChatDetailed(key, model, messages, baseUrl);
+      const result = geminiPool ? await geminiChatDetailed(geminiPool, model, messages) : await openaiChatDetailed(key, model, messages, baseUrl);
       attempt.status = 'completed';
       attempt.usage = result.usage || null;
       attempt.response = String(result.content || '').slice(0, 20000);
@@ -225,7 +225,10 @@ export default async function handler(req, res) {
       return result;
     } catch (error) {
       attempt.status = 'failed';
+      attempt.httpStatus = error.status || null;
       attempt.error = String(error.message || error).split(String(key || '__no_key__')).join('[redacted]').replace(/Bearer\s+\S+|(?:sk-|gsk_)[A-Za-z0-9_-]+/gi, '[redacted]').slice(0, 1200);
+      for (const item of geminiPool || []) { if (item.key) attempt.error = attempt.error.split(String(item.key)).join('[redacted]'); }
+      attempt.error = attempt.error.replace(/AIza[A-Za-z0-9_-]+/g, '[redacted]');
       throw error;
     } finally {
       attempt.durationMs = Date.now() - attemptStart;
@@ -1127,7 +1130,7 @@ export default async function handler(req, res) {
       if (answerProvider === 'gemini') {
         const pool = geminiKeyPool && geminiKeyPool.length ? geminiKeyPool : geminiKeys.map((k, i) => ({ name: `Key ${i + 1}`, key: k }));
         const model = usedFallback ? fallbackModel : chatModel;
-        return geminiChatDetailed(pool, model, retryMessages);
+        return tracedAnswerCall(null, model, retryMessages, null, pool);
       }
       if (answerProvider !== 'groq') {
         const model = usedFallback ? fallbackModel : chatModel;
@@ -1226,7 +1229,7 @@ export default async function handler(req, res) {
       const pool = geminiKeyPool && geminiKeyPool.length ? geminiKeyPool : geminiKeys.map((k, i) => ({ name: `Key ${i + 1}`, key: k }));
       let lastGeminiErr = null;
       try {
-        completion = await geminiChatDetailed(pool, chatModel, messages);
+        completion = await tracedAnswerCall(null, chatModel, messages, null, pool);
         answerProvider = 'gemini';
       } catch (primaryError) {
         lastGeminiErr = primaryError;
