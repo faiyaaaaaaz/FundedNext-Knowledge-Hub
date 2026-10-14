@@ -4,6 +4,7 @@ import { getSupabaseBrowser } from '../lib/supabaseBrowser';
 import {AdminMessages,AdminOverview} from '../components/Workspace';
 import ModelReview from '../components/ModelReview';
 import KnowledgeMap from '../components/KnowledgeMap';
+import DiagnosticRecovery from '../components/DiagnosticRecovery';
 
 const OPENAI_MODELS = ['gpt-4o', 'gpt-4o-mini', 'o3', 'o3-mini'];
 const GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.6-27b'];
@@ -1223,6 +1224,7 @@ export default function Admin() {
 
   const navigation = [
     ['overview','▦','Overview'],
+    ['recovery', '↥', 'Restore from report'],
     ['messages','✉','Team inbox & reports'], ['modelreview','◎','Model discovery'],
     ['access', '⌁', 'Team access'], ['ai', '✦', 'AI & model'], ['branding', 'Aa', 'Brand Language'],
     ['disputes', '⚑', 'Disputes'], ['snippets', '⌘', 'Snippets'], ['snippetlogs', '↳', 'Snippet usage logs'], ['knowledge', '▤', 'Knowledge'], ['brain', '◉', 'FAQ explorer'], ['noticebrain', '◌', 'Notices explorer'], ['querylogs', '◧', 'Query & answer logs'], ['reports', '⇩', 'Downloads & diagnostics'], ['calcdata', '∑', 'Calculator data'], ['activity', '◫', 'Activity logs'],
@@ -1274,6 +1276,7 @@ export default function Admin() {
         {tab === 'overview' && <AdminOverview session={session} onNavigate={setTab} />}
         {tab === 'messages' && <AdminMessages session={session} />}
         {tab === 'modelreview' && <ModelReview session={session} />}
+        {tab === 'recovery' && <DiagnosticRecovery session={session} />}
         {tab === 'brain' && <KnowledgeMap session={session} kind="faq" />}
         {tab === 'noticebrain' && <KnowledgeMap session={session} kind="notices" />}
         {tab === 'access' && <div className="settings-stack">
