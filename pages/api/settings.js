@@ -20,8 +20,8 @@ export default async function handler(req, res) {
 
     if (req.method === 'POST') {
       const body = req.body || {};
-      const { intercomToken, openaiKey, groqKey, geminiKey, embeddingProvider, chatModel, chatProvider, chatPrompt, allowedGoogleDomains, smartRetrieval, normalUserGptFallback, adminAutoFallback, fallbackProvider, fallbackModel } = body;
-      await saveKeys({ intercomToken, openaiKey, groqKey, geminiKey, embeddingProvider, chatModel, chatProvider, chatPrompt, allowedGoogleDomains, smartRetrieval, normalUserGptFallback, adminAutoFallback, fallbackProvider, fallbackModel });
+      const { intercomToken, openaiKey, groqKey, geminiKeys, embeddingProvider, chatModel, chatProvider, chatPrompt, allowedGoogleDomains, smartRetrieval, normalUserGptFallback, adminAutoFallback, fallbackProvider, fallbackModel } = body;
+      await saveKeys({ intercomToken, openaiKey, groqKey, geminiKeys, embeddingProvider, chatModel, chatProvider, chatPrompt, allowedGoogleDomains, smartRetrieval, normalUserGptFallback, adminAutoFallback, fallbackProvider, fallbackModel });
       if (body.agentPassword) return res.status(400).json({ error: 'Agent password login is disabled. Agents must use Google.' });
       if (body.masterPassword) {
         if (access.authProvider !== 'google') return res.status(403).json({ error: 'Sign in with an approved Google Admin identity to change the Master password.' });
