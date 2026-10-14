@@ -24,12 +24,13 @@ export default async function handler(req, res) {
       });
     }
 
-    const { intercomToken, openaiKey } = await getKeys();
+    const { intercomToken, openaiKey, geminiKey, embeddingProvider } = await getKeys();
     if (!intercomToken) return res.status(400).json({ error: 'No Intercom key saved yet. Add it in Admin first.' });
-    if (!openaiKey) return res.status(400).json({ error: 'No OpenAI key saved yet. Add it in Admin first.' });
+    const embeddingKey = embeddingProvider === 'gemini' ? geminiKey : openaiKey;
+    if (!embeddingKey) return res.status(400).json({ error: embeddingProvider === 'gemini' ? 'No Gemini key saved yet. Add it in Admin first.' : 'No OpenAI key saved yet. Add it in Admin first.' });
 
     const sb = supabaseAdmin();
-    const result = await withSyncLease(sb, 'manual', () => syncStep(sb, { intercomToken, openaiKey }));
+    const result = await withSyncLease(sb, 'manual', () => syncStep(sb, { intercomToken, openaiKey, geminiKey, embeddingProvider }));
     if (result.locked) return res.status(202).json({ phase: 'waiting', done: false, ...result });
     // The interactive checker makes several small requests. Record a manual
     // completion only after its final no-difference verification pass, so the
