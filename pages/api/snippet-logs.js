@@ -19,12 +19,14 @@ export async function buildSnippetUsageReport(sb = supabaseAdmin()) {
       readAll(() => sb.from('activity_logs').select('*').eq('event_type', 'snippet_usage').order('created_at', { ascending: false }))
   ]);
   const events = [];
-  const queryIdsWithModernTrace = new Set();
+  const modernUses = new Set();
+  const useKey = (queryId, snippetId, instruction) => JSON.stringify([String(queryId || ''), String(snippetId || ''), String(instruction || '')]);
   for (const row of queryRows) {
       const meta = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
       const uses = Array.isArray(meta.snippetsUsed) ? meta.snippetsUsed : [];
-      if (uses.length) queryIdsWithModernTrace.add(String(row.id));
-      for (const use of uses) events.push({
+      for (const use of uses) {
+        modernUses.add(useKey(row.id, use.snippetId, use.instruction));
+        events.push({
         id: `query-${row.id}-${use.snippetId}`, createdAt: row.created_at,
         userName: row.user_name || '', userEmail: row.user_email || '', sessionId: row.session_id || '',
         queryLogId: row.id, question: meta.question || meta.questionPreview || '', questionPreview: String(meta.question || meta.questionPreview || '').slice(0, 180),
@@ -32,12 +34,13 @@ export async function buildSnippetUsageReport(sb = supabaseAdmin()) {
         snippetId: use.snippetId || null, title: use.title || 'Unknown snippet', triggerTerms: use.triggerTerms || '', instruction: use.instruction || '',
         instructionHash: use.instructionHash || '', matchScore: use.matchScore ?? null,
         injection: use.injection || 'included_for_evidence_checked_review', influence: use.influence || 'not_determinable_from_model_output', traceVersion: 'query-record'
-      });
+        });
+      }
   }
   // Keep historical standalone entries, but never count the same query twice.
   for (const row of legacyRows) {
       const meta = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
-      if (meta.queryLogId && queryIdsWithModernTrace.has(String(meta.queryLogId))) continue;
+      if (modernUses.has(useKey(meta.queryLogId, meta.snippetId, meta.instruction))) continue;
       events.push({
         id: `legacy-${row.id}`, createdAt: row.created_at, userName: row.user_name || '', userEmail: row.user_email || '', sessionId: row.session_id || '',
         ...meta, queryLogId: meta.queryLogId || null, title: meta.title || 'Unknown snippet',
