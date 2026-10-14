@@ -32,14 +32,38 @@ export default async function handler(req, res) {
     const sb = supabaseAdmin();
     const result = await withSyncLease(sb, 'manual', () => syncStep(sb, { intercomToken, openaiKey, geminiKeys, embeddingProvider }));
     if (result.locked) return res.status(202).json({ phase: 'waiting', done: false, ...result });
+    // Log every productive indexing batch and every completed detection pass to
+    // sync_logs so admins can see a full history. Skip status-only calls.
+    if (result.phase === 'indexing' && (result.processed || 0) > 0) {
+      const now = new Date().toISOString();
+      try {
+        await sb.from('sync_logs').insert({
+          trigger: 'manual', status: 'partial', started_at: now, finished_at: now,
+          duration_ms: result.durationMs || 0, articles_indexed: result.processed || 0,
+          chunks_written: result.chunkCount || 0, steps: 1,
+          sample_titles: result.sampleTitles || [], error: null
+        });
+        // Keep only last 7 days of log entries to avoid table bloat
+        await sb.from('sync_logs').delete().lt('started_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString());
+      } catch { /* logging must never break the sync */ }
+    }
     // The interactive checker makes several small requests. Record a manual
     // completion only after its final no-difference verification pass, so the
     // homepage never mistakes a half-finished batch for a completed update.
     if (result.done) {
       const finishedAt = new Date().toISOString();
-      await sb.from('settings').upsert([
-        { key: 'last_manual_sync_at', value: finishedAt },
-        { key: 'last_manual_sync_summary', value: JSON.stringify({ at: finishedAt, trigger: 'manual', status: 'success', changed: 0, indexed: 0, deleted: result.deleted || 0 }) }
+      await Promise.all([
+        sb.from('settings').upsert([
+          { key: 'last_manual_sync_at', value: finishedAt },
+          { key: 'last_manual_sync_summary', value: JSON.stringify({ at: finishedAt, trigger: 'manual', status: 'success', changed: result.changedFound || 0, indexed: result.processed || 0, deleted: result.deleted || 0 }) }
+        ]),
+        sb.from('sync_logs').insert({
+          trigger: 'manual', status: 'success', started_at: finishedAt, finished_at: finishedAt,
+          duration_ms: result.durationMs || 0, articles_scanned: result.scanned || 0,
+          articles_changed: result.changedFound || 0, articles_deleted: result.deleted || 0,
+          articles_indexed: result.processed || 0, chunks_written: result.chunkCount || 0,
+          steps: 1, sample_titles: result.sampleTitles || [], error: null
+        }).catch(() => {})
       ]);
     }
     return res.status(200).json(result);
