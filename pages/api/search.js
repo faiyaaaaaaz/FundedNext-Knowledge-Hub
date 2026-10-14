@@ -1,6 +1,6 @@
 import {
   authenticateRequest, getKeys, getPrompt, supabaseAdmin, openaiEmbed, getEmbeddings,
-  openaiChatDetailed, getBrandingRules, brandingInstructions,
+  openaiChatDetailed, geminiChatDetailed, getBrandingRules, brandingInstructions,
   applyBrandingReplacements, getRelevantSnippets, logActivity as createActivity,
   expandConcepts, clarifyQuery, correctTypos, runCalculators,
   sha256, getGroqKeys, verifyGrounding, getPublishedScopeCatalog, modelsMentioned, getArticleScopeOverrides,
@@ -259,7 +259,7 @@ export default async function handler(req, res) {
       return sendJson({ ...body, queryLogId: requestLogId });
     };
 
-    const { openaiKey, groqKey, geminiKeys, embeddingProvider, chatModel, chatProvider, smartRetrieval, normalUserGptFallback, adminAutoFallback, fallbackProvider, fallbackModel } = await getKeys();
+    const { openaiKey, groqKey, geminiKeys, geminiKeyPool, embeddingProvider, chatModel, chatProvider, smartRetrieval, normalUserGptFallback, adminAutoFallback, fallbackProvider, fallbackModel } = await getKeys();
 
     // Groq key pool for rotation; a single primary key powers the small helper
     // calls (query clarify, calculator extraction, grounding check).
@@ -302,6 +302,7 @@ export default async function handler(req, res) {
     const hasEmbeddingKey = embeddingProvider === 'gemini' ? (geminiKeys && geminiKeys.length > 0) : !!openaiKey;
     if (!hasEmbeddingKey) return res.status(400).json({ error: `No ${embeddingProvider === 'gemini' ? 'Gemini' : 'OpenAI'} embedding key is saved yet. Add it in Admin.` });
     if (chatProvider === 'groq' && !groqPool.length && !groqPrimary) return res.status(400).json({ error: 'Groq is selected, but no Groq key is saved. Add one in Admin → Groq keys.' });
+    if (chatProvider === 'gemini' && !(geminiKeyPool && geminiKeyPool.length)) return res.status(400).json({ error: 'Gemini is selected, but no Gemini keys are saved. Add them in Admin → Gemini API keys.' });
 
     const sb = supabaseAdmin();
     const [scopeCatalog, articleScopeOverrides, articleRegionScopes] = await Promise.all([
@@ -1123,6 +1124,11 @@ export default async function handler(req, res) {
       return tracedAnswerCall(openaiKey, fallbackModel, fallbackMessages);
     };
     const runAnswerRecovery = async (retryMessages) => {
+      if (answerProvider === 'gemini') {
+        const pool = geminiKeyPool && geminiKeyPool.length ? geminiKeyPool : geminiKeys.map((k, i) => ({ name: `Key ${i + 1}`, key: k }));
+        const model = usedFallback ? fallbackModel : chatModel;
+        return geminiChatDetailed(pool, model, retryMessages);
+      }
       if (answerProvider !== 'groq') {
         const model = usedFallback ? fallbackModel : chatModel;
         return tracedAnswerCall(openaiKey, model, retryMessages);
@@ -1216,6 +1222,37 @@ export default async function handler(req, res) {
           });
         }
       }
+    } else if (chatProvider === 'gemini') {
+      const pool = geminiKeyPool && geminiKeyPool.length ? geminiKeyPool : geminiKeys.map((k, i) => ({ name: `Key ${i + 1}`, key: k }));
+      let lastGeminiErr = null;
+      try {
+        completion = await geminiChatDetailed(pool, chatModel, messages);
+        answerProvider = 'gemini';
+      } catch (primaryError) {
+        lastGeminiErr = primaryError;
+        if (canFallback) {
+          try {
+            completion = await runConfiguredFallback();
+            answerProvider = fallbackProvider;
+            usedFallback = true;
+          } catch (e) { lastGeminiErr = e; }
+        }
+        if (!completion) {
+          const limited = isLimit(lastGeminiErr);
+          await logActivity({
+            actorRole: access.role, sessionId: access.sessionId,
+            userName: access.name, userEmail: access.email, authProvider: access.authProvider,
+            questionWordCount: wordCount(question), eventType: 'query',
+            provider: 'gemini', model: chatModel, success: false,
+            metadata: { reason: limited ? 'All Gemini keys rate limited' : 'Gemini request failed', durationMs: Date.now() - started }
+          });
+          return res.status(limited ? 429 : 502).json({
+            error: limited
+              ? 'All Gemini keys have reached their usage limit right now. Please wait a moment and try again.'
+              : 'Gemini could not complete the answer. Please try again shortly, or check the selected model in Admin.'
+          });
+        }
+      }
     } else {
       try {
         completion = await tracedAnswerCall(openaiKey, chatModel, messages);
@@ -1243,7 +1280,7 @@ export default async function handler(req, res) {
       const retryQuestion =
         `Customer questions:\n${topicPlan.map((topic, index) => `${index + 1}. ${topic.question}`).join('\n')}\n\n` +
         `FAQ evidence:\n${recoveryContext || context}`;
-      if (answerProvider === 'groq' ? (groqPool.length || usedGroqKey) : openaiKey) {
+      if (answerProvider === 'groq' ? (groqPool.length || usedGroqKey) : answerProvider === 'gemini' ? (geminiKeyPool && geminiKeyPool.length) : openaiKey) {
         const retryMessages = [
           { role: 'system', content: retrySystem },
           { role: 'user', content: retryQuestion }
@@ -1292,7 +1329,7 @@ export default async function handler(req, res) {
     const declaredSourceNumbers = parseNumbers(sourceLine).filter((number) => !!matches[number - 1]);
     const needsCitationRecovery = !declaredSourceNumbers.length;
     if (needsCitationRecovery && !allDraftTopicsUnconfirmed && cleanAnswer(raw) !== SAFE_UNCONFIRMED && cleanAnswer(raw).length > 80 && matches.length) {
-      if (answerProvider === 'groq' ? (groqPool.length || usedGroqKey) : openaiKey) {
+      if (answerProvider === 'groq' ? (groqPool.length || usedGroqKey) : answerProvider === 'gemini' ? (geminiKeyPool && geminiKeyPool.length) : openaiKey) {
         const retryMessages = [
           { role: 'system', content: system + '\n\nCITATION RECOVERY: Rewrite using only directly supporting numbered passages. Remove every unsupported claim, including illustrative account-model examples. Every factual answer paragraph must have one or more matching source numbers in its SEGMENTS group; do not leave any group blank. Provide usable SOURCES and SEGMENTS lines.' },
           { role: 'user', content: `${askedText}\n\nPrevious draft:\n${cleanAnswer(raw)}\n\nEvidence:\n${recoveryContext || context}` }
