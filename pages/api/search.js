@@ -259,7 +259,7 @@ export default async function handler(req, res) {
       return sendJson({ ...body, queryLogId: requestLogId });
     };
 
-    const { openaiKey, groqKey, geminiKey, embeddingProvider, chatModel, chatProvider, smartRetrieval, normalUserGptFallback, adminAutoFallback, fallbackProvider, fallbackModel } = await getKeys();
+    const { openaiKey, groqKey, geminiKeys, embeddingProvider, chatModel, chatProvider, smartRetrieval, normalUserGptFallback, adminAutoFallback, fallbackProvider, fallbackModel } = await getKeys();
 
     // Groq key pool for rotation; a single primary key powers the small helper
     // calls (query clarify, calculator extraction, grounding check).
@@ -298,8 +298,9 @@ export default async function handler(req, res) {
         confidence, confidenceLabel: label, usedCalculator: true
       });
     }
-    const embeddingKey = embeddingProvider === 'gemini' ? geminiKey : openaiKey;
-    if (!embeddingKey) return res.status(400).json({ error: `No ${embeddingProvider === 'gemini' ? 'Gemini' : 'OpenAI'} embedding key is saved yet. Add it in Admin.` });
+    const embeddingKey = embeddingProvider === 'gemini' ? geminiKeys : openaiKey;
+    const hasEmbeddingKey = embeddingProvider === 'gemini' ? (geminiKeys && geminiKeys.length > 0) : !!openaiKey;
+    if (!hasEmbeddingKey) return res.status(400).json({ error: `No ${embeddingProvider === 'gemini' ? 'Gemini' : 'OpenAI'} embedding key is saved yet. Add it in Admin.` });
     if (chatProvider === 'groq' && !groqPool.length && !groqPrimary) return res.status(400).json({ error: 'Groq is selected, but no Groq key is saved. Add one in Admin → Groq keys.' });
 
     const sb = supabaseAdmin();
