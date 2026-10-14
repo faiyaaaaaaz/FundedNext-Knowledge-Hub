@@ -29,9 +29,10 @@ export default async function handler(req, res) {
 
   try {
     const cfg = await getAutoSyncConfig(sb);
-    const { intercomToken, openaiKey } = await getKeys();
-    if (!intercomToken || !openaiKey) {
-      return res.status(200).json({ ran: false, reason: 'Intercom or OpenAI key is not set yet.' });
+    const { intercomToken, openaiKey, geminiKey, embeddingProvider } = await getKeys();
+    const embeddingKey = embeddingProvider === 'gemini' ? geminiKey : openaiKey;
+    if (!intercomToken || !embeddingKey) {
+      return res.status(200).json({ ran: false, reason: `Intercom or ${embeddingProvider === 'gemini' ? 'Gemini' : 'OpenAI'} embedding key is not set yet.` });
     }
 
     const { count: queuedCount } = await sb
@@ -61,7 +62,7 @@ export default async function handler(req, res) {
     // Stay safely under the platform limit while draining as much as possible.
     const budgetMs = 50000;
     const trigger = manual ? 'manual' : 'auto';
-    const result = await withSyncLease(sb, trigger, () => runAutoSync(sb, { intercomToken, openaiKey }, { trigger, budgetMs }));
+    const result = await withSyncLease(sb, trigger, () => runAutoSync(sb, { intercomToken, openaiKey, geminiKey, embeddingProvider }, { trigger, budgetMs }));
     if (result.locked) return res.status(202).json({ ran: false, trigger, ...result });
     return res.status(200).json({ ran: true, trigger, ...result });
   } catch (e) {
