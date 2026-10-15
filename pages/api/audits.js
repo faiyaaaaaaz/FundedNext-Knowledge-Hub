@@ -6,7 +6,7 @@ import {
   canManageAudits, canUseAudits, conversationTurns, deriveMetrics, fetchConversation,
   fetchIntercomAdmins, findConversationCandidates, getAuditAccessConfig,
   getAuditAgentConfig, getAuditModels, meaningfulAgentIds, parseConversationIds,
-  redactConversation, retrieveAuditEvidence, runAuditModel, sampleCandidates,
+  redactConversation, restoreAuditTokens, retrieveAuditEvidence, runAuditModel, sampleCandidates,
   saveAuditAccessConfig, saveAuditAgentConfig, saveAuditModels
 } from '../../lib/audits';
 
@@ -53,7 +53,8 @@ async function updateJob(sb, row, patch) {
 }
 
 function intercomLink(conversation) {
-  return conversation?.source?.url || `https://app.intercom.com/a/inbox/_/inbox/search?query=${encodeURIComponent(conversation?.id || '')}`;
+  return conversation?.links?.conversation_web || conversation?.links?.conversation || conversation?.conversation_web_url ||
+    `https://app.intercom.com/a/inbox/_/inbox/search?query=${encodeURIComponent(conversation?.id || '')}`;
 }
 
 async function insertResult(sb, access, metadata, success = true) {
@@ -159,9 +160,10 @@ async function processNext(access, sb, jobId) {
       const metrics = deriveMetrics(conversation, turns, targetId);
       row = await updateJob(sb, row, { stage: `Scoring ${agent.name} with evidence`, currentConversationId: item.id });
       const model = await runAuditModel({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgent: { token: redacted.agentTokens[targetId] || '[TARGET_AGENT]', conversationAt: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '' } }, sb);
+      const restoredAudit = restoreAuditTokens(model.audit, redacted.tokenReplacements);
       const result = await insertResult(sb, access, {
         jobId: String(jobId), status: 'completed', conversationId: String(item.id), conversationDate: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '',
-        agentId: targetId, agentName: agent.name, intercomLink: intercomLink(conversation), audit: model.audit, metrics,
+        agentId: targetId, agentName: agent.name, intercomLink: intercomLink(conversation), audit: restoredAudit, metrics,
         evidence: knowledge.evidence.map(({ kind, id, title, url, postedAt }) => ({ kind, id, title, url, postedAt })), evidenceRetrievedAt: knowledge.retrievedAt,
         redactionCount: redacted.redactionCount, rubricVersion: AUDIT_RUBRIC_VERSION, provider: 'gemini', model: model.model,
         keyName: model.keyName, keyFingerprint: model.keyFingerprint, routeAttempts: model.attempts, usage: model.usage
@@ -176,6 +178,7 @@ async function processNext(access, sb, jobId) {
     });
     // The replacement map was scoped to this request and becomes unreachable here.
     redacted.ephemeralMap.clear();
+    redacted.tokenReplacements.clear();
     return { job: publicJob(row), processed: { conversationId: item.id, status: 'completed', evaluations: produced.length }, results: produced };
   } catch (error) {
     const attempts = Number(item.attempts || 0) + 1;
