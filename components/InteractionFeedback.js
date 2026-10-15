@@ -19,8 +19,12 @@ export default function InteractionFeedback(){
    const method=String(options?.method||input?.method||'GET').toUpperCase();
    // A confirmation dialog or file read can precede a write request. Keep its
    // click association longer; background GET polling uses a short window.
-   const action=intent&&Date.now()-intent.at<(method==='GET'?800:30000)&&url.origin===location.origin&&url.pathname.startsWith('/api/')?intent:null;
+   const action=intent&&Date.now()-intent.at<(method==='GET'?800:5000)&&url.origin===location.origin&&url.pathname.startsWith('/api/')?intent:null;
    if(!action)return original.call(window,input,options);
+   // One click owns one request. Background health/version polling that starts
+   // moments later must never inherit this button's toast or turn its own abort
+   // into a false "Request cancelled" message for the user's action.
+   intent=null;
    action.count++;pending.set(action.id,action);action.button.dataset.requestPending='true';action.button.setAttribute('aria-busy','true');show(action.label+' — working…');
    try{
     const response=await original.call(window,input,options);
