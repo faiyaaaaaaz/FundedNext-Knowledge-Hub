@@ -197,6 +197,73 @@ function directlyStatesMinimumTradingRequirement(item) {
     /\b(?:separate|calendar|trading) days?\b|\bminimum trading\b|\bminimum of \d+ trades?\b/.test(value);
 }
 
+function normalizedEvidenceText(value) {
+  return String(value || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function evidenceProduct(item, override, catalog) {
+  if (override?.product) return override.product;
+  const url = normalizedEvidenceText(item?.article_url).toLowerCase();
+  if (/helpfutures\.fundednext\.com/.test(url)) return 'futures';
+  const title = normalizedEvidenceText(item?.article_title);
+  const titleModels = modelsMentioned(title, catalog);
+  const futuresOnlyModel = titleModels.length > 0 && titleModels.every((model) => model.product === 'futures');
+  const futuresTitle = /\bfundednext\W*futures\b/i.test(title) || /\bfutures\W+(?:account|challenge|model|rules?|payout|withdraw|loss|kyc)\b/i.test(title);
+  if (futuresOnlyModel || futuresTitle) return 'futures';
+  if (/help\.fundednext\.com/.test(url)) return 'cfd';
+  return null;
+}
+
+function ruleIntent(text) {
+  const value = normalizedEvidenceText(text).toLowerCase();
+  return {
+    dailyLoss: /\b(?:daily|today'?s?|permitted)\b.{0,30}\b(?:loss|drawdown|limit)\b|\b(?:loss|drawdown)\b.{0,20}\b(?:daily|permitted)\b/.test(value),
+    maximumLoss: /\b(?:maximum|max|overall)\b.{0,30}\b(?:loss|drawdown|limit|mll)\b|\bmll\b/.test(value),
+    minimumTrading: asksMinimumTradingRequirement(value)
+  };
+}
+
+function directIntentScore(item, intent) {
+  const title = normalizedEvidenceText(item?.article_title).toLowerCase();
+  const content = normalizedEvidenceText(item?.content).toLowerCase();
+  let score = 0;
+  if (intent.dailyLoss) {
+    if (/\b(?:daily|permitted)\b.{0,25}\bloss\b|\bloss\b.{0,20}\b(?:daily|permitted)\b/.test(title)) score += 42;
+    else if (/\b(?:daily|permitted)\b.{0,25}\bloss\b/.test(content)) score += 12;
+  }
+  if (intent.maximumLoss) {
+    if (/\b(?:maximum|max|overall)\b.{0,25}\bloss\b|\bmll\b/.test(title)) score += 42;
+    else if (/\b(?:maximum|max|overall)\b.{0,25}\bloss\b|\bmll\b/.test(content)) score += 12;
+  }
+  if (intent.minimumTrading) {
+    if (/\bminimum\b.{0,25}\b(?:trades?|trading days?)\b|\btrading days?\b.{0,20}\bminimum\b/.test(title)) score += 42;
+    else if (directlyStatesMinimumTradingRequirement(item)) score += 18;
+  }
+  return score;
+}
+
+function hasDirectRuleEvidence(items, intent) {
+  return (items || []).some((item) => {
+    const text = normalizedEvidenceText(`${item?.article_title || ''}\n${item?.content || ''}`).toLowerCase();
+    if (intent.dailyLoss && /\b(?:daily|permitted)\b.{0,60}\bloss\b/.test(text) && /\b\d+(?:\.\d+)?%\b|\binitial balance\b/.test(text)) return true;
+    if (intent.maximumLoss && /\b(?:maximum|max|overall)\b.{0,60}\bloss\b|\bmll\b/.test(text) && /\b\d+(?:\.\d+)?%\b|\binitial balance\b/.test(text)) return true;
+    if (intent.minimumTrading && directlyStatesMinimumTradingRequirement(item)) return true;
+    return false;
+  });
+}
+
+function snippetFitsScope(snippet, { selectedProduct, selectedModel, comparisonModels, catalog }) {
+  const text = `${snippet?.title || ''}\n${snippet?.instruction || ''}`;
+  const mentioned = modelsMentioned(text, catalog);
+  if (!mentioned.length) return true;
+  const familyModels = mentioned.filter((model) => selectedProduct === 'both' || model.product === selectedProduct);
+  const outsideOnly = selectedProduct !== 'both' && familyModels.length === 0;
+  if (outsideOnly) return false;
+  if (selectedModel) return familyModels.some((model) => model.slug === selectedModel.slug);
+  if (comparisonModels?.length) return familyModels.every((model) => comparisonModels.some((requested) => requested.slug === model.slug));
+  return false;
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   const started = Date.now();
@@ -328,6 +395,15 @@ export default async function handler(req, res) {
       });
     }
     const questionModels = modelsMentioned(question, scopeCatalog.models);
+    const questionProduct = /\bfundednext\W*futures\b|\bfutures\W+(?:account|challenge|model|rules?)\b/i.test(normalizedEvidenceText(question)) ? 'futures' : null;
+    const productConflict = selectedProduct !== 'both' && (questionProduct && questionProduct !== selectedProduct || questionModels.some((item) => item.product !== selectedProduct));
+    if (productConflict) {
+      return res.status(200).json({
+        scopeNotice: true,
+        noticeTitle: 'Your question and selected product do not match',
+        notice: `The selector is set to ${selectedProduct.toUpperCase()}, but the question names a ${questionProduct === 'futures' || questionModels.some((item) => item.product === 'futures') ? 'Futures' : 'CFD'} product or Account model. Change the Product selector before asking again.`
+      });
+    }
     const conflictingModel = selectedModelFromUi && questionModels.find((item) => item.slug !== selectedModelFromUi.slug);
     if (conflictingModel) {
       return res.status(200).json({
@@ -381,6 +457,8 @@ export default async function handler(req, res) {
       });
     }
     const clearQuestion = (clarity?.clear && clarity.clear.length > 3) ? clarity.clear : question;
+    const requestedRuleIntent = ruleIntent(clearQuestion || question);
+    const allModelRuleOverview = !selectedModel && (requestedRuleIntent.dailyLoss || requestedRuleIntent.maximumLoss);
     const clarificationQuestionMarks = (question.match(/\?/g) || []).length;
     const explicitMultiPart = (clarity?.topics?.length || 0) > 1 || clarificationQuestionMarks > 1 ||
       /\b(?:also|and (?:can|could|do|does|how|what|when|where|why|is|are|will|would)|second(?:ly)?|another question)\b/i.test(question);
@@ -521,11 +599,39 @@ export default async function handler(req, res) {
     const terms = keywords(correctTypos(question) + ' ' + clearQuestion + (selectedModel ? ` ${selectedModel.name}` : ''));
     let keywordMatches = [];
     if (terms.length) {
-      const expression = terms.map((term) => `content.ilike.%${term}%`).join(',');
+      const expression = terms.slice(0, 14).flatMap((term) => [`content.ilike.%${term}%`, `article_title.ilike.%${term}%`]).join(',');
       const { data } = await sb.from('chunks')
         .select('id,article_id,article_title,article_url,content')
         .or(expression).limit(80);
       keywordMatches = data || [];
+    }
+    // Reserve authoritative-looking rule pages before semantic ranking. This is
+    // still live database evidence: no policy value is hardcoded here. It keeps
+    // short questions from being dominated by campaign pages that merely repeat
+    // the selected model name many times.
+    const anchorQueries = [];
+    if (requestedRuleIntent.dailyLoss) {
+      anchorQueries.push(sb.from('chunks').select('id,article_id,article_title,article_url,content')
+        .or('article_title.ilike.%daily%loss%,article_title.ilike.%permitted%loss%').limit(80));
+    }
+    if (requestedRuleIntent.maximumLoss) {
+      anchorQueries.push(sb.from('chunks').select('id,article_id,article_title,article_url,content')
+        .or('article_title.ilike.%maximum%loss%,article_title.ilike.%overall%loss%').limit(80));
+    }
+    if (selectedModel) {
+      const modelNeedle = normalizedEvidenceText(selectedModel.name).replace(/[^a-z0-9 -]/gi, ' ').replace(/\s+/g, ' ').trim();
+      if (modelNeedle) anchorQueries.push(sb.from('chunks').select('id,article_id,article_title,article_url,content')
+        .or(`article_title.ilike.%${modelNeedle}%,content.ilike.%${modelNeedle}%`).limit(80));
+    }
+    if (anchorQueries.length) {
+      const anchorResults = await Promise.allSettled(anchorQueries);
+      const seenKeyword = new Set(keywordMatches.map((item) => String(item.id)));
+      for (const result of anchorResults) {
+        if (result.status !== 'fulfilled' || result.value?.error) continue;
+        for (const item of result.value?.data || []) {
+          if (!seenKeyword.has(String(item.id))) { seenKeyword.add(String(item.id)); keywordMatches.push(item); }
+        }
+      }
     }
     const competitionMinimumQuestion = selectedModel?.slug === 'competition' && asksMinimumTradingRequirement(clearQuestion || question);
     // Competition rules are account-specific. Semantic recall was finding a
@@ -577,7 +683,14 @@ export default async function handler(req, res) {
     };
 
     await logActivity({ metadata: { stage: 'Searching source articles', durationMs: Date.now() - started } });
-    const vectors = await getEmbeddings(embeddingProvider, embeddingKey, embedTexts);
+    let vectors = [];
+    let semanticSearchError = null;
+    try {
+      vectors = await getEmbeddings(embeddingProvider, embeddingKey, embedTexts);
+    } catch (error) {
+      semanticSearchError = String(error?.message || error).replace(/(?:AIza|sk-)[A-Za-z0-9_-]+/g, '[redacted]').slice(0, 300);
+      await logActivity({ metadata: { stage: 'Semantic search unavailable; using keyword evidence', semanticSearchError, durationMs: Date.now() - started } });
+    }
     const combined = new Map();
     const vectorMatches = [];
     for (const item of keywordMatches) combined.set(String(item.id), item);
@@ -609,7 +722,15 @@ export default async function handler(req, res) {
       const exactTitleScore = intentTerms.length ? (titleHits / intentTerms.length) * 14 + (titleHits >= Math.min(3, intentTerms.length) ? 6 : 0) : 0;
       const scopeScore = scope ? (title.includes(scope) ? 18 : content.includes(scope) ? 8 : hasOtherScope(`${title} ${content}`, scope) ? -18 : 0) : 0;
       const vectorScore = Number(item.similarity || 0) * 8;
-      return { ...item, _rank: termScore + exactTitleScore + scopeScore + vectorScore, _scoped: !!scope && (title.includes(scope) || content.includes(scope)) };
+      const intentScore = directIntentScore(item, requestedRuleIntent);
+      const candidateModels = modelsMentioned(`${item.article_title || ''}\n${item.content || ''}`, scopeCatalog.models);
+      const exactModelMatch = !!selectedModel && candidateModels.some((model) => model.slug === selectedModel.slug);
+      // Exact selected-model evidence must outrank a generic rule page even when
+      // the generic title matches more query words. This prevents a correct
+      // number from being attributed to a source that never states it for the
+      // selected Account model.
+      const exactModelScore = exactModelMatch ? 64 : 0;
+      return { ...item, _rank: termScore + exactTitleScore + scopeScore + vectorScore + intentScore + exactModelScore, _scoped: exactModelMatch || (!!scope && (title.includes(scope) || content.includes(scope))) };
     }).sort((a, b) => b._rank - a._rank);
 
     // Enforce the UI selection before evidence reaches the answering model.
@@ -644,13 +765,7 @@ export default async function handler(req, res) {
       // Primary: authoritative help-centre domain. Secondary: articles on the CFD
       // domain whose title is specifically about FundedNext Futures (not a comparison
       // article) are Futures content cross-posted there and must not appear in CFD answers.
-      const titleIsFuturesSpecific = /help\.fundednext\.com/i.test(articleUrl) &&
-        /\bFundedNext\s+Futures\b/i.test(String(item.article_title || '')) &&
-        !/\bCFD\b/i.test(String(item.article_title || ''));
-      const sourceProduct = override?.product ||
-        (/helpfutures\.fundednext\.com/i.test(articleUrl) ? 'futures' :
-          (titleIsFuturesSpecific ? 'futures' :
-            /help\.fundednext\.com/i.test(articleUrl) ? 'cfd' : null));
+      const sourceProduct = evidenceProduct(item, override, scopeCatalog.models);
       // Product isolation is determined by the authoritative help-centre domain,
       // explicit Admin assignment, or the article title (for Futures-specific
       // content cross-published on the CFD help centre domain).
@@ -666,7 +781,8 @@ export default async function handler(req, res) {
         // safely unanswered instead of borrowing a convenient model answer.
         const namedInSelectedProduct = mentioned.filter((model) => selectedProduct === 'both' || model.product === selectedProduct);
         const specificallyAssigned = override?.model && override.model !== 'all';
-        if (!comparisonModels.length && (specificallyAssigned || namedInSelectedProduct.length)) {
+        const comparisonEvidence = allModelRuleOverview && namedInSelectedProduct.length >= 2;
+        if (!comparisonModels.length && !comparisonEvidence && (specificallyAssigned || namedInSelectedProduct.length)) {
           const named = specificallyAssigned ? override.model : namedInSelectedProduct.map((model) => model.slug).join(', ');
           rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: `Model-specific FAQ excluded until the customer selects or names an Account model (${named})`, similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
           return false;
@@ -899,7 +1015,7 @@ export default async function handler(req, res) {
     try {
       if (await noticesAccess(access, sb)) {
         const { matches: nMatches, escalations, rejected: nRejected } = await retrieveNotices(sb, {
-          openaiKey: embeddingKey,
+          openaiKey,
           embeddingProvider,
           question: clearQuestion || question,
           product: selectedProduct,
@@ -950,7 +1066,9 @@ export default async function handler(req, res) {
     // Reviewed corrections can carry captured FAQ evidence. Apply the same
     // regional gate to that provenance so snippets cannot re-introduce an FAQ
     // that the main retrieval filter correctly rejected.
-    const snippets = rawSnippets.map((snippet) => {
+    const snippets = rawSnippets.filter((snippet) => snippetFitsScope(snippet, {
+      selectedProduct, selectedModel, comparisonModels, catalog: scopeCatalog.models
+    })).map((snippet) => {
       const evidence = snippet._evidence || [];
       const annotated = evidence.map((source) => ({ ...source, _regionScope: regionScopeFor(sourceArticleId(source)) }));
       const applicable = annotated.filter((source) => regionIsApplicable(source._regionScope));
@@ -1287,7 +1405,9 @@ export default async function handler(req, res) {
     let allDraftTopicsUnconfirmed = !!draftCoverage?.length && draftCoverage.every((status) => status === 'not_confirmed');
     // Correct the occasional whole-answer refusal when at least part of a
     // multi-part question has evidence. Genuine no-evidence cases are not retried.
-    if (topicPlan.length > 1 && !allDraftTopicsUnconfirmed && (cleanAnswer(raw) === SAFE_UNCONFIRMED || (cleanAnswer(raw).length < 300 && /(?:unable|cannot|can't|could not).{0,65}(?:confirm|answer)|allow me some time|please.*time.*verify/i.test(cleanAnswer(raw)))) && matches.length) {
+    const refusalDraft = cleanAnswer(raw) === SAFE_UNCONFIRMED || (cleanAnswer(raw).length < 300 && /(?:unable|cannot|can't|could not).{0,65}(?:confirm|answer)|allow me some time|please.*time.*verify/i.test(cleanAnswer(raw)));
+    const directRuleEvidenceAvailable = hasDirectRuleEvidence(matches, requestedRuleIntent);
+    if (refusalDraft && matches.length && (directRuleEvidenceAvailable || (topicPlan.length > 1 && !allDraftTopicsUnconfirmed))) {
       partialAnswerRetryAttempted = true;
       const retrySystem = system +
         '\n\nREQUIRED PARTIAL-ANSWER RECOVERY: The first draft refused despite relevant evidence. ' +
@@ -1604,7 +1724,7 @@ export default async function handler(req, res) {
           sourceDeclarationPresent: !!sourceLine,
           finalSources: sources.slice(0, 12).map((source) => ({ title: source.title, url: source.url, kind: source.kind }))
         },
-        processing: { partialAnswerRetryAttempted, partialAnswerRetrySucceeded, citationMappingRecovered, fallback: usedFallback, groundingScore },
+        processing: { partialAnswerRetryAttempted, partialAnswerRetrySucceeded, citationMappingRecovered, fallback: usedFallback, groundingScore, semanticSearchDegraded: !!semanticSearchError },
         snippetsUsed,
         questionCoverage, coverageSummary,
         noticeConflict: noticeConflictDetected ? { detected: true, resolution: 'A relevant CEx Notice overrode incompatible FAQ information.', noticeSources: sources.filter((source) => source.kind === 'notice').map((source) => source.title), faqSources: sources.filter((source) => source.kind === 'faq').map((source) => source.title) } : { detected: false },
