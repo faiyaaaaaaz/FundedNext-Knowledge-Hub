@@ -1224,6 +1224,7 @@ export default function Admin() {
 
   const navigation = [
     ['overview','▦','Overview'],
+    ['conversationaudit','◈','Conversation audit'],
     ['recovery', '↥', 'Restore from report'],
     ['messages','✉','Team inbox & reports'], ['modelreview','◎','Model discovery'],
     ['access', '⌁', 'Team access'], ['ai', '✦', 'AI & model'], ['branding', 'Aa', 'Brand Language'],
@@ -1274,6 +1275,7 @@ export default function Admin() {
         {pageIsLoading && <DataLoader title={`Loading ${titles[tab]}`} detail="Requesting the latest live workspace data…" />}
 
         {tab === 'overview' && <AdminOverview session={session} onNavigate={setTab} />}
+        {tab === 'conversationaudit' && <div className="settings-stack"><section className="settings-card"><div className="settings-head"><div><h2>Conversation Audit</h2><p>Pull Intercom conversations, score Customer Experience quality with current FAQ and Notice evidence, monitor live progress, and export organized reports.</p></div><span className="state-pill ready">Secure workspace</span></div><div className="diagnostic-download-grid"><div><b>Audit control</b><small>Select agents, date ranges, random samples, or exact conversation IDs.</small></div><div><b>Live resilience</b><small>Connection status, resumable jobs, Gemini key rotation and saved progress.</small></div><div><b>Supervisor reports</b><small>Compact CSV, detailed CSV and branded offline HTML reports.</small></div></div><Link className="btn btn-primary" href="/audits">Open Conversation Audit →</Link></section></div>}
         {tab === 'messages' && <AdminMessages session={session} />}
         {tab === 'modelreview' && <ModelReview session={session} />}
         {tab === 'recovery' && <DiagnosticRecovery session={session} />}
