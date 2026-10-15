@@ -30,16 +30,34 @@ function ScoreRing({ value }) {
   return <div className="score-ring" style={{ '--score': `${score * 10}%` }}><span><b>{score.toFixed(2).replace(/\.00$/, '')}</b><small>/10</small></span></div>;
 }
 
+function conversationHref(result) {
+  const saved = String(result?.intercomLink || '');
+  if (/^https:\/\/app\.intercom\.com\/a\/inbox\//i.test(saved)) return saved;
+  return `https://app.intercom.com/a/inbox/_/inbox/search?query=${encodeURIComponent(result?.conversationId || '')}`;
+}
+
+function CopyConversationId({ value }) {
+  const [copied, setCopied] = useState(false);
+  async function copy(event) {
+    event.preventDefault(); event.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(String(value || ''));
+      setCopied(true); window.setTimeout(() => setCopied(false), 1400);
+    } catch { /* The linked ID remains selectable if clipboard access is blocked. */ }
+  }
+  return <button type="button" className={`copy-conversation ${copied ? 'copied' : ''}`} onClick={copy} title="Copy conversation ID" aria-label={`Copy conversation ${value}`}>{copied ? 'Copied' : 'Copy'}</button>;
+}
+
 function ResultCard({ result }) {
   const [open, setOpen] = useState(false);
-  if (result.status !== 'completed') return <article className={`audit-result-card ${result.status}`}><div className="result-summary"><div><span>Conversation {result.conversationId}</span><h3>{result.status === 'skipped' ? 'Excluded from scoring' : 'Audit could not complete'}</h3><p>{result.skipReason || result.error}</p></div><span className="result-state">{result.status}</span></div></article>;
+  if (result.status !== 'completed') return <article className={`audit-result-card ${result.status}`}><div className="result-summary"><div><div className="result-conversation-line"><a href={conversationHref(result)} target="_blank" rel="noreferrer">Conversation {result.conversationId} ↗</a><CopyConversationId value={result.conversationId}/></div><h3>{result.status === 'skipped' ? 'Excluded from scoring' : 'Audit could not complete'}</h3><p>{result.skipReason || result.error}</p></div><span className="result-state">{result.status}</span></div></article>;
   const audit = result.audit || {};
   return <article className={`audit-result-card ${open ? 'open' : ''}`}>
-    <button className="result-summary" onClick={() => setOpen((value) => !value)} aria-expanded={open}>
-      <div className="result-agent"><span>Conversation {result.conversationId}</span><h3>{result.agentName}</h3><p>{audit.primaryIssue || 'Conversation audit'}</p></div>
+    <div className="result-summary">
+      <div className="result-agent"><div className="result-conversation-line"><a href={conversationHref(result)} target="_blank" rel="noreferrer">Conversation {result.conversationId} ↗</a><CopyConversationId value={result.conversationId}/></div><h3>{result.agentName}</h3><p>{audit.primaryIssue || 'Conversation audit'}</p></div>
       <div className="result-mini-scores"><span><small>Quality</small><b>{audit.quality}</b></span><span><small>Efficiency</small><b>{audit.efficiency}</b></span><span><small>Process</small><b>{audit.complexity}</b></span></div>
-      <ScoreRing value={audit.finalScore}/><i className="result-chevron">{open ? '−' : '+'}</i>
-    </button>
+      <ScoreRing value={audit.finalScore}/><button type="button" className="result-chevron" onClick={() => setOpen((value) => !value)} aria-expanded={open} aria-label={open ? 'Collapse audit details' : 'Expand audit details'}>{open ? '−' : '+'}</button>
+    </div>
     {open && <div className="result-detail">
       <div className="result-callout"><span>Main finding</span><p>{audit.mainFinding}</p></div>
       <div className="result-grid">
@@ -51,7 +69,7 @@ function ResultCard({ result }) {
         <section><span>Continuity</span><p>{audit.continuityFinding}</p></section>
       </div>
       <div className="coaching-block"><span>Coaching actions</span><ol>{(audit.coachingActions || []).map((item, index) => <li key={index}>{item}</li>)}</ol><b>Goal</b><p>{audit.goal}</p></div>
-      <div className="result-foot"><span className={audit.manualReview ? 'review-needed' : 'review-clear'}>{audit.manualReview ? 'Manual review required' : 'Automated review complete'}</span><span>{audit.confidence}% confidence</span><span>{result.model}</span><a href={result.intercomLink} target="_blank" rel="noreferrer">Open in Intercom ↗</a></div>
+      <div className="result-foot"><span className={audit.manualReview ? 'review-needed' : 'review-clear'}>{audit.manualReview ? 'Manual review required' : 'Automated review complete'}</span><span>{audit.confidence}% confidence</span><span>{result.model}</span><a href={conversationHref(result)} target="_blank" rel="noreferrer">Open in Intercom ↗</a></div>
     </div>}
   </article>;
 }
