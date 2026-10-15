@@ -258,7 +258,7 @@ export default function Audits() {
 
           <section className={`audit-card direct-card ${directMode ? 'engaged' : ''}`}>
             <div className="card-heading"><div><span>Direct audit</span><h2>Specific conversation IDs</h2><p>Enter one or multiple Intercom conversation IDs separated by commas or new lines.</p></div>{directMode && <b className="override-pill">Override active</b>}</div>
-            <textarea value={conversationIds} onChange={(event) => setConversationIds(event.target.value)} placeholder={'129503847, 129503912\n129504021'} rows={4}/>
+            <textarea value={conversationIds} onChange={(event) => setConversationIds(event.target.value)} placeholder={'Paste one or more real Intercom conversation IDs here…'} rows={4}/>
             {directMode && <div className="override-note"><i>↳</i><span><b>Direct conversation mode</b>Agent, date and random-sample filters below will be ignored.</span></div>}
           </section>
 
