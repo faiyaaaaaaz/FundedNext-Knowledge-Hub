@@ -2,6 +2,7 @@ import '../styles/globals.css';
 import '../styles/workspace.css';
 import '../styles/usability.css';
 import '../styles/knowledge-map.css';
+import '../styles/audits.css';
 import { useEffect } from 'react';
 import Head from 'next/head';
 import InteractionFeedback from '../components/InteractionFeedback';
