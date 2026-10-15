@@ -83,7 +83,11 @@ async function createJob(req, access, sb, body) {
   if (directInput) {
     mode = 'direct'; queue = directIds.map((id) => ({ id, targetAgentId: null, attempts: 0 }));
   } else {
-    const enabledIds = await getAuditAgentConfig(sb);
+    // A new installation has no saved allowlist yet. Use the same live Intercom
+    // directory that bootstrap uses so a visibly enabled seeded agent is valid
+    // on the very first audit run.
+    const liveAdmins = await fetchIntercomAdmins(keys.intercomToken);
+    const enabledIds = await getAuditAgentConfig(sb, liveAdmins);
     const requested = [...new Set((body.agentIds || []).map(String))].filter((id) => enabledIds.includes(id));
     if (!requested.length) throw new Error('Select at least one enabled Intercom agent.');
     const requestedSize = Math.max(1, Math.min(Number(body.sampleSize) || 10, 100));
