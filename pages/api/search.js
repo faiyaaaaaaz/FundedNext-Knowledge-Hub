@@ -641,12 +641,19 @@ export default async function handler(req, res) {
         : modelsMentioned(blob, scopeCatalog.models);
       const articleUrl = String(item.article_url || '');
       const internalKnowledge = String(item.article_id || '').startsWith('kb:') || item.kind === 'calculator';
+      // Primary: authoritative help-centre domain. Secondary: articles on the CFD
+      // domain whose title is specifically about FundedNext Futures (not a comparison
+      // article) are Futures content cross-posted there and must not appear in CFD answers.
+      const titleIsFuturesSpecific = /help\.fundednext\.com/i.test(articleUrl) &&
+        /\bFundedNext\s+Futures\b/i.test(String(item.article_title || '')) &&
+        !/\bCFD\b/i.test(String(item.article_title || ''));
       const sourceProduct = override?.product ||
         (/helpfutures\.fundednext\.com/i.test(articleUrl) ? 'futures' :
-          /help\.fundednext\.com/i.test(articleUrl) ? 'cfd' : null);
-      // Product isolation is determined only by the authoritative help-centre
-      // domain or an explicit Admin assignment. Words inside an article can
-      // never move CFD evidence into Futures (or the reverse).
+          (titleIsFuturesSpecific ? 'futures' :
+            /help\.fundednext\.com/i.test(articleUrl) ? 'cfd' : null));
+      // Product isolation is determined by the authoritative help-centre domain,
+      // explicit Admin assignment, or the article title (for Futures-specific
+      // content cross-published on the CFD help centre domain).
       if (!internalKnowledge && selectedProduct !== 'both' && sourceProduct !== selectedProduct) {
         rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: `Wrong product: ${sourceProduct || 'unknown'} evidence for ${selectedProduct}`, similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
         return false;
@@ -666,15 +673,21 @@ export default async function handler(req, res) {
         }
         return true;
       }
-      // Unlike general CFD policy, Competition is a distinct event account.
-      // It must be named by the evidence (or explicitly assigned by an Admin);
-      // an article about a FundedNext Account, a Challenge, or a payout cannot
-      // silently become a Competition rule just because all are CFD.
+      // Competition is a distinct event account. Competition-specific rules must
+      // come from evidence that explicitly names Competition. However, product-wide
+      // CFD policy articles (those that name NO specific Account model) apply to
+      // Competition too — for foundational rules like loss limits, trading hour
+      // restrictions, or global eligibility that span all CFD account types.
       if (selectedModel.slug === 'competition') {
         const explicitlyCompetition = override?.model === 'competition' || /\bcompetition\b/i.test(`${blob}\n${articleUrl}`);
         if (!explicitlyCompetition) {
-          rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: 'Evidence does not explicitly apply to Competition', similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
-          return false;
+          const namedInProduct = mentioned.filter((m) => m.product === selectedProduct);
+          if (namedInProduct.length > 0) {
+            // Names a different model (e.g., Stellar 1-Step) — reject it.
+            rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: `Evidence does not explicitly apply to Competition (names: ${namedInProduct.map((m) => m.slug).join(', ')})`, similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
+            return false;
+          }
+          // Product-wide CFD policy (no specific model named) — allow as supplemental evidence.
         }
       }
       const normalizedTitle = String(item.article_title || '').toLowerCase().replace(/[–—]/g, '-');
@@ -1019,8 +1032,10 @@ export default async function handler(req, res) {
         '- Cite each correction passage in SOURCES and SEGMENTS exactly like FAQ evidence.'
       : '';
     const scopeText = `\n\nMANDATORY USER-SELECTED SCOPE: Product = ${selectedProduct.toUpperCase()}; Account model = ${selectedModel?.name || 'All models in the selected product family'}. ` +
-      'Every supplied evidence item has already passed this scope filter. Never mention, compare, or borrow a rule from an Account model or product outside this selection. ' +
-      'Product-wide policy evidence may be used only when it does not conflict with model-specific evidence. If a model-specific FAQ states an exception, restriction, or prohibition, it always overrides a general FAQ. Never infer permission for the selected model merely because a general article allows it for another model.';
+      'Every evidence item in this prompt has already been filtered — no wrong-product or wrong-model articles are present. ' +
+      `General product-wide policy articles (those that do not name any specific Account model) apply to ALL models in the selected product family, including ${selectedModel?.name || 'the selected model'}. You MUST use these to answer foundational questions unless a model-specific article explicitly overrides the rule for this model. ` +
+      `${selectedModel ? `Evidence that explicitly names ${selectedModel.name} takes highest priority over general policy. ` : ''}` +
+      'Never cite or apply a rule that is explicitly and exclusively stated for a DIFFERENT Account model. If a model-specific article states an exception or prohibition for the selected model, it overrides the general rule for that specific point only.';
     const regionText = regionIntent.included.length
       ? `\n\nMANDATORY GEOGRAPHIC SCOPE: The customer explicitly referred to ${regionIntent.included.join(', ')}. Regional evidence may be used only when its REGIONAL SCOPE tag matches. State the regional condition in the answer whenever it changes the result.`
       : '\n\nMANDATORY GEOGRAPHIC SCOPE: The customer did not identify a region. Regional-only Help Center evidence has been excluded. Answer from globally applicable evidence only; never infer that a regional restriction applies to everyone.';
@@ -1049,7 +1064,7 @@ export default async function handler(req, res) {
       ? '\n\nParts of this question are calculations. The evidence items titled "Trade Calculator" are EXACT computed results — reproduce their formula and final figures verbatim for those parts and do NOT recompute them. Answer the remaining parts from the FAQ evidence. Cover every part.'
       : '';
     const formatText = '\n\nWrite all formulas and math in plain text using × ÷ + − = and parentheses. Never use LaTeX or markup such as \\frac, \\text, \\[, \\], or any backslash command.';
-    const groundingText = '\n\nGROUNDING: Base your answer on the FAQ evidence above and prefer it over prior knowledge. If the evidence only partially covers the question, answer the part it supports and briefly note what is uncertain — you do not need to refuse. Only decline (and set CONFIDENCE low) if the evidence contains essentially nothing relevant to the question. Do not state specific rules, numbers, or permissions that are absent from the evidence, and do not cite a source that does not contain the claim.';
+    const groundingText = '\n\nGROUNDING: Base your answer on the FAQ evidence above and prefer it over prior knowledge. If the evidence only partially covers the question, answer the part it supports and briefly note what is uncertain — you do not need to refuse the whole answer. Only decline (set CONFIDENCE to 0 and SOURCES to none) if the evidence contains essentially nothing relevant to the question. Do not state specific rules, numbers, or permissions that are absent from the evidence, and do not cite a source that does not contain the claim. If the evidence provides a percentage, ratio, or formula rule, you may apply it to specific numbers the customer stated (e.g., calculating 5% of $15,000) — this IS evidence-supported and you must cite the source that states the rule.';
     // If the question is about a calculation (max lot, margin, pip value, lot
     // size, risk), push the model to use the calculator formulas that are in the
     // evidence and to ask for any missing number rather than assuming it.
