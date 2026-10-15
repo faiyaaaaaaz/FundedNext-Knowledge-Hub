@@ -1,5 +1,6 @@
 import { authenticateRequest, supabaseAdmin, getKeys, getLastSyncMarkers } from '../../lib/server';
 import { noticesAccess } from '../../lib/notices';
+import { canUseAudits } from '../../lib/audits';
 
 export function databaseHealthReading(response) {
   const row = Array.isArray(response?.data) ? response.data[0] : response?.data;
@@ -18,6 +19,7 @@ export default async function handler(req, res) {
     if (!access) return res.status(401).json({ error: 'Your session has ended.' });
     const sb = supabaseAdmin();
     const canReadNotices = access.role === 'admin' || await noticesAccess(access, sb);
+    const canAuditConversations = await canUseAudits(access, sb);
     const noticeResult = canReadNotices ? await sb.from('notices').select('title,posted_by,posted_at,source_url,updated_at').order('posted_at', { ascending: false }).limit(1) : null;
     const [articles, queued, chunks, latest, disputes, keys, syncMarkers, databaseHealth, noticesUpdated] = await Promise.all([
       sb.from('articles').select('*', { count: 'exact', head: true }),
@@ -49,6 +51,7 @@ export default async function handler(req, res) {
       lastManualSyncAt: syncMarkers.lastManualSyncAt || null,
       lastSyncSummary: syncMarkers.lastSummary || null,
       pendingDisputes: access.role === 'admin' ? (disputes.count || 0) : undefined,
+      canAuditConversations,
       answerProvider: keys.chatProvider,
       answerModel: keys.chatModel,
       automaticFallback: false,
