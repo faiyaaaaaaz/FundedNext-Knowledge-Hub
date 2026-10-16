@@ -286,7 +286,12 @@ export default function Home() {
     if (savedSession) {
       setSession(savedSession); setRole(savedRole);
       setIdentity({ name: localStorage.getItem('appName') || '', email: localStorage.getItem('appEmail') || '' });
-      loadStats(savedSession); loadScopes(savedSession);
+      try {
+        const cachedStats = JSON.parse(sessionStorage.getItem('workspaceHealthStats') || 'null');
+        if (cachedStats) { setStats(cachedStats); setStatsLoading(false); }
+        loadStats(savedSession, !!cachedStats);
+      } catch { loadStats(savedSession); }
+      loadScopes(savedSession);
     } else completeGoogleLogin();
     const savedTheme = localStorage.getItem('theme') || 'light';
     setTheme(savedTheme); document.documentElement.setAttribute('data-theme', savedTheme);
@@ -331,7 +336,11 @@ export default function Home() {
     try {
       const response = await fetch('/api/stats', { headers: { 'x-app-session': token } });
       if (response.status === 401) return logout();
-      if (response.ok) setStats(await response.json());
+      if (response.ok) {
+        const nextStats = await response.json();
+        setStats(nextStats);
+        try { sessionStorage.setItem('workspaceHealthStats', JSON.stringify(nextStats)); } catch {}
+      }
     } catch {} finally { setStatsLoading(false); }
   }
 
@@ -417,6 +426,7 @@ export default function Home() {
   function logout() {
     localStorage.removeItem('appSession'); localStorage.removeItem('appRole'); localStorage.removeItem('appPw');
     localStorage.removeItem('appName'); localStorage.removeItem('appEmail');
+    sessionStorage.removeItem('workspaceHealthStats');
     getSupabaseBrowser()?.auth.signOut().catch(() => {});
     fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ logout: true }) }).catch(() => {});
     setSession(''); setRole(''); setIdentity({ name: '', email: '' }); setMessages([]); setStats(null);
@@ -725,9 +735,9 @@ export default function Home() {
             <div className="rail-sync-feed">{syncState.details.slice(-4).map((detail, index) => <p key={`${detail}-${index}`}><i>{index === syncState.details.slice(-4).length - 1 ? '→' : '✓'}</i><span>{detail}</span></p>)}</div>
             {syncProgress.titles.length > 0 && <div className="rail-sync-latest"><span>Articles made searchable</span>{syncProgress.titles.slice(0, 3).map((title) => <small key={title}>{title}</small>)}</div>}
             <button className="rail-sync-cancel" onClick={() => { cancelRef.current = true; abortRef.current?.abort(); }}>Pause after this safe checkpoint</button>
-          </section> : statsLoading ? <DataLoader title="Checking knowledge health" detail="Connecting to Supabase and verifying the live index…" /> : <>
-            <div className="metric-card storage-health-card"><div className="storage-health-head"><span>Live database storage</span><strong>{stats?.storageHealth ? (stats.storageHealth.percentUsed == null ? formatStorage(stats.storageHealth.databaseBytes) : `${stats.storageHealth.percentUsed.toFixed(1)}%`) : 'Reading unavailable'}</strong></div>{stats?.storageHealth ? <>{stats.storageHealth.percentUsed != null && <div className="storage-health-track"><i style={{ width: `${Math.min(100, Math.max(0, stats.storageHealth.percentUsed))}%` }} /></div>}<small>{formatStorage(stats.storageHealth.databaseBytes)}{stats.storageHealth.databaseLimitBytes ? ` of ${formatStorage(stats.storageHealth.databaseLimitBytes)}` : ''} · database size measured live</small>{stats.storageHealth.databaseLimitBytes == null && role === 'admin' && <small>Set your database allowance in Admin → Restore from report to show a percentage.</small>}</> : <small>{stats?.storageHealthStatus === 'setup_required' && role === 'admin' ? 'Run the SQL supplied with Admin → Restore from report once to enable the live reading.' : 'The live database reading is temporarily unavailable.'}</small>}</div>
-            <div className="metric-card model-card"><span>Answering model</span><strong>{stats?.answerProvider === 'groq' ? 'Groq' : stats?.answerProvider === 'gemini' ? 'Gemini' : 'OpenAI'}</strong><small>{stats?.answerModel || 'Unavailable'}</small><em>Fallback controlled in Admin</em></div>
+          </section> : <>
+            <div className="metric-card storage-health-card"><div className="storage-health-head"><span>Live database storage</span><strong>{statsLoading && !stats ? 'Checking…' : stats?.storageHealth ? (stats.storageHealth.percentUsed == null ? formatStorage(stats.storageHealth.databaseBytes) : `${stats.storageHealth.percentUsed.toFixed(1)}%`) : 'Reading unavailable'}</strong></div>{stats?.storageHealth ? <>{stats.storageHealth.percentUsed != null && <div className="storage-health-track"><i style={{ width: `${Math.min(100, Math.max(0, stats.storageHealth.percentUsed))}%` }} /></div>}<small>{formatStorage(stats.storageHealth.databaseBytes)}{stats.storageHealth.databaseLimitBytes ? ` of ${formatStorage(stats.storageHealth.databaseLimitBytes)}` : ''} · database size measured live</small>{stats.storageHealth.databaseLimitBytes == null && role === 'admin' && <small>Set your database allowance in Admin → Restore from report to show a percentage.</small>}</> : <small>{statsLoading && !stats ? 'Loading the latest health reading in the background…' : stats?.storageHealthStatus === 'setup_required' && role === 'admin' ? 'Run the SQL supplied with Admin → Restore from report once to enable the live reading.' : 'The live database reading is temporarily unavailable.'}</small>}</div>
+            <div className="metric-card model-card"><span>Answering model</span><strong>{statsLoading && !stats ? 'Checking…' : stats?.answerProvider === 'groq' ? 'Groq' : stats?.answerProvider === 'gemini' ? 'Gemini' : 'OpenAI'}</strong><small>{statsLoading && !stats ? 'Loading saved configuration…' : stats?.answerModel || 'Unavailable'}</small><em>Fallback controlled in Admin</em></div>
             <div className="metric-card primary"><span>Published articles</span><strong>{stats?.totalArticles?.toLocaleString() ?? '—'}</strong><small>Total articles stored and available</small></div>
             <div className="metric-grid"><div className="metric-card"><span>Indexed</span><strong>{stats?.indexedArticles?.toLocaleString() ?? '—'}</strong></div><div className="metric-card"><span>Queued</span><strong>{stats?.queuedArticles?.toLocaleString() ?? '—'}</strong></div></div>
             <div className="metric-card sections-metric"><span>▦ Searchable passages</span><strong>{stats?.totalChunks?.toLocaleString() ?? '—'}</strong><small>Focused pieces used for retrieval</small></div>
