@@ -7,6 +7,7 @@ import {
   getArticleRegionScopes, questionRegionIntent
 } from '../../lib/server';
 import { retrieveNotices, noticesAccess } from '../../lib/notices';
+import { authenticateExternalApiKey } from '../../lib/externalAccess';
 
 export const config = { maxDuration: 60 };
 
@@ -314,7 +315,7 @@ export default async function handler(req, res) {
     return requestLogId;
   }
   try {
-    access = await authenticateRequest(req);
+    access = await authenticateRequest(req) || await authenticateExternalApiKey(req, 'chatbot:test');
     if (!access) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
 
     const question = String(req.body?.question || '').trim().slice(0, 20000);
