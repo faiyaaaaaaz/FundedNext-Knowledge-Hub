@@ -15,11 +15,16 @@ export default async function handler(req, res) {
 
     if (req.body?.action === 'status') {
       const sb = supabaseAdmin();
-      const { count, error } = await sb.from('articles').select('*', { count: 'exact', head: true }).eq('needs_index', true);
-      if (error) throw new Error('Could not inspect the sync queue: ' + error.message);
+      const [queueResult, totalResult] = await Promise.all([
+        sb.from('articles').select('*', { count: 'exact', head: true }).eq('needs_index', true),
+        sb.from('articles').select('*', { count: 'exact', head: true })
+      ]);
+      if (queueResult.error) throw new Error('Could not inspect the sync queue: ' + queueResult.error.message);
+      if (totalResult.error) throw new Error('Could not inspect saved articles: ' + totalResult.error.message);
       return res.status(200).json({
-        phase: (count || 0) > 0 ? 'indexing' : 'detecting',
-        queued: count || 0,
+        phase: (queueResult.count || 0) > 0 ? 'indexing' : 'detecting',
+        queued: queueResult.count || 0,
+        stored: totalResult.count || 0,
         checkedAt: new Date().toISOString()
       });
     }
@@ -30,41 +35,43 @@ export default async function handler(req, res) {
     if (!hasEmbeddingKey) return res.status(400).json({ error: embeddingProvider === 'gemini' ? 'No Gemini keys saved yet. Add them in Admin first.' : 'No OpenAI key saved yet. Add it in Admin first.' });
 
     const sb = supabaseAdmin();
-    const result = await withSyncLease(sb, 'manual', () => syncStep(sb, { intercomToken, openaiKey, geminiKeys, embeddingProvider }));
+    let result = await withSyncLease(sb, 'manual', () => syncStep(sb, { intercomToken, openaiKey, geminiKeys, embeddingProvider }));
     if (result.locked) return res.status(202).json({ phase: 'waiting', done: false, ...result });
-    // Log every productive indexing batch and every completed detection pass to
-    // sync_logs so admins can see a full history. Skip status-only calls.
-    if (result.phase === 'indexing' && (result.processed || 0) > 0) {
-      const now = new Date().toISOString();
-      try {
-        await sb.from('sync_logs').insert({
-          trigger: 'manual', status: 'partial', started_at: now, finished_at: now,
-          duration_ms: result.durationMs || 0, articles_indexed: result.processed || 0,
-          chunks_written: result.chunkCount || 0, steps: 1,
-          sample_titles: result.sampleTitles || [], error: null
-        });
-        // Keep only last 7 days of log entries to avoid table bloat
-        await sb.from('sync_logs').delete().lt('started_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString());
-      } catch { /* logging must never break the sync */ }
+    // When this browser run performed the comparison that created the queue,
+    // draining that exact saved queue is completion. Do not download all 2,000+
+    // Intercom articles a second time merely to rediscover the same snapshot.
+    if (result.phase === 'indexing' && result.remaining === 0 && req.body?.comparisonCompleted === true) {
+      result = { ...result, phase: 'complete', done: true, comparisonConfirmed: true, verificationSkipped: 'current_run_snapshot' };
     }
     // The interactive checker makes several small requests. Record a manual
     // completion only after its final no-difference verification pass, so the
     // homepage never mistakes a half-finished batch for a completed update.
     if (result.done) {
       const finishedAt = new Date().toISOString();
-      await Promise.all([
-        sb.from('settings').upsert([
-          { key: 'last_manual_sync_at', value: finishedAt },
-          { key: 'last_manual_sync_summary', value: JSON.stringify({ at: finishedAt, trigger: 'manual', status: 'success', changed: result.changedFound || 0, indexed: result.processed || 0, deleted: result.deleted || 0 }) }
-        ]),
-        sb.from('sync_logs').insert({
-          trigger: 'manual', status: 'success', started_at: finishedAt, finished_at: finishedAt,
-          duration_ms: result.durationMs || 0, articles_scanned: result.scanned || 0,
-          articles_changed: result.changedFound || 0, articles_deleted: result.deleted || 0,
-          articles_indexed: result.processed || 0, chunks_written: result.chunkCount || 0,
-          steps: 1, sample_titles: result.sampleTitles || [], error: null
-        }).catch(() => {})
+      const run = req.body?.run && typeof req.body.run === 'object' ? req.body.run : {};
+      const changed = Math.max(0, Number(run.newFound || 0) + Number(run.updatedFound || 0), Number(result.changedFound || 0));
+      const indexed = Math.max(0, Number(run.processed || 0) + Number(result.processed || 0));
+      const deleted = Math.max(0, Number(run.deleted || 0), Number(result.deleted || 0));
+      const scanned = Math.max(0, Number(run.scanned || 0), Number(result.scanned || 0));
+      const chunksWritten = Math.max(0, Number(run.chunks || 0) + Number(result.chunkCount || 0));
+      const startedAt = Number.isFinite(Date.parse(run.startedAt)) ? new Date(run.startedAt).toISOString() : finishedAt;
+      const summary = { at: finishedAt, trigger: 'manual', status: 'success', changed, indexed, deleted };
+      const { error: markerError } = await sb.from('settings').upsert([
+        { key: 'last_manual_sync_at', value: finishedAt },
+        { key: 'last_manual_sync_summary', value: JSON.stringify(summary) }
       ]);
+      if (markerError) throw new Error('Saving the manual completion marker failed: ' + markerError.message);
+      try {
+        await sb.from('sync_logs').insert({
+          trigger: 'manual', status: 'success', started_at: startedAt, finished_at: finishedAt,
+          duration_ms: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)), articles_scanned: scanned,
+          articles_changed: changed, articles_deleted: deleted, articles_indexed: indexed,
+          chunks_written: chunksWritten, steps: Math.max(1, Number(run.steps || 0) + 1),
+          sample_titles: Array.isArray(run.titles) ? run.titles.slice(0, 8) : (result.sampleTitles || []), error: null
+        });
+        await sb.from('sync_logs').delete().lt('started_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString());
+      } catch { /* history logging must never erase a successful completion */ }
+      result = { ...result, runSummary: summary };
     }
     return res.status(200).json(result);
   } catch (e) {
