@@ -58,3 +58,8 @@
 
 /* Failed result recovery */
 .failed-result-actions{display:flex;align-items:center;gap:8px}.failed-result-actions button{border:1px solid rgba(255,113,143,.45);border-radius:9px;background:rgba(255,113,143,.08);color:var(--audit-red);padding:7px 10px;font:700 10px/1 var(--audit-body);cursor:pointer}.failed-result-actions button:hover{background:rgba(255,113,143,.15)}
+
+/* One clear result action: the full verdict opens with its conversation. */
+.audit-result-card .result-summary{grid-template-columns:minmax(260px,1fr) 126px auto 70px;cursor:default}.view-result-button{height:40px;border:1px solid rgba(113,227,184,.5);border-radius:10px;background:rgba(113,227,184,.1);color:var(--audit-mint);display:flex;align-items:center;justify-content:center;gap:10px;padding:0 14px;font:900 11px/1 var(--audit-body);cursor:pointer;white-space:nowrap}.view-result-button i{font-size:15px;font-style:normal;transition:transform .15s ease}.view-result-button:hover{background:var(--audit-mint);color:#06251c}.view-result-button:hover i{transform:translateX(3px)}
+@media(max-width:900px){.audit-result-card .result-summary{grid-template-columns:minmax(200px,1fr) 112px 60px}.audit-result-card .result-mini-scores{display:none}}
+@media(max-width:600px){.audit-result-card .result-summary{grid-template-columns:1fr 58px}.view-result-button{grid-column:1/-1;grid-row:2;width:100%}}
