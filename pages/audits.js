@@ -52,6 +52,16 @@ function StatusOrb({ state = 'checking' }) {
   return <span className={`audit-status-orb ${state}`} aria-hidden="true"><i/><i/><b>{state === 'healthy' ? '✓' : state === 'offline' ? '!' : '•'}</b></span>;
 }
 
+function AuditLaunchLoader() {
+  return <main className="audit-loading audit-launch-loader" role="status" aria-live="polite">
+    <div className="audit-loader-scene" aria-hidden="true">
+      <span className="audit-loader-core"><Logo /></span><i className="loader-orbit orbit-one"><b>✓</b></i><i className="loader-orbit orbit-two"><b>AI</b></i><i className="loader-orbit orbit-three"><b>↻</b></i><span className="audit-loader-scan" />
+    </div>
+    <span className="audit-loader-eyebrow">Secure workspace startup</span><h2>Preparing Conversation Audit</h2><p>Connecting access, Intercom agents and saved audit history…</p>
+    <div className="audit-loader-steps"><span className="active"><i />Verify access</span><span><i />Connect services</span><span><i />Restore history</span></div>
+  </main>;
+}
+
 function ConnectionLogo({ type, state }) {
   const common = { viewBox: '0 0 32 32', 'aria-hidden': true };
   return <span className={`connection-logo ${type} ${state}`}>{type === 'intercom' ? <svg {...common}><rect x="5" y="4" width="22" height="24" rx="6"/><path d="M10 10v8m4-8v9m4-9v9m4-9v8M9 22c4.5 3 9.5 3 14 0"/></svg> : type === 'gemini' ? <svg {...common}><path d="M16 3c1.6 7.4 5.6 11.4 13 13-7.4 1.6-11.4 5.6-13 13-1.6-7.4-5.6-11.4-13-13C10.4 14.4 14.4 10.4 16 3Z"/></svg> : <svg {...common}><path d="M5 7.5c5-1.2 8.6-.4 11 2.3 2.4-2.7 6-3.5 11-2.3v19c-4.8-1-8.5-.2-11 2.3-2.5-2.5-6.2-3.3-11-2.3Z"/><path d="M16 10v18"/></svg>}<i/></span>;
@@ -370,7 +380,7 @@ export default function Audits() {
   }
 
   if (!session) return <main className="audit-login"><Logo/><h1>Conversation Audit</h1><p>Sign in through the FundedNext Support Assistant, then return here.</p><Link className="btn btn-primary" href="/">Go to sign in</Link></main>;
-  if (loading) return <main className="audit-loading"><StatusOrb state="checking"/><h2>Preparing Conversation Audit</h2><p>Checking access, Intercom agents and saved audit history…</p></main>;
+  if (loading) return <AuditLaunchLoader />;
   if (accessDenied) return <main className="audit-login"><Logo/><h1>Audit access is restricted</h1><p>{error || 'A Master Admin can grant your @nextventures.io account access from Audit settings.'}</p><Link className="btn btn-primary" href="/">Back to Support Assistant</Link></main>;
 
   const progress = currentJob?.total ? Math.round((currentJob.processed / currentJob.total) * 100) : 0;
