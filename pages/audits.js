@@ -143,30 +143,15 @@ function comparisonTimeline(turns, result) {
 }
 
 function ResultCard({ result, onCompare, onRetry }) {
-  const [open, setOpen] = useState(false);
   if (result.status !== 'completed') return <article className={`audit-result-card ${result.status}`}><div className="result-summary"><div><div className="result-conversation-line"><a href={conversationHref(result)} target="_blank" rel="noreferrer">Conversation {result.conversationId} ↗</a><CopyConversationId value={result.conversationId}/></div><h3>{result.status === 'skipped' ? 'Excluded from scoring' : 'Audit could not complete'}</h3><p>{result.skipReason || result.error}</p></div><div className="failed-result-actions">{result.status === 'failed' && <button type="button" onClick={() => onRetry(result.conversationId)}>Retry this audit</button>}<span className="result-state">{result.status}</span></div></div></article>;
-  const audit = result.audit || {}; const deductions = displayDeductions(audit); const finalScore = calculatedFinal(audit);
-  return <article className={`audit-result-card ${open ? 'open' : ''}`}>
+  const audit = result.audit || {}; const finalScore = calculatedFinal(audit);
+  return <article className="audit-result-card">
     <div className="result-summary">
       <div className="result-agent"><div className="result-conversation-line"><a href={conversationHref(result)} target="_blank" rel="noreferrer">Conversation {result.conversationId} ↗</a><CopyConversationId value={result.conversationId}/></div><h3>{result.agentName}</h3><p>{audit.primaryIssue || 'Conversation audit'}</p></div>
+      <button type="button" className="view-result-button" onClick={() => onCompare(result)}><span>View result</span><i>→</i></button>
       <div className="result-mini-scores"><span><small>Quality</small><b>{audit.quality}</b></span><span><small>Efficiency</small><b>{audit.efficiency}</b></span><span><small>Process</small><b>{audit.complexity}</b></span></div>
-      <ScoreRing value={finalScore}/><button type="button" className="result-chevron" onClick={() => setOpen((value) => !value)} aria-expanded={open} aria-label={open ? 'Collapse audit details' : 'Expand audit details'}>{open ? '−' : '+'}</button>
+      <ScoreRing value={finalScore}/>
     </div>
-    {open && <div className="result-detail">
-      <div className="result-callout"><span>Main finding</span><p>{audit.mainFinding}</p></div>
-      <div className="result-grid">
-        <section><span>Quality</span><p>{audit.qualityComment}</p></section>
-        <section><span>Efficiency</span><p>{audit.efficiencyComment}</p></section>
-        <section><span>Process &amp; judgment</span><p>{audit.complexityComment}</p></section>
-        <section><span>Handoff</span><p>{audit.handoffSummary || 'No handoff concern recorded.'}</p></section>
-        <section><span>Accuracy</span><p>{audit.accuracyFinding}</p></section>
-        <section><span>Continuity</span><p>{audit.continuityFinding}</p></section>
-      </div>
-      {deductions.length > 0 && <div className="deduction-block"><span>Why marks were deducted</span>{deductions.map((item, index) => <section key={index}><div><b>{item.category}</b><em>−{item.pointsDeducted} point{Number(item.pointsDeducted) === 1 ? '' : 's'}</em></div><p>{item.reason}</p>{item.transcriptExample && <small><b>Conversation example:</b> {item.transcriptExample}</small>}{item.betterAction && <small><b>Better action:</b> {item.betterAction}</small>}</section>)}</div>}
-      {(audit.accuracyIssues || []).length > 0 && <div className="accuracy-issues"><span>Incorrect information and correction</span>{audit.accuracyIssues.map((item, index) => <section key={index}><p><b>Shared:</b> {item.wrongInformation}</p><p><b>Correct:</b> {item.correctInformation}</p>{item.evidenceUrl ? <a href={item.evidenceUrl} target="_blank" rel="noreferrer">Open supporting source: {item.evidenceTitle || 'verified evidence'} ↗</a> : <em>Source requires manual verification</em>}</section>)}</div>}
-      <div className="coaching-block"><span>Coaching actions</span><ol>{(audit.coachingActions || []).map((item, index) => <li key={index}>{item}</li>)}</ol><b>Goal</b><p>{audit.goal}</p></div>
-      <div className="result-foot"><span className={audit.manualReview ? 'review-needed' : 'review-clear'}>{audit.manualReview ? 'Manual review required' : 'Automated review complete'}</span><span>{audit.confidence}% confidence</span><span>{result.model}</span><button type="button" onClick={() => onCompare(result)}>View results with conversation</button><a href={conversationHref(result)} target="_blank" rel="noreferrer">Open in Intercom ↗</a></div>
-    </div>}
   </article>;
 }
 
