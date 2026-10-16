@@ -142,9 +142,9 @@ function comparisonTimeline(turns, result) {
   return [...items, ...metricEvents].sort((a, b) => Number(a.at || 0) - Number(b.at || 0));
 }
 
-function ResultCard({ result, onCompare }) {
+function ResultCard({ result, onCompare, onRetry }) {
   const [open, setOpen] = useState(false);
-  if (result.status !== 'completed') return <article className={`audit-result-card ${result.status}`}><div className="result-summary"><div><div className="result-conversation-line"><a href={conversationHref(result)} target="_blank" rel="noreferrer">Conversation {result.conversationId} ↗</a><CopyConversationId value={result.conversationId}/></div><h3>{result.status === 'skipped' ? 'Excluded from scoring' : 'Audit could not complete'}</h3><p>{result.skipReason || result.error}</p></div><span className="result-state">{result.status}</span></div></article>;
+  if (result.status !== 'completed') return <article className={`audit-result-card ${result.status}`}><div className="result-summary"><div><div className="result-conversation-line"><a href={conversationHref(result)} target="_blank" rel="noreferrer">Conversation {result.conversationId} ↗</a><CopyConversationId value={result.conversationId}/></div><h3>{result.status === 'skipped' ? 'Excluded from scoring' : 'Audit could not complete'}</h3><p>{result.skipReason || result.error}</p></div><div className="failed-result-actions">{result.status === 'failed' && <button type="button" onClick={() => onRetry(result.conversationId)}>Retry this audit</button>}<span className="result-state">{result.status}</span></div></div></article>;
   const audit = result.audit || {}; const deductions = displayDeductions(audit); const finalScore = calculatedFinal(audit);
   return <article className={`audit-result-card ${open ? 'open' : ''}`}>
     <div className="result-summary">
@@ -296,6 +296,17 @@ export default function Audits() {
     } catch (err) { setError(err.message); setRunning(false); }
   }
 
+  async function retryConversation(conversationId) {
+    if (!conversationId || running) return;
+    setError(''); setNotice('Retrying this conversation in a fresh audit batch…'); setRunning(true); stopRef.current = false;
+    try {
+      const result = await request('create-job', { conversationIds: String(conversationId) });
+      setCurrentJob(result.job); setResults([]); setView('results');
+      await runQueue(result.job.id);
+      await bootstrap(session);
+    } catch (err) { setError(err.message); setRunning(false); }
+  }
+
   async function runQueue(jobId, token = session) {
     if (processingRef.current) return;
     processingRef.current = true;
@@ -442,7 +453,7 @@ export default function Audits() {
             </section>
             <div className="audit-kpis"><Metric label="Completed chats" value={currentJob.completed}/><Metric label="Agent evaluations" value={currentJob.evaluations}/><Metric label="Average quality" value={avg('quality')}/><Metric label="Average efficiency" value={avg('efficiency')}/><Metric label="Average final" value={avg('finalScore')} tone="accent"/><Metric label="Manual review" value={completedResults.filter((item) => item.audit?.manualReview).length}/></div>
             <section className="results-toolbar"><div><h2>Conversation evaluations</h2><p>{results.length} saved result{results.length === 1 ? '' : 's'} in this batch.</p></div><div><button onClick={() => download('csv')}>⇩ Summary CSV</button><button onClick={() => download('csv', true)}>⇩ Detailed CSV</button><button className="primary" onClick={() => download('html')}>⇩ HTML report</button></div></section>
-            <div className="audit-result-list">{results.map((result) => <ResultCard key={result.id || `${result.conversationId}-${result.agentId}-${result.status}`} result={result} onCompare={openComparison}/>)}{!results.length && <div className="empty-results"><StatusOrb state={running ? 'checking' : 'offline'}/><h3>{running ? 'The first conversation is being prepared' : 'No results saved yet'}</h3><p>Live status and the first scored result will appear here automatically.</p></div>}</div>
+            <div className="audit-result-list">{results.map((result) => <ResultCard key={result.id || `${result.conversationId}-${result.agentId}-${result.status}`} result={result} onCompare={openComparison} onRetry={retryConversation}/>)}{!results.length && <div className="empty-results"><StatusOrb state={running ? 'checking' : 'offline'}/><h3>{running ? 'The first conversation is being prepared' : 'No results saved yet'}</h3><p>Live status and the first scored result will appear here automatically.</p></div>}</div>
           </> : <div className="empty-results large"><span>▤</span><h2>No audit selected</h2><p>Start a new audit or open one from Audit history.</p><button onClick={() => setView('control')}>Open audit control</button></div>}
         </div>}
 
