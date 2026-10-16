@@ -17,8 +17,44 @@ function today(offset = 0) {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
+function pad(value) { return String(value).padStart(2, '0'); }
+function isoOf(year, month, day) { return `${year}-${pad(month + 1)}-${pad(day)}`; }
+function shiftIso(iso, days) { const [year, month, day] = iso.split('-').map(Number); const date = new Date(Date.UTC(year, month - 1, day + days)); return isoOf(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()); }
+function formatShortDate(iso, year = true) { const [y, m, d] = iso.split('-').map(Number); return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', ...(year ? { year: 'numeric' } : {}) }).format(new Date(Date.UTC(y, m - 1, d))); }
+function rangeLabel(from, to) { if (!from && !to) return 'All time'; if (from === to) return formatShortDate(from); return `${from.slice(0, 4) === to.slice(0, 4) ? formatShortDate(from, false) : formatShortDate(from)} – ${formatShortDate(to)}`; }
+function monthName(year, month) { return new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' }).format(new Date(Date.UTC(year, month, 1))); }
+
+function AuditMonthGrid({ year, month, from, to, hoverIso, onPick, onHover, maxIso }) {
+  const firstDay = new Date(Date.UTC(year, month, 1)).getUTCDay(); const count = new Date(Date.UTC(year, month + 1, 0)).getUTCDate(); const cells = [];
+  for (let index = 0; index < firstDay; index++) cells.push(null); for (let day = 1; day <= count; day++) cells.push(day);
+  const end = to || (from && hoverIso && hoverIso > from ? hoverIso : '');
+  return <div className="cal-grid">{['Su','Mo','Tu','We','Th','Fr','Sa'].map((day) => <div key={day} className="cal-dow">{day}</div>)}{cells.map((day, index) => {
+    if (!day) return <div key={index}/>; const iso = isoOf(year, month, day); const disabled = maxIso && iso > maxIso; const start = iso === from; const finish = iso === end; const inRange = from && end && iso > from && iso < end;
+    const classes = ['cal-day']; if (inRange) classes.push('in-range'); if (start || finish) classes.push('edge', start && finish ? 'single' : start ? 'start' : 'end');
+    return <button key={index} type="button" disabled={disabled} className={classes.join(' ')} onMouseEnter={() => onHover(iso)} onClick={() => onPick(iso)}>{day}</button>;
+  })}</div>;
+}
+
+function AuditDateRangeFilter({ from, to, onApply }) {
+  const [open, setOpen] = useState(false); const [custom, setCustom] = useState(false); const [draftFrom, setDraftFrom] = useState(from); const [draftTo, setDraftTo] = useState(to); const [hover, setHover] = useState(''); const ref = useRef(null); const maximum = today();
+  const base = to || from || maximum; const [viewYear, setViewYear] = useState(Number(base.slice(0, 4))); const [viewMonth, setViewMonth] = useState(Number(base.slice(5, 7)) - 1);
+  useEffect(() => { function close(event) { if (ref.current && !ref.current.contains(event.target)) { setOpen(false); setCustom(false); } } if (open) document.addEventListener('mousedown', close); return () => document.removeEventListener('mousedown', close); }, [open]);
+  const presets = [['Today',[maximum,maximum]],['Yesterday',[shiftIso(maximum,-1),shiftIso(maximum,-1)]],['Past 7 days',[shiftIso(maximum,-6),maximum]],['Past 30 days',[shiftIso(maximum,-29),maximum]],['This month',[`${maximum.slice(0,7)}-01`,maximum]],['Past 3 months',[shiftIso(maximum,-90),maximum]]];
+  const active = presets.find(([, range]) => range[0] === from && range[1] === to)?.[0] || 'Custom';
+  function showCustom() { setDraftFrom(from); setDraftTo(to); setHover(''); const value = to || from || maximum; setViewYear(Number(value.slice(0,4))); setViewMonth(Number(value.slice(5,7))-1); setCustom(true); }
+  function pick(iso) { if (!draftFrom || (draftFrom && draftTo)) { setDraftFrom(iso); setDraftTo(''); } else if (iso < draftFrom) { setDraftFrom(iso); setDraftTo(''); } else setDraftTo(iso); }
+  function step(delta) { const date = new Date(Date.UTC(viewYear, viewMonth + delta, 1)); setViewYear(date.getUTCFullYear()); setViewMonth(date.getUTCMonth()); }
+  const right = new Date(Date.UTC(viewYear, viewMonth + 1, 1));
+  return <div className="date-filter audit-date-filter" ref={ref}><button type="button" className={`date-trigger ${open ? 'open' : ''}`} onClick={() => { setOpen((value) => !value); setCustom(false); }}><span className="cal-ico">▦</span><span><small>Date range</small><b>{rangeLabel(from,to)}</b></span><span className="caret">▾</span></button>{open && <div className="date-pop"><div className="date-presets">{presets.map(([label, range]) => <button type="button" key={label} className={`date-preset ${active === label ? 'active' : ''}`} onMouseEnter={() => setCustom(false)} onClick={() => { onApply(...range); setOpen(false); }}>{label}{active === label && <span className="ck">✓</span>}</button>)}<button type="button" className={`date-preset custom ${active === 'Custom' ? 'active' : ''}`} onMouseEnter={showCustom} onClick={showCustom}>Custom range<span className="ck">›</span></button></div>{custom && <div className="date-cal"><div className="range-head"><div><label>From</label><b className={draftFrom ? '' : 'empty'}>{draftFrom ? formatShortDate(draftFrom) : 'Select date'}</b></div><div><label>To</label><b className={draftTo ? '' : 'empty'}>{draftTo ? formatShortDate(draftTo) : 'Select date'}</b></div></div><div className="cal-wrap"><div><div className="cal-nav"><button type="button" onClick={() => step(-1)}>‹</button><b>{monthName(viewYear,viewMonth)}</b><span/></div><AuditMonthGrid year={viewYear} month={viewMonth} from={draftFrom} to={draftTo} hoverIso={hover} onPick={pick} onHover={setHover} maxIso={maximum}/></div><div><div className="cal-nav"><span/><b>{monthName(right.getUTCFullYear(),right.getUTCMonth())}</b><button type="button" onClick={() => step(1)}>›</button></div><AuditMonthGrid year={right.getUTCFullYear()} month={right.getUTCMonth()} from={draftFrom} to={draftTo} hoverIso={hover} onPick={pick} onHover={setHover} maxIso={maximum}/></div></div><div className="date-foot"><button type="button" className="btn btn-secondary btn-small" onClick={() => setCustom(false)}>Cancel</button><button type="button" className="btn btn-primary btn-small" disabled={!draftFrom} onClick={() => { onApply(draftFrom, draftTo || draftFrom); setOpen(false); setCustom(false); }}>Apply range</button></div></div>}</div>}</div>;
+}
+
 function StatusOrb({ state = 'checking' }) {
   return <span className={`audit-status-orb ${state}`} aria-hidden="true"><i/><i/><b>{state === 'healthy' ? '✓' : state === 'offline' ? '!' : '•'}</b></span>;
+}
+
+function ConnectionLogo({ type, state }) {
+  const common = { viewBox: '0 0 32 32', 'aria-hidden': true };
+  return <span className={`connection-logo ${type} ${state}`}>{type === 'intercom' ? <svg {...common}><rect x="5" y="4" width="22" height="24" rx="6"/><path d="M10 10v8m4-8v9m4-9v9m4-9v8M9 22c4.5 3 9.5 3 14 0"/></svg> : type === 'gemini' ? <svg {...common}><path d="M16 3c1.6 7.4 5.6 11.4 13 13-7.4 1.6-11.4 5.6-13 13-1.6-7.4-5.6-11.4-13-13C10.4 14.4 14.4 10.4 16 3Z"/></svg> : <svg {...common}><path d="M5 7.5c5-1.2 8.6-.4 11 2.3 2.4-2.7 6-3.5 11-2.3v19c-4.8-1-8.5-.2-11 2.3-2.5-2.5-6.2-3.3-11-2.3Z"/><path d="M16 10v18"/></svg>}<i/></span>;
 }
 
 function Metric({ label, value, detail, tone = '' }) {
@@ -48,15 +84,63 @@ function CopyConversationId({ value }) {
   return <button type="button" className={`copy-conversation ${copied ? 'copied' : ''}`} onClick={copy} title="Copy conversation ID" aria-label={`Copy conversation ${value}`}>{copied ? 'Copied' : 'Copy'}</button>;
 }
 
+function calculatedFinal(audit) { return Number(((Number(audit?.quality || 0) + Number(audit?.efficiency || 0) + Number(audit?.complexity || 0)) / 3).toFixed(2)); }
+function displayDeductions(audit) {
+  const scores = { quality: Number(audit?.quality || 0), efficiency: Number(audit?.efficiency || 0), process: Number(audit?.complexity || 0) };
+  const comments = { quality: audit?.qualityComment, efficiency: audit?.efficiencyComment, process: audit?.complexityComment };
+  const supplied = Array.isArray(audit?.deductions) ? audit.deductions : []; const output = [];
+  for (const [category, score] of Object.entries(scores)) {
+    const expected = Math.max(0, 10 - score); if (!expected) continue;
+    const items = supplied.filter((item) => {
+      const stored = String(item.category || '').toLowerCase();
+      return category === 'process' ? (stored.includes('process') || stored.includes('complex')) : stored.includes(category);
+    });
+    const usable = items.length ? items : [{ category, reason: comments[category] || 'The score was reduced in this category.', transcriptExample: '', betterAction: '', pointsDeducted: expected }];
+    const totalWeight = usable.reduce((sum, item) => sum + Math.max(.1, Number(item.pointsDeducted) || 1), 0); let allocated = 0;
+    usable.forEach((item, index) => { const points = index === usable.length - 1 ? Number((expected - allocated).toFixed(2)) : Number((expected * Math.max(.1, Number(item.pointsDeducted) || 1) / totalWeight).toFixed(2)); allocated += points; output.push({ ...item, category, pointsDeducted: points }); });
+  }
+  return output;
+}
+
+function cleanFlagPhrase(value) {
+  const text = String(value || '').trim(); const quoted = [...text.matchAll(/["“”']([^"“”']{6,})["“”']/g)].map((match) => match[1]).sort((a, b) => b.length - a.length)[0];
+  return String(quoted || text.replace(/^(?:example\s*:\s*)?(?:the\s+)?agent\s*:\s*/i, '')).trim().replace(/^["“”']|["“”']$/g, '');
+}
+function flagSpecs(audit) {
+  const deductionFlags = displayDeductions(audit).filter((item) => item.transcriptExample).map((item) => ({ phrase: cleanFlagPhrase(item.transcriptExample), category: item.category, label: `${item.category} deduction` }));
+  const accuracyFlags = (audit?.accuracyIssues || []).filter((item) => item.wrongInformation).map((item) => ({ phrase: cleanFlagPhrase(item.wrongInformation), category: 'accuracy', label: 'Incorrect information' }));
+  return [...deductionFlags, ...accuracyFlags].filter((item) => item.phrase.length >= 5);
+}
+function matchedFlags(text, flags) {
+  const source = String(text || '').toLowerCase();
+  return flags.filter((flag) => { const phrase = flag.phrase.toLowerCase(); if (source.includes(phrase)) return true; const words = phrase.match(/[a-z0-9]{4,}/g) || []; return words.length >= 2 && words.filter((word) => source.includes(word)).length / words.length >= .7; });
+}
+function HighlightedMessage({ text, flags }) {
+  const matches = matchedFlags(text, flags); if (!matches.length) return <>{text}</>;
+  let parts = [{ text: String(text || ''), marked: false, category: '' }];
+  for (const flag of matches) parts = parts.flatMap((part) => { if (part.marked) return [part]; const index = part.text.toLowerCase().indexOf(flag.phrase.toLowerCase()); if (index < 0) return [{ ...part, marked: true, category: flag.category }]; return [{ text: part.text.slice(0,index), marked:false },{ text: part.text.slice(index,index+flag.phrase.length), marked:true, category:flag.category },{ text:part.text.slice(index+flag.phrase.length), marked:false }].filter((item) => item.text); });
+  return <>{parts.map((part, index) => part.marked ? <mark key={index} className={`flag-${part.category}`}>{part.text}</mark> : <span key={index}>{part.text}</span>)}</>;
+}
+function formatSeconds(value) { const seconds = Math.max(0, Number(value) || 0); return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`; }
+function timelineSeconds(value) { if (typeof value === 'number' && Number.isFinite(value)) return value; const parsed = Date.parse(value); return Number.isFinite(parsed) ? parsed / 1000 : 0; }
+function comparisonTimeline(turns, result) {
+  const items = turns.map((turn) => ({ ...turn, at: timelineSeconds(turn.at || turn.createdAt), authorName: turn.authorName || turn.author || 'Unknown', timelineKind: /^\[[a-z0-9_ -]+\]$/i.test(turn.body || '') || /assign|attribute|close|snooze|open|sla/i.test(turn.partType || '') ? 'event' : (turn.kind || turn.role) }));
+  const metrics = result?.metrics || {}; const metricEvents = [];
+  if (metrics.firstResponseAt && metrics.frtSeconds != null) metricEvents.push({ id: 'metric-frt', at: timelineSeconds(metrics.firstResponseAt) - .2, timelineKind: 'metric', metricTone: metrics.frtHit === false ? 'miss' : 'hit', authorName: 'FRT', body: `${formatSeconds(metrics.frtSeconds)} · ${metrics.frtHit === false ? 'Missed' : 'Met'} 30s target` });
+  if (metrics.finalMessageAt && Array.isArray(metrics.responseTimes) && metrics.responseTimes.length) metricEvents.push({ id: 'metric-art', at: timelineSeconds(metrics.finalMessageAt) - .1, timelineKind: 'metric', metricTone: metrics.artBreaches ? 'miss' : 'hit', authorName: 'ART', body: `${metrics.artBreaches || 0} of ${metrics.responseTimes.length} response cycles missed the 90s target` });
+  if (metrics.finalMessageAt && metrics.ahtSeconds != null) metricEvents.push({ id: 'metric-aht', at: timelineSeconds(metrics.finalMessageAt) + .1, timelineKind: 'metric', metricTone: metrics.ahtHit === false ? 'miss' : 'hit', authorName: 'AHT', body: `${formatSeconds(metrics.ahtSeconds)} · ${metrics.ahtHit === false ? 'Missed' : 'Met'} 20m target` });
+  return [...items, ...metricEvents].sort((a, b) => Number(a.at || 0) - Number(b.at || 0));
+}
+
 function ResultCard({ result, onCompare }) {
   const [open, setOpen] = useState(false);
   if (result.status !== 'completed') return <article className={`audit-result-card ${result.status}`}><div className="result-summary"><div><div className="result-conversation-line"><a href={conversationHref(result)} target="_blank" rel="noreferrer">Conversation {result.conversationId} ↗</a><CopyConversationId value={result.conversationId}/></div><h3>{result.status === 'skipped' ? 'Excluded from scoring' : 'Audit could not complete'}</h3><p>{result.skipReason || result.error}</p></div><span className="result-state">{result.status}</span></div></article>;
-  const audit = result.audit || {};
+  const audit = result.audit || {}; const deductions = displayDeductions(audit); const finalScore = calculatedFinal(audit);
   return <article className={`audit-result-card ${open ? 'open' : ''}`}>
     <div className="result-summary">
       <div className="result-agent"><div className="result-conversation-line"><a href={conversationHref(result)} target="_blank" rel="noreferrer">Conversation {result.conversationId} ↗</a><CopyConversationId value={result.conversationId}/></div><h3>{result.agentName}</h3><p>{audit.primaryIssue || 'Conversation audit'}</p></div>
       <div className="result-mini-scores"><span><small>Quality</small><b>{audit.quality}</b></span><span><small>Efficiency</small><b>{audit.efficiency}</b></span><span><small>Process</small><b>{audit.complexity}</b></span></div>
-      <ScoreRing value={audit.finalScore}/><button type="button" className="result-chevron" onClick={() => setOpen((value) => !value)} aria-expanded={open} aria-label={open ? 'Collapse audit details' : 'Expand audit details'}>{open ? '−' : '+'}</button>
+      <ScoreRing value={finalScore}/><button type="button" className="result-chevron" onClick={() => setOpen((value) => !value)} aria-expanded={open} aria-label={open ? 'Collapse audit details' : 'Expand audit details'}>{open ? '−' : '+'}</button>
     </div>
     {open && <div className="result-detail">
       <div className="result-callout"><span>Main finding</span><p>{audit.mainFinding}</p></div>
@@ -68,7 +152,7 @@ function ResultCard({ result, onCompare }) {
         <section><span>Accuracy</span><p>{audit.accuracyFinding}</p></section>
         <section><span>Continuity</span><p>{audit.continuityFinding}</p></section>
       </div>
-      {(audit.deductions || []).length > 0 && <div className="deduction-block"><span>Why marks were deducted</span>{audit.deductions.map((item, index) => <section key={index}><div><b>{item.category}</b><em>−{item.pointsDeducted} point{Number(item.pointsDeducted) === 1 ? '' : 's'}</em></div><p>{item.reason}</p>{item.transcriptExample && <small><b>Conversation example:</b> {item.transcriptExample}</small>}{item.betterAction && <small><b>Better action:</b> {item.betterAction}</small>}</section>)}</div>}
+      {deductions.length > 0 && <div className="deduction-block"><span>Why marks were deducted</span>{deductions.map((item, index) => <section key={index}><div><b>{item.category}</b><em>−{item.pointsDeducted} point{Number(item.pointsDeducted) === 1 ? '' : 's'}</em></div><p>{item.reason}</p>{item.transcriptExample && <small><b>Conversation example:</b> {item.transcriptExample}</small>}{item.betterAction && <small><b>Better action:</b> {item.betterAction}</small>}</section>)}</div>}
       {(audit.accuracyIssues || []).length > 0 && <div className="accuracy-issues"><span>Incorrect information and correction</span>{audit.accuracyIssues.map((item, index) => <section key={index}><p><b>Shared:</b> {item.wrongInformation}</p><p><b>Correct:</b> {item.correctInformation}</p>{item.evidenceUrl ? <a href={item.evidenceUrl} target="_blank" rel="noreferrer">Open supporting source: {item.evidenceTitle || 'verified evidence'} ↗</a> : <em>Source requires manual verification</em>}</section>)}</div>}
       <div className="coaching-block"><span>Coaching actions</span><ol>{(audit.coachingActions || []).map((item, index) => <li key={index}>{item}</li>)}</ol><b>Goal</b><p>{audit.goal}</p></div>
       <div className="result-foot"><span className={audit.manualReview ? 'review-needed' : 'review-clear'}>{audit.manualReview ? 'Manual review required' : 'Automated review complete'}</span><span>{audit.confidence}% confidence</span><span>{result.model}</span><button type="button" onClick={() => onCompare(result)}>View results with conversation</button><a href={conversationHref(result)} target="_blank" rel="noreferrer">Open in Intercom ↗</a></div>
@@ -78,19 +162,20 @@ function ResultCard({ result, onCompare }) {
 
 function ConversationReviewModal({ state, onClose }) {
   if (!state) return null;
-  const result = state.result || {}; const audit = result.audit || {}; const turns = state.conversation?.turns || [];
+  const result = state.result || {}; const audit = result.audit || {}; const turns = state.conversation?.turns || []; const deductions = displayDeductions(audit); const finalScore = calculatedFinal(audit); const flags = flagSpecs(audit); const timeline = comparisonTimeline(turns, result);
   return <div className="audit-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="audit-comparison-modal" role="dialog" aria-modal="true" aria-label={`Audit and conversation ${result.conversationId}`}>
       <header><div><span>Conversation review</span><h2>{result.agentName} · {result.conversationId}</h2></div><div><CopyConversationId value={result.conversationId}/><a href={conversationHref(result)} target="_blank" rel="noreferrer">Open in Intercom ↗</a><button type="button" onClick={onClose} aria-label="Close comparison">×</button></div></header>
       {state.loading ? <div className="comparison-loading"><StatusOrb state="checking"/><h3>Loading the live Intercom conversation…</h3><p>The transcript is fetched only for this view and is not added to audit history.</p></div> : state.error ? <div className="comparison-loading error"><h3>Could not load the conversation</h3><p>{state.error}</p></div> : <div className="comparison-columns">
-        <article className="comparison-verdict"><div className="comparison-score"><ScoreRing value={audit.finalScore}/><div><span>AI verdict</span><h3>{audit.primaryIssue}</h3><p>{audit.mainFinding}</p></div></div><div className="comparison-category"><b>Quality · {audit.quality}/10</b><p>{audit.qualityComment}</p></div><div className="comparison-category"><b>Efficiency · {audit.efficiency}/10</b><p>{audit.efficiencyComment}</p></div><div className="comparison-category"><b>Process &amp; judgment · {audit.complexity}/10</b><p>{audit.complexityComment}</p></div><div className="modal-deductions"><h4>Why marks were deducted</h4>{(audit.deductions || []).map((item, index) => <section key={index}><div><b>{item.category}</b><em>−{item.pointsDeducted}</em></div><p>{item.reason}</p>{item.transcriptExample && <small><b>Example:</b> {item.transcriptExample}</small>}{item.betterAction && <small><b>Better action:</b> {item.betterAction}</small>}</section>)}{!(audit.deductions || []).length && <p>No deductions recorded.</p>}</div>{(audit.accuracyIssues || []).map((item, index) => <div className="modal-accuracy" key={index}><b>Accuracy correction</b><p><strong>Shared:</strong> {item.wrongInformation}</p><p><strong>Correct:</strong> {item.correctInformation}</p>{item.evidenceUrl && <a href={item.evidenceUrl} target="_blank" rel="noreferrer">Open source ↗</a>}</div>)}</article>
-        <article className="comparison-transcript"><div className="transcript-heading"><span>Live Intercom transcript</span><b>{turns.filter((turn) => turn.body).length} messages</b></div>{turns.map((turn) => <div key={turn.id} className={`transcript-turn ${turn.kind}`}><div><b>{turn.authorName}</b><time>{formatDate(new Date(turn.at * 1000).toISOString())}</time></div><p>{turn.body || `[${turn.partType}]`}</p></div>)}</article>
+        <article className="comparison-verdict"><div className="verdict-scoreboard"><div className="final-score-card"><ScoreRing value={finalScore}/><span>Final score</span><b>({audit.quality} + {audit.efficiency} + {audit.complexity}) ÷ 3 = {finalScore}</b></div><div className="category-score quality"><span>Quality</span><strong>{audit.quality}<small>/10</small></strong><em>−{10 - Number(audit.quality || 0)}</em></div><div className="category-score efficiency"><span>Efficiency</span><strong>{audit.efficiency}<small>/10</small></strong><em>−{10 - Number(audit.efficiency || 0)}</em></div><div className="category-score process"><span>Process</span><strong>{audit.complexity}<small>/10</small></strong><em>−{10 - Number(audit.complexity || 0)}</em></div></div><div className="verdict-overview"><span>AI verdict</span><h3>{audit.primaryIssue}</h3><p>{audit.mainFinding}</p></div><div className="comparison-category quality"><b>Quality · {audit.quality}/10</b><p>{audit.qualityComment}</p></div><div className="comparison-category efficiency"><b>Efficiency · {audit.efficiency}/10</b><p>{audit.efficiencyComment}</p></div><div className="comparison-category process"><b>Process &amp; judgment · {audit.complexity}/10</b><p>{audit.complexityComment}</p></div><div className="modal-deductions"><h4>Why marks were deducted</h4>{deductions.map((item, index) => <section className={`deduct-${item.category}`} key={index}><div><b>{item.category}</b><em>−{item.pointsDeducted}</em></div><p>{item.reason}</p>{item.transcriptExample && <small><b>Flagged excerpt:</b> {item.transcriptExample}</small>}{item.betterAction && <small><b>Better action:</b> {item.betterAction}</small>}</section>)}{!deductions.length && <p>No deductions recorded.</p>}</div>{(audit.accuracyIssues || []).map((item, index) => <div className="modal-accuracy" key={index}><b>Accuracy correction</b><p><strong>Shared:</strong> {item.wrongInformation}</p><p><strong>Correct:</strong> {item.correctInformation}</p>{item.evidenceUrl && <a href={item.evidenceUrl} target="_blank" rel="noreferrer">Open source ↗</a>}</div>)}</article>
+        <article className="comparison-transcript"><div className="transcript-heading"><div><span>Live Intercom transcript</span><div className="transcript-legend"><i className="client"/>Client<i className="ai"/>FundedNext AI<i className="agent"/>Agent<i className="event"/>Event</div></div><b>{turns.filter((turn) => turn.body && !/^\[/.test(turn.body)).length} messages</b></div>{timeline.map((turn) => { const matched = turn.timelineKind === 'agent' ? matchedFlags(turn.body, flags) : []; return <div key={turn.id} className={`transcript-turn ${turn.timelineKind} ${turn.metricTone || ''} ${matched.length ? `flagged flag-border-${matched[0].category}` : ''}`}><div><b>{turn.timelineKind === 'bot' ? 'FundedNext AI' : turn.authorName}</b>{turn.timelineKind !== 'metric' && <time>{formatDate(new Date(turn.at * 1000).toISOString())}</time>}</div><p><HighlightedMessage text={turn.body || `[${turn.partType}]`} flags={turn.timelineKind === 'agent' ? flags : []}/></p>{matched.length > 0 && <small className="flag-reason">Referenced in verdict · {matched.map((item) => item.label).join(' · ')}</small>}</div>; })}</article>
       </div>}
     </section>
   </div>;
 }
 
 export default function Audits() {
+  const [theme, setTheme] = useState('dark');
   const [session, setSession] = useState('');
   const [data, setData] = useState(null);
   const [health, setHealth] = useState(null);
@@ -126,6 +211,14 @@ export default function Audits() {
   const completedResults = results.filter((item) => item.status === 'completed');
 
   useEffect(() => {
+    const saved = localStorage.getItem('theme') || 'light'; setTheme(saved); document.documentElement.setAttribute('data-theme', saved);
+  }, []);
+
+  function toggleTheme() {
+    const next = theme === 'dark' ? 'light' : 'dark'; setTheme(next); localStorage.setItem('theme', next); document.documentElement.setAttribute('data-theme', next);
+  }
+
+  useEffect(() => {
     if (process.env.NODE_ENV !== 'production' && new URLSearchParams(window.location.search).get('preview') === '1') {
       const previewAgents = [
         { id: '101', name: 'Allen Fletcher', email: 'allen@nextventures.io', hasInboxSeat: true },
@@ -137,7 +230,7 @@ export default function Audits() {
       setHealth({ state: 'healthy', checkedAt: new Date().toISOString(), intercom: { connected: true, detail: 'FundedNext workspace connected' }, healthyGeminiKeys: 3, gemini: [{ connected: true },{ connected: true },{ connected: true }] }); setLoading(false);
       if (new URLSearchParams(window.location.search).get('demo') === 'results') {
         const previewJob = { id: 184, status: 'completed', mode: 'sample', stage: 'Audit completed', total: 10, processed: 10, completed: 9, skipped: 1, failed: 0, evaluations: 10, updatedAt: new Date().toISOString() };
-        const previewResults = [{ id: 'r1', status: 'completed', conversationId: '129503847', agentId: '101', agentName: 'Allen Fletcher', model: 'gemini-3.5-flash-lite', intercomLink: '#', audit: { quality: 9, efficiency: 10, complexity: 8, finalScore: 9, primaryIssue: 'Performance Reward timeline', mainFinding: 'The answer was accurate and efficient, but the transfer could have explained ownership more clearly.', qualityComment: 'Accurate, warm and directly answered the client.', efficiencyComment: 'No concerns. FRT, ART and AHT met the confirmed targets.', complexityComment: 'The transfer was correct, but the receiving team and expected timeline were not stated.', handoffSummary: 'Allen reviewed the bot context and transferred the case without making the client repeat details. The destination team was not named.', accuracyFinding: 'The explanation matched the active FAQ and Notice evidence.', continuityFinding: 'The pre-chat context was used correctly.', coachingActions: ['Name the receiving team before transferring.', 'Give the client an expected update window.'], goal: 'Make every transfer feel owned, predictable and effortless for the client.', manualReview: false, confidence: 94 } }];
+        const previewResults = [{ id: 'r1', status: 'completed', conversationId: '129503847', agentId: '101', agentName: 'Allen Fletcher', model: 'gemini-3.5-flash-lite', intercomLink: '#', metrics: { frtSeconds: 42, frtHit: false, responseTimes: [68, 112], artBreaches: 1, ahtSeconds: 322, ahtHit: true, assignmentAt: '2026-10-15T10:40:00.000Z', firstResponseAt: '2026-10-15T10:40:42.000Z', finalMessageAt: '2026-10-15T10:45:22.000Z' }, audit: { quality: 7, efficiency: 6, complexity: 7, finalScore: 6.67, primaryIssue: 'Correct resolution with avoidable friction and delayed replies', mainFinding: 'The agent found the correct account path and resolved the request, but one dismissive reply and a long response gap made the conversation harder than necessary.', qualityComment: 'The final guidance was accurate, but the phrase “You may search for it” placed unnecessary work on the client.', efficiencyComment: 'The first response took 42 seconds and one later reply exceeded the 90-second ART target.', complexityComment: 'The agent recovered well and completed the investigation, but should have guided the client directly from the start.', handoffSummary: 'The agent inherited the complete bot context and kept ownership through resolution.', accuracyFinding: 'The final answer matched the active FAQ evidence.', continuityFinding: 'The agent used the pre-chat account and product context.', deductions: [{ category: 'quality', pointsDeducted: 2, reason: 'The reply sounded dismissive and increased client effort.', transcriptExample: 'You may search for it', betterAction: 'Share the exact navigation path or search term.' }, { category: 'process', pointsDeducted: 1, reason: 'The initial instruction did not give a concrete next step.', transcriptExample: 'You may search for it', betterAction: 'Lead with the direct path, then explain why.' }, { category: 'efficiency', pointsDeducted: 4, reason: 'FRT and one ART interval missed the confirmed targets.', transcriptExample: 'I am checking this now', betterAction: 'Send a short progress update before the ART threshold.' }], accuracyIssues: [], coachingActions: ['Give the exact navigation path immediately.', 'Send a progress update during investigation.'], goal: 'Resolve accurately while making each next step effortless for the client.', manualReview: false, confidence: 94 } }];
         setCurrentJob(previewJob); setResults(previewResults); setView('results');
       }
       return;
@@ -256,6 +349,19 @@ export default function Audits() {
 
   async function openComparison(result) {
     setComparison({ result, loading: true, conversation: null, error: '' });
+    if (process.env.NODE_ENV !== 'production' && session === 'preview') {
+      const conversation = { turns: [
+        { id: 'c1', role: 'client', author: 'Dogukan Timucin', createdAt: '2026-10-15T10:39:30.000Z', body: 'I cannot find the Performance Reward page. Can you show me where it is?' },
+        { id: 'e1', role: 'system', author: 'Intercom event', partType: 'assignment', createdAt: '2026-10-15T10:40:00.000Z', body: '[conversation assigned to Allen Fletcher]' },
+        { id: 'b1', role: 'bot', author: 'FundedNext AI', createdAt: '2026-10-15T10:40:05.000Z', body: 'The Performance Reward section is available from the dashboard. A support specialist will help with the exact path.' },
+        { id: 'a1', role: 'agent', author: 'Allen Fletcher', createdAt: '2026-10-15T10:40:42.000Z', body: 'You may search for it in your dashboard.' },
+        { id: 'c2', role: 'client', author: 'Dogukan Timucin', createdAt: '2026-10-15T10:41:10.000Z', body: 'I already searched and still cannot see it. Which menu should I open?' },
+        { id: 'a2', role: 'agent', author: 'Allen Fletcher', createdAt: '2026-10-15T10:43:02.000Z', body: 'I am checking this now. Please open Dashboard, choose Accounts, then select Performance Reward beside the eligible account.' },
+        { id: 'a3', role: 'agent', author: 'Allen Fletcher', createdAt: '2026-10-15T10:45:22.000Z', body: 'If the button is unavailable, the account has not reached eligibility yet. I checked your account and the eligibility date is tomorrow.' }
+      ] };
+      setComparison({ result, loading: false, conversation, error: '' });
+      return;
+    }
     try {
       const response = await request('conversation-view', { conversationId: result.conversationId });
       setComparison({ result, loading: false, conversation: response.conversation, error: '' });
@@ -269,7 +375,7 @@ export default function Audits() {
   if (accessDenied) return <main className="audit-login"><Logo/><h1>Audit access is restricted</h1><p>{error || 'A Master Admin can grant your @nextventures.io account access from Audit settings.'}</p><Link className="btn btn-primary" href="/">Back to Support Assistant</Link></main>;
 
   const progress = currentJob?.total ? Math.round((currentJob.processed / currentJob.total) * 100) : 0;
-  const avg = (key) => completedResults.length ? (completedResults.reduce((sum, item) => sum + Number(item.audit?.[key] || 0), 0) / completedResults.length).toFixed(2) : '—';
+  const avg = (key) => completedResults.length ? (completedResults.reduce((sum, item) => sum + (key === 'finalScore' ? calculatedFinal(item.audit) : Number(item.audit?.[key] || 0)), 0) / completedResults.length).toFixed(2) : '—';
 
   return <>
     <Head><title>Conversation Audit · FundedNext</title></Head>
@@ -287,7 +393,7 @@ export default function Audits() {
       </aside>
 
       <main className="audit-main">
-        <header className="audit-topbar"><div><span className="eyebrow">Customer Experience Intelligence</span><h1>{view === 'control' ? 'Audit conversations' : view === 'results' ? 'Audit results' : view === 'history' ? 'Audit history' : 'Audit settings'}</h1></div><button className="health-refresh" onClick={() => checkHealth()}><span className={health?.state === 'checking' ? 'spin' : ''}>↻</span> Check connections</button></header>
+        <header className="audit-topbar"><div><span className="eyebrow">Customer Experience Intelligence</span><h1>{view === 'control' ? 'Audit conversations' : view === 'results' ? 'Audit results' : view === 'history' ? 'Audit history' : 'Audit settings'}</h1></div><div className="audit-top-actions"><button className="theme-toggle" onClick={toggleTheme} aria-label="Change theme"><span>{theme === 'dark' ? '☀' : '☾'}</span>{theme === 'dark' ? 'Light mode' : 'Dark mode'}</button><button className="health-refresh" onClick={() => checkHealth()}><span className={health?.state === 'checking' ? 'spin' : ''}>↻</span> Check connections</button></div></header>
         {error && <div className="audit-alert error"><b>Action needed</b><span>{error}</span><button onClick={() => setError('')}>×</button></div>}
         {notice && <div className="audit-alert success"><b>Done</b><span>{notice}</span><button onClick={() => setNotice('')}>×</button></div>}
 
@@ -295,9 +401,9 @@ export default function Audits() {
           <section className="audit-card connection-card">
             <div className="card-heading"><div><span>Live readiness</span><h2>Connections and capacity</h2><p>Live checks use harmless test requests and never send a customer conversation.</p></div><StatusOrb state={health?.state || 'checking'}/></div>
             <div className="connection-grid">
-              <div className={health?.intercom?.connected ? 'connected' : 'disconnected'}><i>{health?.intercom?.connected ? '✓' : '!'}</i><span><b>Intercom</b><small>{health?.intercom?.detail || 'Checking connection…'}</small></span></div>
-              <div className={(health?.healthyGeminiKeys || 0) > 0 ? 'connected' : 'disconnected'}><i>{(health?.healthyGeminiKeys || 0) > 0 ? '✓' : '!'}</i><span><b>Gemini pool</b><small>{health?.healthyGeminiKeys || 0} of {health?.gemini?.length ?? data?.connection?.geminiKeyCount ?? 0} keys ready</small></span></div>
-              <div className="connected"><i>✓</i><span><b>Knowledge</b><small>Live FAQs, Notices and corrections</small></span></div>
+              <div className={health?.intercom?.connected ? 'connected' : health?.state === 'checking' ? 'checking' : 'disconnected'}><ConnectionLogo type="intercom" state={health?.intercom?.connected ? 'connected' : health?.state === 'checking' ? 'checking' : 'disconnected'}/><span><b>Intercom</b><small>{health?.intercom?.detail || 'Checking connection…'}</small></span></div>
+              <div className={(health?.healthyGeminiKeys || 0) > 0 ? 'connected' : health?.state === 'checking' ? 'checking' : 'disconnected'}><ConnectionLogo type="gemini" state={(health?.healthyGeminiKeys || 0) > 0 ? 'connected' : health?.state === 'checking' ? 'checking' : 'disconnected'}/><span><b>Gemini pool</b><small>{health?.state === 'checking' ? 'Testing saved keys…' : `${health?.healthyGeminiKeys || 0} of ${health?.gemini?.length ?? data?.connection?.geminiKeyCount ?? 0} keys ready`}</small></span></div>
+              <div className="connected"><ConnectionLogo type="knowledge" state="connected"/><span><b>Knowledge</b><small>Live FAQs, Notices and corrections</small></span></div>
             </div>
           </section>
 
@@ -315,7 +421,7 @@ export default function Audits() {
             </section>
             <section className="audit-card sample-card">
               <div className="card-heading"><div><span>Step 2</span><h2>Choose the sample</h2><p>Bot-only chats are excluded, then the conversations with the most messages from each selected agent are prioritized.</p></div></div>
-              <div className="date-pair"><label>From<input type="date" value={from} max={to || today()} onChange={(event) => setFrom(event.target.value)}/></label><label>To<input type="date" value={to} min={from} max={today()} onChange={(event) => setTo(event.target.value)}/></label></div>
+              <AuditDateRangeFilter from={from} to={to} onApply={(nextFrom, nextTo) => { setFrom(nextFrom); setTo(nextTo); }}/>
               <label className="sample-label">Priority conversations</label>
               <div className="sample-options">{[10,20,30,40].map((value) => <button key={value} className={!customSample && sampleSize === value ? 'active' : ''} onClick={() => { setSampleSize(value); setCustomSample(''); }}>{value}</button>)}<label className={customSample ? 'active' : ''}><span>Custom</span><input type="number" min="1" max="100" value={customSample} onChange={(event) => setCustomSample(event.target.value)} placeholder="50"/></label></div>
               <div className="sampling-note"><i>⌁</i><span><b>Insight-first selection</b>The auditor compares a broad candidate pool and selects the conversations with the highest message count from the chosen agent. Recent conversations break ties.</span></div>
