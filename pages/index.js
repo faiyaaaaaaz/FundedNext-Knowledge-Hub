@@ -264,7 +264,7 @@ export default function Home() {
   const [statsLoading, setStatsLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [syncState, setSyncState] = useState({ headline: 'Knowledge base', details: [] });
-  const [syncProgress, setSyncProgress] = useState({ phase: 'idle', processed: 0, remaining: null, scanned: null, newFound: null, updatedFound: null, deleted: null, titles: [] });
+  const [syncProgress, setSyncProgress] = useState({ phase: 'idle', processed: 0, remaining: null, scanned: 0, target: null, newFound: 0, updatedFound: 0, deleted: 0, titles: [] });
   const [elapsed, setElapsed] = useState(0);
   const [disputeIndex, setDisputeIndex] = useState(null);
   const [disputeReason, setDisputeReason] = useState('');
@@ -542,7 +542,9 @@ export default function Home() {
     setSyncing(true); cancelRef.current = false; setElapsed(0);
     const started = Date.now();
     let processed = 0, chunks = 0, batches = 0, failures = 0, changedDetectionPasses = 0;
-    setSyncProgress({ phase: 'checking', processed: 0, remaining: null, scanned: null, newFound: null, updatedFound: null, deleted: null, titles: [] });
+    let scanned = 0, newFound = 0, updatedFound = 0, deleted = 0, steps = 0, titles = [];
+    const runStartedAt = new Date().toISOString();
+    setSyncProgress({ phase: 'checking', processed: 0, remaining: null, scanned: 0, target: null, newFound: 0, updatedFound: 0, deleted: 0, titles: [] });
     const clock = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     setSyncState({ headline: 'Inspecting the saved sync queue', details: [`Started at ${clock()}`, 'No article comparison has run yet'] });
     timerRef.current = setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
@@ -557,13 +559,13 @@ export default function Home() {
         if (statusResponse.status === 401) { logout(); break; }
         if (!statusResponse.ok) throw new Error(status.error || 'Could not inspect the sync queue.');
         const activePhase = status.phase;
-        setSyncProgress((current) => ({ ...current, phase: activePhase, remaining: status.queued }));
+        setSyncProgress((current) => ({ ...current, phase: activePhase, remaining: status.queued, target: status.stored || current.target, scanned: current.scanned ?? 0, newFound: current.newFound ?? 0, updatedFound: current.updatedFound ?? 0, deleted: current.deleted ?? 0 }));
         setSyncState(activePhase === 'detecting' ? {
           headline: 'Comparing Intercom with the saved knowledge base',
           details: [
             `Comparison started at ${clock()}`,
             'Saved queue confirmed empty',
-            'Fetching every published article and comparing its ID and content fingerprint'
+            `Fetching every published article and comparing it with ${status.stored || 0} saved records`
           ]
         } : {
           headline: `Making saved updates searchable · ${status.queued} articles remaining`,
@@ -581,12 +583,23 @@ export default function Home() {
           details: [...current.details.slice(0, 3), `No result has returned yet · ${clock()}`]
         })), 15000);
         try {
-          const response = await fetch('/api/sync', { method: 'POST', headers: headers(session, true), body: '{}', signal: controller.signal });
+          const response = await fetch('/api/sync', {
+            method: 'POST', headers: headers(session, true), signal: controller.signal,
+            body: JSON.stringify({
+              comparisonCompleted: changedDetectionPasses > 0,
+              run: { startedAt: runStartedAt, processed, chunks, scanned, newFound, updatedFound, deleted, steps, titles }
+            })
+          });
           clearTimeout(timeout); clearTimeout(progressNotice);
           const data = await response.json();
           if (response.status === 401) { logout(); break; }
           if (!response.ok) throw new Error(data.error || `Server ${response.status}`);
-          failures = 0; processed += data.processed || 0; chunks += data.chunkCount || 0; batches += data.embeddingBatches || 0;
+          failures = 0; processed += data.processed || 0; chunks += data.chunkCount || 0; batches += data.embeddingBatches || 0; steps++;
+          if (data.scanned != null) {
+            scanned = Math.max(scanned, Number(data.scanned || 0));
+            newFound += Number(data.newFound || 0); updatedFound += Number(data.updatedFound || 0); deleted += Number(data.deleted || 0);
+          }
+          if (data.sampleTitles?.length) titles = [...new Set([...titles, ...data.sampleTitles])].slice(0, 8);
           setSyncProgress((current) => ({ ...current, phase: data.done ? 'complete' : data.phase, processed, remaining: data.remaining ?? current.remaining, scanned: data.scanned ?? current.scanned, newFound: data.scanned != null ? (current.newFound || 0) + (data.newFound || 0) : current.newFound, updatedFound: data.scanned != null ? (current.updatedFound || 0) + (data.updatedFound || 0) : current.updatedFound, deleted: data.scanned != null ? (current.deleted || 0) + (data.deleted || 0) : current.deleted, titles: data.sampleTitles?.length ? data.sampleTitles : current.titles }));
           loadStats();
           const detail = data.phase === 'detecting' || data.comparisonConfirmed
@@ -658,6 +671,15 @@ export default function Home() {
   const previousModels = availableModels.filter((model) => model.status === 'previous');
   const selectedModelName = availableModels.find((model) => model.slug === scopeModel)?.name ||
     (scopeProduct === 'both' ? 'All products' : `All ${scopeProduct.toUpperCase()} models`);
+  const syncPhaseIndex = syncProgress.phase === 'complete' ? 3 : syncProgress.phase === 'indexing' ? 2 : 1;
+  const syncQueueTotal = Number(syncProgress.processed || 0) + Number(syncProgress.remaining || 0);
+  const syncPercent = syncProgress.phase === 'complete' ? 100
+    : syncProgress.phase === 'indexing' && syncQueueTotal > 0 ? Math.max(6, Math.round(Number(syncProgress.processed || 0) / syncQueueTotal * 100))
+      : 0;
+  const syncPhaseLabel = syncProgress.phase === 'complete' ? 'Update complete'
+    : syncProgress.phase === 'indexing' ? 'Indexing changed articles'
+      : syncProgress.phase === 'waiting' ? 'Waiting for the current batch'
+        : 'Fetching and comparing Intercom';
   const productGroups = [{ label: 'Knowledge family', options: [
     { value: 'cfd', label: 'CFD', description: 'CFD Accounts and policies' },
     { value: 'futures', label: 'Futures', description: 'Futures models and policies' },
@@ -694,7 +716,16 @@ export default function Home() {
 
         <aside className="insights-rail">
           <div className="rail-head"><span className="live-dot" /><div><b>Knowledge health</b><small>{statsLoading ? 'Connecting to live knowledge…' : stats?.healthy ? 'All systems operational' : 'Status unavailable'}</small></div></div>
-          {role === 'admin' && syncing ? <section className="rail-sync-console" aria-live="polite"><div className="rail-sync-orbit" aria-hidden="true"><i /><i /><b>↻</b></div><div className="rail-sync-heading"><span>Live knowledge update</span><strong>{syncState.headline}</strong><small>{Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')} elapsed · {syncProgress.phase === 'detecting' ? 'Comparing sources' : syncProgress.phase === 'complete' ? 'Final verification' : 'Building search index'}</small></div><div className="rail-sync-track"><i style={{ width: syncProgress.remaining != null && (syncProgress.processed + syncProgress.remaining) > 0 ? `${Math.max(8, Math.round(syncProgress.processed / (syncProgress.processed + syncProgress.remaining) * 100))}%` : '32%' }} /></div><div className="rail-sync-counts">{[['Checked', syncProgress.scanned], ['New', syncProgress.newFound], ['Edited', syncProgress.updatedFound], ['Indexed', syncProgress.processed], ['Queued', syncProgress.remaining], ['Removed', syncProgress.deleted]].map(([label, value]) => <div key={label}><strong>{value ?? '—'}</strong><span>{label}</span></div>)}</div><div className="rail-sync-feed">{syncState.details.slice(-4).map((detail, index) => <p key={`${detail}-${index}`}><i />{detail}</p>)}</div>{syncProgress.titles.length > 0 && <div className="rail-sync-latest"><span>Latest completed batch</span>{syncProgress.titles.slice(0, 3).map((title) => <small key={title}>{title}</small>)}</div>}<button className="rail-sync-cancel" onClick={() => { cancelRef.current = true; abortRef.current?.abort(); }}>Pause safely</button></section> : statsLoading ? <DataLoader title="Checking knowledge health" detail="Connecting to Supabase and verifying the live index…" /> : <>
+          {role === 'admin' && syncing ? <section className={`rail-sync-console ${/^Retrying/i.test(syncState.headline) ? 'is-retrying' : ''}`} aria-live="polite">
+            <div className="rail-sync-top"><div className="rail-sync-orbit" aria-hidden="true"><i /><i /><b>↻</b></div><div className="rail-sync-heading"><span>Live knowledge update</span><strong>{syncState.headline}</strong><small><b>{Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')}</b> elapsed · {syncPhaseLabel}</small></div></div>
+            <div className="rail-sync-steps" aria-label="Update phases">{[['1', 'Compare'], ['2', 'Index'], ['3', 'Finish']].map(([number, label], index) => <div key={label} className={syncPhaseIndex > index + 1 ? 'done' : syncPhaseIndex === index + 1 ? 'active' : ''}><i>{syncPhaseIndex > index + 1 ? '✓' : number}</i><span>{label}</span></div>)}</div>
+            <div className={`rail-sync-track ${syncPercent === 0 ? 'indeterminate' : ''}`} role="progressbar" aria-label={syncPhaseLabel} aria-valuemin="0" aria-valuemax="100" aria-valuenow={syncPercent || undefined}><i style={syncPercent ? { width: `${syncPercent}%` } : undefined} /></div>
+            <div className="rail-sync-progress-copy"><span>{syncProgress.phase === 'indexing' ? `${syncProgress.processed} of ${syncQueueTotal} changes indexed` : syncProgress.phase === 'complete' ? 'Knowledge is searchable and completion is saved' : `${syncProgress.scanned || 0} of ${syncProgress.target || stats?.totalArticles || 0} saved articles compared`}</span><b>{syncPercent ? `${syncPercent}%` : 'LIVE'}</b></div>
+            <div className="rail-sync-counts">{[['Checked', syncProgress.scanned || 0], ['New', syncProgress.newFound || 0], ['Edited', syncProgress.updatedFound || 0], ['Indexed', syncProgress.processed || 0], ['Queued', syncProgress.remaining || 0], ['Removed', syncProgress.deleted || 0]].map(([label, value]) => <div key={label} className={Number(value) > 0 ? 'has-value' : ''}><strong>{Number(value).toLocaleString()}</strong><span>{label}</span></div>)}</div>
+            <div className="rail-sync-feed">{syncState.details.slice(-4).map((detail, index) => <p key={`${detail}-${index}`}><i>{index === syncState.details.slice(-4).length - 1 ? '→' : '✓'}</i><span>{detail}</span></p>)}</div>
+            {syncProgress.titles.length > 0 && <div className="rail-sync-latest"><span>Articles made searchable</span>{syncProgress.titles.slice(0, 3).map((title) => <small key={title}>{title}</small>)}</div>}
+            <button className="rail-sync-cancel" onClick={() => { cancelRef.current = true; abortRef.current?.abort(); }}>Pause after this safe checkpoint</button>
+          </section> : statsLoading ? <DataLoader title="Checking knowledge health" detail="Connecting to Supabase and verifying the live index…" /> : <>
             <div className="metric-card storage-health-card"><div className="storage-health-head"><span>Live database storage</span><strong>{stats?.storageHealth ? (stats.storageHealth.percentUsed == null ? formatStorage(stats.storageHealth.databaseBytes) : `${stats.storageHealth.percentUsed.toFixed(1)}%`) : 'Reading unavailable'}</strong></div>{stats?.storageHealth ? <>{stats.storageHealth.percentUsed != null && <div className="storage-health-track"><i style={{ width: `${Math.min(100, Math.max(0, stats.storageHealth.percentUsed))}%` }} /></div>}<small>{formatStorage(stats.storageHealth.databaseBytes)}{stats.storageHealth.databaseLimitBytes ? ` of ${formatStorage(stats.storageHealth.databaseLimitBytes)}` : ''} · database size measured live</small>{stats.storageHealth.databaseLimitBytes == null && role === 'admin' && <small>Set your database allowance in Admin → Restore from report to show a percentage.</small>}</> : <small>{stats?.storageHealthStatus === 'setup_required' && role === 'admin' ? 'Run the SQL supplied with Admin → Restore from report once to enable the live reading.' : 'The live database reading is temporarily unavailable.'}</small>}</div>
             <div className="metric-card model-card"><span>Answering model</span><strong>{stats?.answerProvider === 'groq' ? 'Groq' : stats?.answerProvider === 'gemini' ? 'Gemini' : 'OpenAI'}</strong><small>{stats?.answerModel || 'Unavailable'}</small><em>Fallback controlled in Admin</em></div>
             <div className="metric-card primary"><span>Published articles</span><strong>{stats?.totalArticles?.toLocaleString() ?? '—'}</strong><small>Total articles stored and available</small></div>
