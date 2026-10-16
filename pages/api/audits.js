@@ -292,7 +292,10 @@ export default async function handler(req, res) {
     }
     if (action === 'create-external-key') {
       if (access.external || !canManageAudits(access)) return res.status(403).json({ error: 'Master audit access is required to create developer API keys.' });
-      const created = await createExternalApiKey({ name: body.name, scopes: body.scopes, expiresInDays: body.expiresInDays }, sb);
+      const created = await createExternalApiKey({
+        name: body.name, scopes: body.scopes, expiresInDays: body.expiresInDays,
+        ownerEmail: access.email, ownerName: access.name
+      }, sb);
       return res.json({ ...created, keys: await listExternalApiKeys(sb) });
     }
     if (action === 'revoke-external-key') {
