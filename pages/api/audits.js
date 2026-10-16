@@ -9,6 +9,10 @@ import {
   redactConversation, restoreAuditTokens, retrieveAuditEvidence, runAuditModel, sampleCandidates,
   saveAuditAccessConfig, saveAuditAgentConfig, saveAuditModels
 } from '../../lib/audits';
+import {
+  authenticateExternalApiKey, createExternalApiKey, hasExternalScope,
+  listExternalApiKeys, revokeExternalApiKey, EXTERNAL_SCOPES
+} from '../../lib/externalAccess';
 
 export const config = { maxDuration: 120 };
 
@@ -204,11 +208,17 @@ async function processNext(access, sb, jobId) {
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store');
   try {
-    const access = await authenticateRequest(req);
+    const action = String(req.query.action || req.body?.action || 'bootstrap');
+    const access = await authenticateRequest(req) || await authenticateExternalApiKey(req);
     if (!access) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
     const sb = supabaseAdmin();
-    if (!(await canUseAudits(access, sb))) return res.status(403).json({ error: 'Conversation Audit access has not been granted to this account.' });
-    const action = String(req.query.action || req.body?.action || 'bootstrap');
+    if (!access.external && !(await canUseAudits(access, sb))) return res.status(403).json({ error: 'Conversation Audit access has not been granted to this account.' });
+    if (access.external) {
+      const required = action === 'health' || action === 'bootstrap' ? 'diagnostics:read'
+        : action === 'create-job' || action === 'process-next' ? 'audit:run'
+          : action === 'conversation-view' ? 'transcripts:read-redacted' : 'audit:read';
+      if (!hasExternalScope(access, required)) return res.status(403).json({ error: `Developer API key lacks the ${required} permission.` });
+    }
 
     if (req.method === 'GET' && action === 'export') {
       const job = publicJob(await loadJob(sb, req.query.jobId)); const results = await loadResults(sb, req.query.jobId);
@@ -229,10 +239,12 @@ export default async function handler(req, res) {
       const enabledAgentIds = await getAuditAgentConfig(sb, admins);
       const jobs = checked(await sb.from('activity_logs').select('*').eq('event_type', 'conversation_audit_job').order('created_at', { ascending: false }).limit(20), 'Could not load audit history');
       return res.json({
-        access: { allowed: await canUseAudits(access, sb), canManage: canManageAudits(access), email: access.email || '', config: canManageAudits(access) ? await getAuditAccessConfig(sb) : undefined },
+        access: { allowed: access.external || await canUseAudits(access, sb), canManage: !access.external && canManageAudits(access), email: access.email || '', config: !access.external && canManageAudits(access) ? await getAuditAccessConfig(sb) : undefined },
         agents: admins, enabledAgentIds, intercomError, models: await getAuditModels(sb),
         connection: { intercomConfigured: !!keys.intercomToken, geminiKeyCount: (keys.geminiKeyPool || []).length, geminiKeyNames: (keys.geminiKeyPool || []).map((item) => item.name) },
-        thresholds: AUDIT_THRESHOLDS, rubricVersion: AUDIT_RUBRIC_VERSION, jobs: (jobs || []).map(publicJob)
+        thresholds: AUDIT_THRESHOLDS, rubricVersion: AUDIT_RUBRIC_VERSION, jobs: (jobs || []).map(publicJob),
+        developerKeys: canManageAudits(access) ? await listExternalApiKeys(sb) : undefined,
+        developerScopes: canManageAudits(access) ? EXTERNAL_SCOPES : undefined
       });
     }
 
@@ -244,7 +256,12 @@ export default async function handler(req, res) {
       if (!conversationId) throw new Error('A valid conversation ID is required.');
       const keys = await getKeys(); if (!keys.intercomToken) throw new Error('Intercom is not connected.');
       const [conversation, admins] = await Promise.all([fetchConversation(keys.intercomToken, conversationId), fetchIntercomAdmins(keys.intercomToken)]);
-      const turns = conversationTurns(conversation, admins).map((turn) => ({
+      const fullTurns = conversationTurns(conversation, admins);
+      if (access.external) {
+        const redacted = redactConversation(fullTurns, conversation, admins);
+        return res.json({ conversation: { id: conversationId, intercomLink: intercomLink(conversation), redactedTranscript: redacted.transcript, redactionCount: redacted.redactionCount, turns: [] } });
+      }
+      const turns = fullTurns.map((turn) => ({
         id: turn.id, at: turn.at, kind: turn.kind, authorId: turn.authorId, authorName: turn.authorName,
         body: turn.body, partType: turn.partType, assignedTo: turn.assignedTo
       }));
@@ -268,6 +285,20 @@ export default async function handler(req, res) {
     if (action === 'save-models') {
       if (!canManageAudits(access)) return res.status(403).json({ error: 'Admin access is required to change the audit model chain.' });
       return res.json({ models: await saveAuditModels(body.models, sb) });
+    }
+    if (action === 'external-keys') {
+      if (access.external || !canManageAudits(access)) return res.status(403).json({ error: 'Master audit access is required to manage developer API keys.' });
+      return res.json({ keys: await listExternalApiKeys(sb), availableScopes: EXTERNAL_SCOPES });
+    }
+    if (action === 'create-external-key') {
+      if (access.external || !canManageAudits(access)) return res.status(403).json({ error: 'Master audit access is required to create developer API keys.' });
+      const created = await createExternalApiKey({ name: body.name, scopes: body.scopes, expiresInDays: body.expiresInDays }, sb);
+      return res.json({ ...created, keys: await listExternalApiKeys(sb) });
+    }
+    if (action === 'revoke-external-key') {
+      if (access.external || !canManageAudits(access)) return res.status(403).json({ error: 'Master audit access is required to revoke developer API keys.' });
+      await revokeExternalApiKey(body.id, sb);
+      return res.json({ ok: true, keys: await listExternalApiKeys(sb) });
     }
     return res.status(400).json({ error: 'Unknown audit action.' });
   } catch (error) {
