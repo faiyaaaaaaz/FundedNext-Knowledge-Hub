@@ -200,6 +200,10 @@ export default function Audits() {
   const [accessDraft, setAccessDraft] = useState('');
   const [modelsDraft, setModelsDraft] = useState('');
   const [savingAdmin, setSavingAdmin] = useState('');
+  const [developerKeyName, setDeveloperKeyName] = useState('Codex testing');
+  const [developerKeyDays, setDeveloperKeyDays] = useState('7');
+  const [revealedDeveloperKey, setRevealedDeveloperKey] = useState('');
+  const [developerConnection, setDeveloperConnection] = useState(null);
   const [comparison, setComparison] = useState(null);
   const stopRef = useRef(false);
   const processingRef = useRef(false);
@@ -219,22 +223,6 @@ export default function Audits() {
   }
 
   useEffect(() => {
-    if (process.env.NODE_ENV !== 'production' && new URLSearchParams(window.location.search).get('preview') === '1') {
-      const previewAgents = [
-        { id: '101', name: 'Allen Fletcher', email: 'allen@nextventures.io', hasInboxSeat: true },
-        { id: '102', name: 'Bella Calhoun', email: 'bella@nextventures.io', hasInboxSeat: true },
-        { id: '103', name: 'Mark Maxwell', email: 'mark@nextventures.io', hasInboxSeat: true }
-      ];
-      setSession('preview'); setData({ access: { allowed: true, canManage: true, config: { emails: ['faiyaz@nextventures.io'] } }, agents: previewAgents, enabledAgentIds: previewAgents.map((agent) => agent.id), models: ['gemini-3.5-flash-lite','gemini-3.8-flash'], connection: { intercomConfigured: true, geminiKeyCount: 3 }, thresholds: { frtSeconds: 30, artSeconds: 90, ahtSeconds: 1200 }, jobs: [], rubricVersion: 'preview' });
-      setSelectedAgents(['101']); setEnabledDraft(previewAgents.map((agent) => agent.id)); setAccessDraft('faiyaz@nextventures.io'); setModelsDraft('gemini-3.5-flash-lite\ngemini-3.8-flash');
-      setHealth({ state: 'healthy', checkedAt: new Date().toISOString(), intercom: { connected: true, detail: 'FundedNext workspace connected' }, healthyGeminiKeys: 3, gemini: [{ connected: true },{ connected: true },{ connected: true }] }); setLoading(false);
-      if (new URLSearchParams(window.location.search).get('demo') === 'results') {
-        const previewJob = { id: 184, status: 'completed', mode: 'sample', stage: 'Audit completed', total: 10, processed: 10, completed: 9, skipped: 1, failed: 0, evaluations: 10, updatedAt: new Date().toISOString() };
-        const previewResults = [{ id: 'r1', status: 'completed', conversationId: '129503847', agentId: '101', agentName: 'Allen Fletcher', model: 'gemini-3.5-flash-lite', intercomLink: '#', metrics: { frtSeconds: 42, frtHit: false, responseTimes: [68, 112], artBreaches: 1, ahtSeconds: 322, ahtHit: true, assignmentAt: '2026-10-15T10:40:00.000Z', firstResponseAt: '2026-10-15T10:40:42.000Z', finalMessageAt: '2026-10-15T10:45:22.000Z' }, audit: { quality: 7, efficiency: 6, complexity: 7, finalScore: 6.67, primaryIssue: 'Correct resolution with avoidable friction and delayed replies', mainFinding: 'The agent found the correct account path and resolved the request, but one dismissive reply and a long response gap made the conversation harder than necessary.', qualityComment: 'The final guidance was accurate, but the phrase “You may search for it” placed unnecessary work on the client.', efficiencyComment: 'The first response took 42 seconds and one later reply exceeded the 90-second ART target.', complexityComment: 'The agent recovered well and completed the investigation, but should have guided the client directly from the start.', handoffSummary: 'The agent inherited the complete bot context and kept ownership through resolution.', accuracyFinding: 'The final answer matched the active FAQ evidence.', continuityFinding: 'The agent used the pre-chat account and product context.', deductions: [{ category: 'quality', pointsDeducted: 2, reason: 'The reply sounded dismissive and increased client effort.', transcriptExample: 'You may search for it', betterAction: 'Share the exact navigation path or search term.' }, { category: 'process', pointsDeducted: 1, reason: 'The initial instruction did not give a concrete next step.', transcriptExample: 'You may search for it', betterAction: 'Lead with the direct path, then explain why.' }, { category: 'efficiency', pointsDeducted: 4, reason: 'FRT and one ART interval missed the confirmed targets.', transcriptExample: 'I am checking this now', betterAction: 'Send a short progress update before the ART threshold.' }], accuracyIssues: [], coachingActions: ['Give the exact navigation path immediately.', 'Send a progress update during investigation.'], goal: 'Resolve accurately while making each next step effortless for the client.', manualReview: false, confidence: 94 } }];
-        setCurrentJob(previewJob); setResults(previewResults); setView('results');
-      }
-      return;
-    }
     const token = localStorage.getItem('appSession') || '';
     setSession(token);
     if (!token) { setLoading(false); return; }
@@ -335,6 +323,24 @@ export default function Audits() {
     } catch (err) { setError(err.message); } finally { setSavingAdmin(''); }
   }
 
+  async function createDeveloperKey() {
+    setSavingAdmin('create-external-key'); setError(''); setDeveloperConnection(null);
+    try {
+      const result = await request('create-external-key', { name: developerKeyName, expiresInDays: Number(developerKeyDays), scopes: data.developerScopes || [] });
+      setData((current) => ({ ...current, developerKeys: result.keys })); setRevealedDeveloperKey(result.key);
+      const response = await fetch('/api/external/health', { headers: { Authorization: `Bearer ${result.key}` } });
+      const healthResult = await response.json();
+      setDeveloperConnection({ connected: response.ok && healthResult.connected, detail: response.ok ? `Connected · ${healthResult.knowledge?.articles || 0} FAQs visible · ${healthResult.knowledge?.activeNotices || 0} active Notices` : healthResult.error });
+      setNotice('Developer API key created and tested. Copy it now; the full key will not be shown again.');
+    } catch (err) { setError(err.message); } finally { setSavingAdmin(''); }
+  }
+
+  async function revokeDeveloperKey(id) {
+    setSavingAdmin(`revoke-${id}`); setError('');
+    try { const result = await request('revoke-external-key', { id }); setData((current) => ({ ...current, developerKeys: result.keys })); setNotice('Developer API key revoked.'); }
+    catch (err) { setError(err.message); } finally { setSavingAdmin(''); }
+  }
+
   async function download(format, detailed = false) {
     if (!currentJob) return;
     setNotice('Preparing your download…');
@@ -349,19 +355,6 @@ export default function Audits() {
 
   async function openComparison(result) {
     setComparison({ result, loading: true, conversation: null, error: '' });
-    if (process.env.NODE_ENV !== 'production' && session === 'preview') {
-      const conversation = { turns: [
-        { id: 'c1', role: 'client', author: 'Dogukan Timucin', createdAt: '2026-10-15T10:39:30.000Z', body: 'I cannot find the Performance Reward page. Can you show me where it is?' },
-        { id: 'e1', role: 'system', author: 'Intercom event', partType: 'assignment', createdAt: '2026-10-15T10:40:00.000Z', body: '[conversation assigned to Allen Fletcher]' },
-        { id: 'b1', role: 'bot', author: 'FundedNext AI', createdAt: '2026-10-15T10:40:05.000Z', body: 'The Performance Reward section is available from the dashboard. A support specialist will help with the exact path.' },
-        { id: 'a1', role: 'agent', author: 'Allen Fletcher', createdAt: '2026-10-15T10:40:42.000Z', body: 'You may search for it in your dashboard.' },
-        { id: 'c2', role: 'client', author: 'Dogukan Timucin', createdAt: '2026-10-15T10:41:10.000Z', body: 'I already searched and still cannot see it. Which menu should I open?' },
-        { id: 'a2', role: 'agent', author: 'Allen Fletcher', createdAt: '2026-10-15T10:43:02.000Z', body: 'I am checking this now. Please open Dashboard, choose Accounts, then select Performance Reward beside the eligible account.' },
-        { id: 'a3', role: 'agent', author: 'Allen Fletcher', createdAt: '2026-10-15T10:45:22.000Z', body: 'If the button is unavailable, the account has not reached eligibility yet. I checked your account and the eligibility date is tomorrow.' }
-      ] };
-      setComparison({ result, loading: false, conversation, error: '' });
-      return;
-    }
     try {
       const response = await request('conversation-view', { conversationId: result.conversationId });
       setComparison({ result, loading: false, conversation: response.conversation, error: '' });
@@ -449,6 +442,7 @@ export default function Audits() {
           <section className="audit-card"><div className="card-heading"><div><span>Intercom directory</span><h2>Agents in the dropdown</h2><p>Sync the live directory, then choose who can be sampled.</p></div><button disabled={syncingAgents} onClick={syncAgents}>{syncingAgents ? 'Syncing…' : '↻ Sync Intercom'}</button></div><div className="admin-agent-list">{(data.agents || []).map((agent) => <label key={agent.id} className={enabledDraft.includes(agent.id) ? 'enabled' : ''}><input type="checkbox" checked={enabledDraft.includes(agent.id)} onChange={() => setEnabledDraft((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id])}/><span><b>{agent.name}</b><small>{agent.email || agent.id}</small></span><em>{agent.hasInboxSeat ? 'Inbox seat' : 'No inbox seat'}</em></label>)}</div><button className="settings-save" disabled={savingAdmin === 'save-agents'} onClick={() => saveAdmin('save-agents', { agentIds: enabledDraft }, 'Audit agent dropdown updated.')}>{savingAdmin === 'save-agents' ? 'Saving…' : `Save ${enabledDraft.length} enabled agents`}</button></section>
           <section className="audit-card"><div className="card-heading"><div><span>Restricted access</span><h2>Authorized auditors</h2><p>One verified @nextventures.io email per line. Faiyaz and Master access remain protected.</p></div></div><textarea rows={8} value={accessDraft} onChange={(event) => setAccessDraft(event.target.value)} placeholder="name@nextventures.io"/><button className="settings-save" disabled={savingAdmin === 'save-access'} onClick={() => saveAdmin('save-access', { emails: accessDraft.split(/[\s,]+/).filter(Boolean) }, 'Conversation Audit access updated.')}>{savingAdmin === 'save-access' ? 'Saving…' : 'Save audit access'}</button></section>
           <section className="audit-card"><div className="card-heading"><div><span>Failover order</span><h2>Gemini model chain</h2><p>One stable model ID per line. The next model and key are tried automatically.</p></div></div><textarea className="mono" rows={8} value={modelsDraft} onChange={(event) => setModelsDraft(event.target.value)} placeholder="gemini-3.5-flash-lite"/><button className="settings-save" disabled={savingAdmin === 'save-models'} onClick={() => saveAdmin('save-models', { models: modelsDraft.split(/[\s,]+/).filter(Boolean) }, 'Gemini audit model chain updated.')}>{savingAdmin === 'save-models' ? 'Saving…' : 'Save model chain'}</button></section>
+          <section className="audit-card developer-api-card"><div className="card-heading"><div><span>Controlled testing access</span><h2>Developer API keys</h2><p>Create a temporary, revocable key for deployed chatbot and auditor testing. Intercom and Gemini secrets remain inside the app.</p></div><span className={`developer-live-state ${developerConnection?.connected ? 'connected' : ''}`}><i/>{developerConnection?.connected ? 'Connected' : 'Scoped access'}</span></div><div className="developer-key-form"><label>Name<input value={developerKeyName} maxLength={80} onChange={(event) => setDeveloperKeyName(event.target.value)} placeholder="Codex testing"/></label><label>Expires<select value={developerKeyDays} onChange={(event) => setDeveloperKeyDays(event.target.value)}><option value="1">24 hours</option><option value="7">7 days</option><option value="30">30 days</option></select></label><button className="settings-save" disabled={savingAdmin === 'create-external-key'} onClick={createDeveloperKey}>{savingAdmin === 'create-external-key' ? 'Creating and testing…' : 'Generate testing key'}</button></div><div className="developer-scopes">{(data.developerScopes || []).map((scope) => <span key={scope}>✓ {scope}</span>)}</div>{revealedDeveloperKey && <div className="developer-key-reveal"><div><span>Copy this key now</span><b>{developerConnection?.connected ? 'Connection verified' : 'Testing connection…'}</b></div><code>{revealedDeveloperKey}</code><button onClick={() => navigator.clipboard.writeText(revealedDeveloperKey)}>Copy key</button><small>{developerConnection?.detail || 'The full key is displayed only once.'}</small></div>}<div className="developer-endpoints"><span>Available endpoints</span><code>POST /api/external/chat-test</code><code>POST /api/external/audit?action=create-job</code><code>GET /api/external/audit?action=job&amp;id=…</code><code>GET /api/external/health</code><code>GET /api/external/diagnostics</code></div><div className="developer-key-list">{(data.developerKeys || []).map((item) => <article key={item.id} className={item.status}><div><b>{item.name}</b><small>{item.prefix}… · expires {formatDate(item.expiresAt)}</small><small>{item.lastUsedAt ? `Last used ${formatDate(item.lastUsedAt)}` : 'Never used'}</small></div><span>{item.status}</span>{item.status === 'active' && <button disabled={savingAdmin === `revoke-${item.id}`} onClick={() => revokeDeveloperKey(item.id)}>Revoke</button>}</article>)}{!(data.developerKeys || []).length && <p className="developer-empty">No developer keys have been generated.</p>}</div></section>
           <section className="audit-card thresholds-card"><div className="card-heading"><div><span>Confirmed scoring targets</span><h2>Efficiency thresholds</h2><p>These values feed deterministic calculations before Gemini reviews the interaction.</p></div></div><div><Metric label="First response" value={`${data.thresholds.frtSeconds}s`} detail="FRT target"/><Metric label="Agent response" value={`${data.thresholds.artSeconds}s`} detail="ART target"/><Metric label="Handling time" value={`${data.thresholds.ahtSeconds / 60}m`} detail="AHT target"/></div></section>
         </div>}
       </main>
