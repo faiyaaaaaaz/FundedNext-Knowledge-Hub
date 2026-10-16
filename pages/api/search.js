@@ -265,6 +265,21 @@ function snippetFitsScope(snippet, { selectedProduct, selectedModel, comparisonM
   return false;
 }
 
+function snippetFitsQuestion(snippet) {
+  const scopeOnly = new Set([
+    'account', 'accounts', 'fundednext', 'cfd', 'futures', 'stellar', 'lite',
+    'instant', 'step', 'steps', 'challenge', 'model', 'models', 'product', 'products'
+  ]);
+  const matched = snippet?._triggerMatch?.matched || [];
+  // Model/product words establish scope, not topic. Requiring at least one
+  // topical trigger prevents a correction about maximum trades from entering a
+  // payout question merely because both mention "Stellar Lite".
+  return matched.some((term) => {
+    const normalized = String(term || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+    return normalized.length >= 3 && !scopeOnly.has(normalized);
+  });
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   const started = Date.now();
@@ -1069,7 +1084,7 @@ export default async function handler(req, res) {
     // that the main retrieval filter correctly rejected.
     const snippets = rawSnippets.filter((snippet) => snippetFitsScope(snippet, {
       selectedProduct, selectedModel, comparisonModels, catalog: scopeCatalog.models
-    })).map((snippet) => {
+    }) && snippetFitsQuestion(snippet)).map((snippet) => {
       const evidence = snippet._evidence || [];
       const annotated = evidence.map((source) => ({ ...source, _regionScope: regionScopeFor(sourceArticleId(source)) }));
       const applicable = annotated.filter((source) => regionIsApplicable(source._regionScope));
@@ -1558,11 +1573,12 @@ export default async function handler(req, res) {
       const fallbackStatus = 'not_confirmed';
       coverageStatuses = topicPlan.map(() => fallbackStatus);
     }
-    const questionCoverage = topicPlan.map((topic, index) => ({ question: topic.question, status: coverageStatuses[index] }));
-    const answeredCount = questionCoverage.filter((item) => item.status === 'answered').length;
-    const partialCount = questionCoverage.filter((item) => item.status === 'partial').length;
-    const notConfirmedCount = questionCoverage.filter((item) => item.status === 'not_confirmed').length;
-    const coverageSummary = { total: questionCoverage.length, answered: answeredCount, partial: partialCount, notConfirmed: notConfirmedCount };
+    let questionCoverage = topicPlan.map((topic, index) => ({ question: topic.question, status: coverageStatuses[index] }));
+    let answeredCount = questionCoverage.filter((item) => item.status === 'answered').length;
+    let partialCount = questionCoverage.filter((item) => item.status === 'partial').length;
+    let notConfirmedCount = questionCoverage.filter((item) => item.status === 'not_confirmed').length;
+    let coverageSummary = { total: questionCoverage.length, answered: answeredCount, partial: partialCount, notConfirmed: notConfirmedCount };
+    let coverageReconciled = false;
     const noticeConflictDetected = hasNoticeEvidence && /^yes$/i.test(noticeConflictLine?.[1] || '');
     // An exact computation must not be thrown away as "unconfirmed".
     if (okCalc.length) confidence = Math.max(confidence, 74);
@@ -1598,6 +1614,20 @@ export default async function handler(req, res) {
         // Only worth sending if at least one paragraph actually has a citation.
         if (!segments.some((s) => s.refs.length)) segments = null;
       }
+    }
+    // Some fallback models occasionally label a fully cited, single-topic
+    // answer as not_confirmed. Reconcile that private label with the validated
+    // paragraph citations so the UI never appends a contradiction to its own
+    // sourced answer.
+    if (answer !== SAFE_UNCONFIRMED && topicPlan.length === 1 && notConfirmedCount === 1 &&
+        segments?.length && segments.every((segment) => segment.refs.length > 0) &&
+        !/\b(?:unable|cannot|could not)\b.{0,80}\b(?:confirm|answer|verify)\b/i.test(answer)) {
+      questionCoverage = [{ ...questionCoverage[0], status: 'answered' }];
+      answeredCount = 1;
+      partialCount = 0;
+      notConfirmedCount = 0;
+      coverageSummary = { total: 1, answered: 1, partial: 0, notConfirmed: 0 };
+      coverageReconciled = true;
     }
     if (citationMappingRecovered) {
       confidence = Math.min(confidence, 80);
@@ -1725,7 +1755,7 @@ export default async function handler(req, res) {
           sourceDeclarationPresent: !!sourceLine,
           finalSources: sources.slice(0, 12).map((source) => ({ title: source.title, url: source.url, kind: source.kind }))
         },
-        processing: { partialAnswerRetryAttempted, partialAnswerRetrySucceeded, citationMappingRecovered, fallback: usedFallback, groundingScore, semanticSearchDegraded: !!semanticSearchError },
+        processing: { partialAnswerRetryAttempted, partialAnswerRetrySucceeded, citationMappingRecovered, coverageReconciled, fallback: usedFallback, groundingScore, semanticSearchDegraded: !!semanticSearchError },
         snippetsUsed,
         questionCoverage, coverageSummary,
         noticeConflict: noticeConflictDetected ? { detected: true, resolution: 'A relevant CEx Notice overrode incompatible FAQ information.', noticeSources: sources.filter((source) => source.kind === 'notice').map((source) => source.title), faqSources: sources.filter((source) => source.kind === 'faq').map((source) => source.title) } : { detected: false },
