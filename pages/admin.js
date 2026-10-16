@@ -43,7 +43,7 @@ function formatDuration(ms) {
 }
 
 function syncStatusLabel(status) {
-  return { success: 'Success', partial: 'In progress', failed: 'Failed', skipped: 'Skipped' }[status] || status;
+  return { success: 'Success', partial: 'Checkpoint saved', failed: 'Failed', skipped: 'Skipped' }[status] || status;
 }
 
 function initials(name, email) {
