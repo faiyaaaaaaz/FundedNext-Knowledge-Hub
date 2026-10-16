@@ -220,8 +220,16 @@ function ruleIntent(text) {
   return {
     dailyLoss: /\b(?:daily|today'?s?|permitted)\b.{0,30}\b(?:loss|drawdown|limit)\b|\b(?:loss|drawdown)\b.{0,20}\b(?:daily|permitted)\b/.test(value),
     maximumLoss: /\b(?:maximum|max|overall)\b.{0,30}\b(?:loss|drawdown|limit|mll)\b|\bmll\b/.test(value),
-    minimumTrading: asksMinimumTradingRequirement(value)
+    minimumTrading: asksMinimumTradingRequirement(value),
+    expertAdvisor: /\b(?:eas?|expert advisors?|automated trading(?: systems?)?|algorithmic trading|trading bots?)\b/.test(value)
   };
+}
+
+function directlyStatesExpertAdvisorRule(item) {
+  const text = normalizedEvidenceText(`${item?.article_title || ''}\n${item?.content || ''}`).toLowerCase();
+  const namesAutomation = /\b(?:eas?|expert advisors?|automated trading(?: systems?)?|algorithmic trading|trading bots?)\b/.test(text);
+  const statesPermission = /\b(?:not permitted|not allowed|prohibited|manual trading only|allowed|permitted|may use|can use|must trade manually)\b/.test(text);
+  return namesAutomation && statesPermission;
 }
 
 function directIntentScore(item, intent) {
@@ -240,6 +248,10 @@ function directIntentScore(item, intent) {
     if (/\bminimum\b.{0,25}\b(?:trades?|trading days?)\b|\btrading days?\b.{0,20}\bminimum\b/.test(title)) score += 42;
     else if (directlyStatesMinimumTradingRequirement(item)) score += 18;
   }
+  if (intent.expertAdvisor) {
+    if (/\b(?:eas?|expert advisors?|automated trading|trading bots?)\b/.test(title)) score += 54;
+    else if (directlyStatesExpertAdvisorRule(item)) score += 36;
+  }
   return score;
 }
 
@@ -249,6 +261,7 @@ function hasDirectRuleEvidence(items, intent) {
     if (intent.dailyLoss && /\b(?:daily|permitted)\b.{0,60}\bloss\b/.test(text) && /\b\d+(?:\.\d+)?%\b|\binitial balance\b/.test(text)) return true;
     if (intent.maximumLoss && /\b(?:maximum|max|overall)\b.{0,60}\bloss\b|\bmll\b/.test(text) && /\b\d+(?:\.\d+)?%\b|\binitial balance\b/.test(text)) return true;
     if (intent.minimumTrading && directlyStatesMinimumTradingRequirement(item)) return true;
+    if (intent.expertAdvisor && directlyStatesExpertAdvisorRule(item)) return true;
     return false;
   });
 }
@@ -283,12 +296,13 @@ function snippetFitsQuestion(snippet) {
 }
 
 function snippetFitsRuleIntent(snippet, intent) {
-  if (!intent?.dailyLoss && !intent?.maximumLoss && !intent?.minimumTrading) return true;
+  if (!intent?.dailyLoss && !intent?.maximumLoss && !intent?.minimumTrading && !intent?.expertAdvisor) return true;
   const evidence = (snippet?._evidence || []).map((source) => `${source?.title || ''}\n${source?.excerpt || ''}`).join('\n');
   const text = normalizedEvidenceText(`${snippet?.title || ''}\n${snippet?.instruction || ''}\n${evidence}`).toLowerCase();
   if (intent.dailyLoss && !/\b(?:daily|today'?s?|permitted)\b.{0,45}\b(?:loss|drawdown|limit)\b/.test(text)) return false;
   if (intent.maximumLoss && !(/\b(?:maximum|max|overall)\b.{0,45}\b(?:loss|drawdown|limit)\b/.test(text) || /\bmll\b/.test(text))) return false;
   if (intent.minimumTrading && !/\bminimum\b.{0,35}\b(?:trades?|trading days?)\b|\btrading days?\b.{0,25}\bminimum\b/.test(text)) return false;
+  if (intent.expertAdvisor && !/\b(?:eas?|expert advisors?|automated trading|algorithmic trading|trading bots?)\b/.test(text)) return false;
   return true;
 }
 
@@ -624,7 +638,10 @@ export default async function handler(req, res) {
     ] : [];
 
     // ---- Keyword recall (typo-corrected) ------------------------------------
-    const terms = keywords(correctTypos(question) + ' ' + clearQuestion + (selectedModel ? ` ${selectedModel.name}` : ''));
+    const expertAdvisorRecall = concepts.groups.includes('expert_advisor')
+      ? ' Expert Advisor automated trading system trading bot manual trading'
+      : '';
+    const terms = keywords(correctTypos(question) + ' ' + clearQuestion + (selectedModel ? ` ${selectedModel.name}` : '') + expertAdvisorRecall);
     let keywordMatches = [];
     if (terms.length) {
       const expression = terms.slice(0, 14).flatMap((term) => [`content.ilike.%${term}%`, `article_title.ilike.%${term}%`]).join(',');
@@ -655,6 +672,9 @@ export default async function handler(req, res) {
       // These narrower live-database lookups reserve the canonical English rule
       // and calculation pages without encoding the policy value in application code.
       anchorQueries.push(scopedEnglishAnchor('article_title.ilike.%calculate%maximum%loss%,article_title.ilike.%what%maximum%loss%', 40));
+    }
+    if (requestedRuleIntent.expertAdvisor) {
+      anchorQueries.push(scopedEnglishAnchor('content.ilike.%expert advisor%,content.ilike.%automated trading%,content.ilike.%trading bot%,article_title.ilike.%ea%allowed%', 60));
     }
     if (selectedModel) {
       const modelNeedle = normalizedEvidenceText(selectedModel.name).replace(/[^a-z0-9 -]/gi, ' ').replace(/\s+/g, ' ').trim();
@@ -978,6 +998,22 @@ export default async function handler(req, res) {
       matches = picked.sort((a, b) => order.get(a.id) - order.get(b.id)).slice(0, 12);
     } else {
       matches = candidates.slice(0, 8);
+    }
+    // The article title can identify the correct Account scope while a different
+    // chunk from that article contains the actual EA permission/prohibition.
+    // Reserve those direct passages so the model never receives only nearby
+    // Competition or platform text and then has to refuse.
+    if (requestedRuleIntent.expertAdvisor) {
+      const direct = candidates.filter(directlyStatesExpertAdvisorRule).slice(0, 4);
+      if (direct.length) {
+        const seen = new Set();
+        matches = [...direct, ...matches].filter((item) => {
+          const key = String(item.id);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        }).slice(0, 12);
+      }
     }
     // Preserve evidence for each explicitly requested model in a comparison.
     if (comparisonModels.length > 1) {
