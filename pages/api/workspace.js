@@ -31,8 +31,10 @@ export default async function handler(req, res) {
       }
       checked(await sb.from('workspace_people').upsert({ email, name: user.name }, { onConflict: 'email' }));
       if (action === 'history') {
-        const rows = checked(await sb.from('activity_logs').select('id,created_at,metadata,success,provider').eq('user_email', email).eq('event_type', 'query').order('created_at', { ascending: false }).order('id', { ascending: false }).range(offset, offset + 29));
-        return res.json({ items: rows.map(r => ({ id: r.id, created_at: r.created_at, question: r.metadata?.question || r.metadata?.questionPreview || '', answer: r.metadata?.answer || r.metadata?.answerPreview || r.metadata?.error || 'No completed answer was recorded.', sources: r.metadata?.sources || [], feedback: r.metadata?.feedback, confidence: r.metadata?.confidence, confidenceLabel: r.metadata?.confidenceLabel || '', provider: r.provider, scope: { product: r.metadata?.selectedProduct, model: r.metadata?.selectedModel, label: r.metadata?.selectedScopeLabel }, incomplete: !r.metadata?.answer, success: r.success })), more: rows.length === 30 });
+        const pageSize = 20;
+        const result = await sb.from('activity_logs').select('id,created_at,metadata,success,provider', { count: 'exact' }).eq('user_email', email).eq('event_type', 'query').order('created_at', { ascending: false }).order('id', { ascending: false }).range(offset, offset + pageSize - 1);
+        const rows = checked(result), total = Number(result.count || 0);
+        return res.json({ items: rows.map(r => ({ id: r.id, created_at: r.created_at, question: r.metadata?.question || r.metadata?.questionPreview || '', answer: r.metadata?.answer || r.metadata?.answerPreview || r.metadata?.error || 'No completed answer was recorded.', sources: r.metadata?.sources || [], feedback: r.metadata?.feedback, confidence: r.metadata?.confidence, confidenceLabel: r.metadata?.confidenceLabel || '', provider: r.provider, scope: { product: r.metadata?.selectedProduct, model: r.metadata?.selectedModel, label: r.metadata?.selectedScopeLabel }, incomplete: !r.metadata?.answer, success: r.success })), total, more: offset + rows.length < total });
       }
       if (action === 'disputes') {
         const items = checked(await sb.from('disputes').select('id,created_at,question,answer,dispute_reason,status,approval_reason,reviewed_at').eq('user_email', email).order('created_at', { ascending: false }).order('id', { ascending: false }).range(offset, offset + 29));
