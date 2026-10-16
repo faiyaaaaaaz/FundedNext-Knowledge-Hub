@@ -123,12 +123,22 @@ function HighlightedMessage({ text, flags }) {
 }
 function formatSeconds(value) { const seconds = Math.max(0, Number(value) || 0); return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`; }
 function timelineSeconds(value) { if (typeof value === 'number' && Number.isFinite(value)) return value; const parsed = Date.parse(value); return Number.isFinite(parsed) ? parsed / 1000 : 0; }
+function timelineKind(turn) {
+  const body = String(turn?.body || '').trim();
+  const role = turn?.kind || turn?.role || 'bot';
+  const machineMarker = /^\[[a-z0-9_ -]+\]$/i.test(body);
+  // Intercom can attach event-like part types to delivered email replies. A
+  // genuine human-authored body must retain its client/agent presentation.
+  if (body && !machineMarker && (role === 'client' || role === 'agent')) return role;
+  if (machineMarker || /assign|attribute|close|snooze|open|sla/i.test(turn?.partType || '')) return 'event';
+  return role;
+}
 function comparisonTimeline(turns, result) {
-  const items = turns.map((turn) => ({ ...turn, at: timelineSeconds(turn.at || turn.createdAt), authorName: turn.authorName || turn.author || 'Unknown', timelineKind: /^\[[a-z0-9_ -]+\]$/i.test(turn.body || '') || /assign|attribute|close|snooze|open|sla/i.test(turn.partType || '') ? 'event' : (turn.kind || turn.role) }));
+  const items = turns.map((turn) => ({ ...turn, at: timelineSeconds(turn.at || turn.createdAt), authorName: turn.authorName || turn.author || 'Unknown', timelineKind: timelineKind(turn) }));
   const metrics = result?.metrics || {}; const metricEvents = [];
   if (metrics.firstResponseAt && metrics.frtSeconds != null) metricEvents.push({ id: 'metric-frt', at: timelineSeconds(metrics.firstResponseAt) - .2, timelineKind: 'metric', metricTone: metrics.frtHit === false ? 'miss' : 'hit', authorName: 'FRT', body: `${formatSeconds(metrics.frtSeconds)} · ${metrics.frtHit === false ? 'Missed' : 'Met'} 30s target` });
   if (metrics.finalMessageAt && Array.isArray(metrics.responseTimes) && metrics.responseTimes.length) metricEvents.push({ id: 'metric-art', at: timelineSeconds(metrics.finalMessageAt) - .1, timelineKind: 'metric', metricTone: metrics.artBreaches ? 'miss' : 'hit', authorName: 'ART', body: `${metrics.artBreaches || 0} of ${metrics.responseTimes.length} response cycles missed the 90s target` });
-  if (metrics.finalMessageAt && metrics.ahtSeconds != null) metricEvents.push({ id: 'metric-aht', at: timelineSeconds(metrics.finalMessageAt) + .1, timelineKind: 'metric', metricTone: metrics.ahtHit === false ? 'miss' : 'hit', authorName: 'AHT', body: `${formatSeconds(metrics.ahtSeconds)} · ${metrics.ahtHit === false ? 'Missed' : 'Met'} 20m target` });
+  if (metrics.finalMessageAt && metrics.ahtSeconds != null) metricEvents.push({ id: 'metric-aht', at: timelineSeconds(metrics.finalMessageAt) + .1, timelineKind: 'metric', metricTone: metrics.ahtHit === false ? 'miss' : 'hit', authorName: 'AHT', body: `${formatSeconds(metrics.ahtSeconds)} across ${metrics.ahtMessageCount || metrics.ahtCycles?.length || 1} agent replies · ${metrics.ahtHit === false ? 'Missed' : 'Met'} 20m target` });
   return [...items, ...metricEvents].sort((a, b) => Number(a.at || 0) - Number(b.at || 0));
 }
 
