@@ -95,23 +95,30 @@ async function createJob(req, access, sb, body) {
     const candidates = await findConversationCandidates(keys.intercomToken, { agentIds: requested, from: body.from, to: body.to, maxPerAgent: Math.max(150, requestedSize * 4) });
     if (!candidates.length) throw new Error('Intercom returned no conversations for the selected agents and date range.');
     const previousRows = checked(await sb.from('activity_logs').select('metadata').eq('event_type', 'conversation_audit_result').eq('success', true).limit(5000), 'Could not check previous audits');
-    const previouslyAudited = new Set((previousRows || []).map((row) => String(row.metadata?.conversationId || '')).filter(Boolean));
-    const shuffled = sampleCandidates(candidates.filter((item) => !previouslyAudited.has(String(item.id))), candidates.length, seed);
+    const previouslyAudited = new Set((previousRows || []).map((row) => {
+      const conversationId = String(row.metadata?.conversationId || ''); const agentId = String(row.metadata?.agentId || '');
+      return conversationId && agentId ? `${conversationId}:${agentId}` : conversationId;
+    }).filter(Boolean));
+    const available = candidates.filter((item) => !previouslyAudited.has(`${item.id}:${item.agentId}`) && !previouslyAudited.has(String(item.id)));
+    const shuffled = sampleCandidates(available, available.length, seed);
     const admins = await fetchIntercomAdmins(keys.intercomToken);
-    const eligible = [];
-    for (let offset = 0; offset < shuffled.length && eligible.length < requestedSize; offset += 8) {
+    const eligible = []; const comparisonPoolSize = Math.min(shuffled.length, Math.max(requestedSize * 4, 40));
+    for (let offset = 0; offset < comparisonPoolSize; offset += 8) {
       const slice = shuffled.slice(offset, offset + 8);
       const fetched = await Promise.allSettled(slice.map((candidate) => fetchConversation(keys.intercomToken, candidate.id)));
       fetched.forEach((result, index) => {
         if (result.status !== 'fulfilled') return;
         const candidate = slice[index]; const turns = conversationTurns(result.value, admins);
-        if (meaningfulAgentIds(turns).includes(String(candidate.agentId))) eligible.push(candidate);
+        if (!meaningfulAgentIds(turns).includes(String(candidate.agentId))) return;
+        const agentMessageCount = turns.filter((turn) => turn.kind === 'agent' && turn.authorId === String(candidate.agentId) && turn.body).length;
+        eligible.push({ ...candidate, agentMessageCount });
       });
     }
     if (!eligible.length) throw new Error('No conversations with meaningful human-agent participation were found in this selection.');
-    queue = eligible.slice(0, requestedSize).map((item) => ({ id: item.id, targetAgentId: item.agentId, attempts: 0 }));
+    eligible.sort((a, b) => b.agentMessageCount - a.agentMessageCount || Number(b.createdAt || 0) - Number(a.createdAt || 0));
+    queue = eligible.slice(0, requestedSize).map((item) => ({ id: item.id, targetAgentId: item.agentId, agentMessageCount: item.agentMessageCount, attempts: 0 }));
   }
-  const filters = mode === 'direct' ? { conversationIds: directIds } : { agentIds: body.agentIds || [], from: body.from || '', to: body.to || '', sampleSize: Math.max(1, Math.min(Number(body.sampleSize) || 10, 100)) };
+  const filters = mode === 'direct' ? { conversationIds: directIds } : { agentIds: body.agentIds || [], from: body.from || '', to: body.to || '', sampleSize: Math.max(1, Math.min(Number(body.sampleSize) || 10, 100)), selectionStrategy: 'highest_target_agent_message_count' };
   const metadata = {
     status: 'queued', mode, stage: 'Ready to fetch conversations', total: queue.length, processed: 0, completed: 0,
     skipped: 0, failed: 0, evaluations: 0, queue, filters, directIds, seed,
@@ -232,6 +239,17 @@ export default async function handler(req, res) {
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.' });
     const body = req.body || {};
     if (action === 'health') return res.json({ health: await auditConnections() });
+    if (action === 'conversation-view') {
+      const conversationId = parseConversationIds(body.conversationId)[0];
+      if (!conversationId) throw new Error('A valid conversation ID is required.');
+      const keys = await getKeys(); if (!keys.intercomToken) throw new Error('Intercom is not connected.');
+      const [conversation, admins] = await Promise.all([fetchConversation(keys.intercomToken, conversationId), fetchIntercomAdmins(keys.intercomToken)]);
+      const turns = conversationTurns(conversation, admins).map((turn) => ({
+        id: turn.id, at: turn.at, kind: turn.kind, authorId: turn.authorId, authorName: turn.authorName,
+        body: turn.body, partType: turn.partType, assignedTo: turn.assignedTo
+      }));
+      return res.json({ conversation: { id: conversationId, intercomLink: intercomLink(conversation), turns } });
+    }
     if (action === 'create-job') return res.json({ job: await createJob(req, access, sb, body) });
     if (action === 'process-next') return res.json(await processNext(access, sb, body.jobId));
     if (action === 'sync-agents') {
