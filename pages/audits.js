@@ -48,7 +48,7 @@ function CopyConversationId({ value }) {
   return <button type="button" className={`copy-conversation ${copied ? 'copied' : ''}`} onClick={copy} title="Copy conversation ID" aria-label={`Copy conversation ${value}`}>{copied ? 'Copied' : 'Copy'}</button>;
 }
 
-function ResultCard({ result }) {
+function ResultCard({ result, onCompare }) {
   const [open, setOpen] = useState(false);
   if (result.status !== 'completed') return <article className={`audit-result-card ${result.status}`}><div className="result-summary"><div><div className="result-conversation-line"><a href={conversationHref(result)} target="_blank" rel="noreferrer">Conversation {result.conversationId} ↗</a><CopyConversationId value={result.conversationId}/></div><h3>{result.status === 'skipped' ? 'Excluded from scoring' : 'Audit could not complete'}</h3><p>{result.skipReason || result.error}</p></div><span className="result-state">{result.status}</span></div></article>;
   const audit = result.audit || {};
@@ -68,10 +68,26 @@ function ResultCard({ result }) {
         <section><span>Accuracy</span><p>{audit.accuracyFinding}</p></section>
         <section><span>Continuity</span><p>{audit.continuityFinding}</p></section>
       </div>
+      {(audit.deductions || []).length > 0 && <div className="deduction-block"><span>Why marks were deducted</span>{audit.deductions.map((item, index) => <section key={index}><div><b>{item.category}</b><em>−{item.pointsDeducted} point{Number(item.pointsDeducted) === 1 ? '' : 's'}</em></div><p>{item.reason}</p>{item.transcriptExample && <small><b>Conversation example:</b> {item.transcriptExample}</small>}{item.betterAction && <small><b>Better action:</b> {item.betterAction}</small>}</section>)}</div>}
+      {(audit.accuracyIssues || []).length > 0 && <div className="accuracy-issues"><span>Incorrect information and correction</span>{audit.accuracyIssues.map((item, index) => <section key={index}><p><b>Shared:</b> {item.wrongInformation}</p><p><b>Correct:</b> {item.correctInformation}</p>{item.evidenceUrl ? <a href={item.evidenceUrl} target="_blank" rel="noreferrer">Open supporting source: {item.evidenceTitle || 'verified evidence'} ↗</a> : <em>Source requires manual verification</em>}</section>)}</div>}
       <div className="coaching-block"><span>Coaching actions</span><ol>{(audit.coachingActions || []).map((item, index) => <li key={index}>{item}</li>)}</ol><b>Goal</b><p>{audit.goal}</p></div>
-      <div className="result-foot"><span className={audit.manualReview ? 'review-needed' : 'review-clear'}>{audit.manualReview ? 'Manual review required' : 'Automated review complete'}</span><span>{audit.confidence}% confidence</span><span>{result.model}</span><a href={conversationHref(result)} target="_blank" rel="noreferrer">Open in Intercom ↗</a></div>
+      <div className="result-foot"><span className={audit.manualReview ? 'review-needed' : 'review-clear'}>{audit.manualReview ? 'Manual review required' : 'Automated review complete'}</span><span>{audit.confidence}% confidence</span><span>{result.model}</span><button type="button" onClick={() => onCompare(result)}>View results with conversation</button><a href={conversationHref(result)} target="_blank" rel="noreferrer">Open in Intercom ↗</a></div>
     </div>}
   </article>;
+}
+
+function ConversationReviewModal({ state, onClose }) {
+  if (!state) return null;
+  const result = state.result || {}; const audit = result.audit || {}; const turns = state.conversation?.turns || [];
+  return <div className="audit-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <section className="audit-comparison-modal" role="dialog" aria-modal="true" aria-label={`Audit and conversation ${result.conversationId}`}>
+      <header><div><span>Conversation review</span><h2>{result.agentName} · {result.conversationId}</h2></div><div><CopyConversationId value={result.conversationId}/><a href={conversationHref(result)} target="_blank" rel="noreferrer">Open in Intercom ↗</a><button type="button" onClick={onClose} aria-label="Close comparison">×</button></div></header>
+      {state.loading ? <div className="comparison-loading"><StatusOrb state="checking"/><h3>Loading the live Intercom conversation…</h3><p>The transcript is fetched only for this view and is not added to audit history.</p></div> : state.error ? <div className="comparison-loading error"><h3>Could not load the conversation</h3><p>{state.error}</p></div> : <div className="comparison-columns">
+        <article className="comparison-verdict"><div className="comparison-score"><ScoreRing value={audit.finalScore}/><div><span>AI verdict</span><h3>{audit.primaryIssue}</h3><p>{audit.mainFinding}</p></div></div><div className="comparison-category"><b>Quality · {audit.quality}/10</b><p>{audit.qualityComment}</p></div><div className="comparison-category"><b>Efficiency · {audit.efficiency}/10</b><p>{audit.efficiencyComment}</p></div><div className="comparison-category"><b>Process &amp; judgment · {audit.complexity}/10</b><p>{audit.complexityComment}</p></div><div className="modal-deductions"><h4>Why marks were deducted</h4>{(audit.deductions || []).map((item, index) => <section key={index}><div><b>{item.category}</b><em>−{item.pointsDeducted}</em></div><p>{item.reason}</p>{item.transcriptExample && <small><b>Example:</b> {item.transcriptExample}</small>}{item.betterAction && <small><b>Better action:</b> {item.betterAction}</small>}</section>)}{!(audit.deductions || []).length && <p>No deductions recorded.</p>}</div>{(audit.accuracyIssues || []).map((item, index) => <div className="modal-accuracy" key={index}><b>Accuracy correction</b><p><strong>Shared:</strong> {item.wrongInformation}</p><p><strong>Correct:</strong> {item.correctInformation}</p>{item.evidenceUrl && <a href={item.evidenceUrl} target="_blank" rel="noreferrer">Open source ↗</a>}</div>)}</article>
+        <article className="comparison-transcript"><div className="transcript-heading"><span>Live Intercom transcript</span><b>{turns.filter((turn) => turn.body).length} messages</b></div>{turns.map((turn) => <div key={turn.id} className={`transcript-turn ${turn.kind}`}><div><b>{turn.authorName}</b><time>{formatDate(new Date(turn.at * 1000).toISOString())}</time></div><p>{turn.body || `[${turn.partType}]`}</p></div>)}</article>
+      </div>}
+    </section>
+  </div>;
 }
 
 export default function Audits() {
@@ -99,6 +115,7 @@ export default function Audits() {
   const [accessDraft, setAccessDraft] = useState('');
   const [modelsDraft, setModelsDraft] = useState('');
   const [savingAdmin, setSavingAdmin] = useState('');
+  const [comparison, setComparison] = useState(null);
   const stopRef = useRef(false);
   const processingRef = useRef(false);
   const directMode = conversationIds.trim().length > 0;
@@ -237,6 +254,16 @@ export default function Audits() {
     } catch (err) { setError(err.message); }
   }
 
+  async function openComparison(result) {
+    setComparison({ result, loading: true, conversation: null, error: '' });
+    try {
+      const response = await request('conversation-view', { conversationId: result.conversationId });
+      setComparison({ result, loading: false, conversation: response.conversation, error: '' });
+    } catch (err) {
+      setComparison({ result, loading: false, conversation: null, error: err.message });
+    }
+  }
+
   if (!session) return <main className="audit-login"><Logo/><h1>Conversation Audit</h1><p>Sign in through the FundedNext Support Assistant, then return here.</p><Link className="btn btn-primary" href="/">Go to sign in</Link></main>;
   if (loading) return <main className="audit-loading"><StatusOrb state="checking"/><h2>Preparing Conversation Audit</h2><p>Checking access, Intercom agents and saved audit history…</p></main>;
   if (accessDenied) return <main className="audit-login"><Logo/><h1>Audit access is restricted</h1><p>{error || 'A Master Admin can grant your @nextventures.io account access from Audit settings.'}</p><Link className="btn btn-primary" href="/">Back to Support Assistant</Link></main>;
@@ -277,7 +304,7 @@ export default function Audits() {
           <section className={`audit-card direct-card ${directMode ? 'engaged' : ''}`}>
             <div className="card-heading"><div><span>Direct audit</span><h2>Specific conversation IDs</h2><p>Enter one or multiple Intercom conversation IDs separated by commas or new lines.</p></div>{directMode && <b className="override-pill">Override active</b>}</div>
             <textarea value={conversationIds} onChange={(event) => setConversationIds(event.target.value)} placeholder={'Paste one or more real Intercom conversation IDs here…'} rows={4}/>
-            {directMode && <div className="override-note"><i>↳</i><span><b>Direct conversation mode</b>Agent, date and random-sample filters below will be ignored.</span></div>}
+            {directMode && <div className="override-note"><i>↳</i><span><b>Direct conversation mode</b>Agent, date and priority-sample filters below will be ignored.</span></div>}
           </section>
 
           <div className={`sample-controls ${directMode ? 'disabled' : ''}`} aria-disabled={directMode}>
@@ -287,30 +314,30 @@ export default function Audits() {
               <div className="agent-picker">{visibleAgents.map((agent) => <label key={agent.id} className={selectedAgents.includes(agent.id) ? 'selected' : ''}><input type="checkbox" checked={selectedAgents.includes(agent.id)} onChange={() => setSelectedAgents((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id])}/><span className="agent-avatar">{agent.name.split(/\s+/).map((part) => part[0]).slice(0, 2).join('')}</span><span><b>{agent.name}</b><small>{agent.email || `Intercom ID ${agent.id}`}</small></span><i>✓</i></label>)}</div>
             </section>
             <section className="audit-card sample-card">
-              <div className="card-heading"><div><span>Step 2</span><h2>Choose the sample</h2><p>Bot-only chats are excluded before sampling.</p></div></div>
+              <div className="card-heading"><div><span>Step 2</span><h2>Choose the sample</h2><p>Bot-only chats are excluded, then the conversations with the most messages from each selected agent are prioritized.</p></div></div>
               <div className="date-pair"><label>From<input type="date" value={from} max={to || today()} onChange={(event) => setFrom(event.target.value)}/></label><label>To<input type="date" value={to} min={from} max={today()} onChange={(event) => setTo(event.target.value)}/></label></div>
-              <label className="sample-label">Random conversations</label>
+              <label className="sample-label">Priority conversations</label>
               <div className="sample-options">{[10,20,30,40].map((value) => <button key={value} className={!customSample && sampleSize === value ? 'active' : ''} onClick={() => { setSampleSize(value); setCustomSample(''); }}>{value}</button>)}<label className={customSample ? 'active' : ''}><span>Custom</span><input type="number" min="1" max="100" value={customSample} onChange={(event) => setCustomSample(event.target.value)} placeholder="50"/></label></div>
-              <div className="sampling-note"><i>⌁</i><span><b>Reproducible random selection</b>The batch stores its sampling seed, selected agents and date boundaries.</span></div>
+              <div className="sampling-note"><i>⌁</i><span><b>Insight-first selection</b>The auditor compares a broad candidate pool and selects the conversations with the highest message count from the chosen agent. Recent conversations break ties.</span></div>
             </section>
           </div>
-          <section className="launch-card"><div><span>Ready when you are</span><h2>{directMode ? `${conversationIds.split(/[\s,]+/).filter(Boolean).length} specific conversation${conversationIds.split(/[\s,]+/).filter(Boolean).length === 1 ? '' : 's'}` : `${customSample || sampleSize} random conversations across ${selectedAgents.length} agent${selectedAgents.length === 1 ? '' : 's'}`}</h2><p>Audits are saved after every conversation and can safely resume after a refresh.</p></div><button className="launch-button" disabled={running || health?.state === 'offline'} onClick={startAudit}><span>{running ? 'Auditing…' : 'Start audit'}</span><i>{running ? '◌' : '→'}</i></button></section>
+          <section className="launch-card"><div><span>Ready when you are</span><h2>{directMode ? `${conversationIds.split(/[\s,]+/).filter(Boolean).length} specific conversation${conversationIds.split(/[\s,]+/).filter(Boolean).length === 1 ? '' : 's'}` : `${customSample || sampleSize} priority conversations across ${selectedAgents.length} agent${selectedAgents.length === 1 ? '' : 's'}`}</h2><p>Audits are saved after every conversation and can safely resume after a refresh.</p></div><button className="launch-button" disabled={running || health?.state === 'offline'} onClick={startAudit}><span>{running ? 'Auditing…' : 'Start audit'}</span><i>{running ? '◌' : '→'}</i></button></section>
         </div>}
 
         {view === 'results' && <div className="audit-results-page">
           {currentJob ? <>
             <section className={`audit-progress-card ${running ? 'running' : ''}`}>
               <div className="progress-visual"><div className="progress-orbit"><i/><i/><b>{currentJob.status === 'completed' ? '✓' : 'QA'}</b></div></div>
-              <div className="progress-copy"><span>Batch #{currentJob.id} · {currentJob.mode === 'direct' ? 'Direct conversation audit' : 'Random sample'}</span><h2>{currentJob.stage || 'Preparing audit'}</h2><p>{currentJob.status === 'completed' ? `Completed ${formatDate(currentJob.updatedAt)}` : `${elapsed}s in this session · progress is saved after every conversation`}</p><div className="progress-track"><i style={{ width: `${Math.max(currentJob.processed ? 4 : 0, progress)}%` }}/></div><small>{currentJob.processed} of {currentJob.total} conversations · {progress}%</small></div>
+              <div className="progress-copy"><span>Batch #{currentJob.id} · {currentJob.mode === 'direct' ? 'Direct conversation audit' : 'Priority sample'}</span><h2>{currentJob.stage || 'Preparing audit'}</h2><p>{currentJob.status === 'completed' ? `Completed ${formatDate(currentJob.updatedAt)}` : `${elapsed}s in this session · progress is saved after every conversation`}</p><div className="progress-track"><i style={{ width: `${Math.max(currentJob.processed ? 4 : 0, progress)}%` }}/></div><small>{currentJob.processed} of {currentJob.total} conversations · {progress}%</small></div>
               <div className="progress-actions">{running ? <button onClick={() => { stopRef.current = true; }}>Pause safely</button> : currentJob.status !== 'completed' ? <button onClick={() => runQueue(currentJob.id)}>Resume audit</button> : <button onClick={() => { setView('control'); setCurrentJob(null); setResults([]); }}>New audit</button>}</div>
             </section>
             <div className="audit-kpis"><Metric label="Completed chats" value={currentJob.completed}/><Metric label="Agent evaluations" value={currentJob.evaluations}/><Metric label="Average quality" value={avg('quality')}/><Metric label="Average efficiency" value={avg('efficiency')}/><Metric label="Average final" value={avg('finalScore')} tone="accent"/><Metric label="Manual review" value={completedResults.filter((item) => item.audit?.manualReview).length}/></div>
             <section className="results-toolbar"><div><h2>Conversation evaluations</h2><p>{results.length} saved result{results.length === 1 ? '' : 's'} in this batch.</p></div><div><button onClick={() => download('csv')}>⇩ Summary CSV</button><button onClick={() => download('csv', true)}>⇩ Detailed CSV</button><button className="primary" onClick={() => download('html')}>⇩ HTML report</button></div></section>
-            <div className="audit-result-list">{results.map((result) => <ResultCard key={result.id || `${result.conversationId}-${result.agentId}-${result.status}`} result={result}/>)}{!results.length && <div className="empty-results"><StatusOrb state={running ? 'checking' : 'offline'}/><h3>{running ? 'The first conversation is being prepared' : 'No results saved yet'}</h3><p>Live status and the first scored result will appear here automatically.</p></div>}</div>
+            <div className="audit-result-list">{results.map((result) => <ResultCard key={result.id || `${result.conversationId}-${result.agentId}-${result.status}`} result={result} onCompare={openComparison}/>)}{!results.length && <div className="empty-results"><StatusOrb state={running ? 'checking' : 'offline'}/><h3>{running ? 'The first conversation is being prepared' : 'No results saved yet'}</h3><p>Live status and the first scored result will appear here automatically.</p></div>}</div>
           </> : <div className="empty-results large"><span>▤</span><h2>No audit selected</h2><p>Start a new audit or open one from Audit history.</p><button onClick={() => setView('control')}>Open audit control</button></div>}
         </div>}
 
-        {view === 'history' && <div className="audit-history"><section className="audit-card"><div className="card-heading"><div><span>Saved securely</span><h2>Recent audit batches</h2><p>Open completed work or resume an interrupted batch.</p></div><button onClick={() => bootstrap()}>Refresh</button></div><div className="history-list">{(data?.jobs || []).map((job) => <button key={job.id} onClick={() => loadJob(job.id)}><span className={`history-state ${job.status}`}>{job.status}</span><span><b>{job.mode === 'direct' ? 'Direct conversation audit' : 'Random agent sample'}</b><small>Batch #{job.id} · {formatDate(job.createdAt)}</small></span><span><b>{job.processed}/{job.total}</b><small>{job.evaluations} evaluations</small></span><i>→</i></button>)}{!data?.jobs?.length && <div className="empty-results"><h3>No audit history yet</h3><p>Your completed and resumable batches will appear here.</p></div>}</div></section></div>}
+        {view === 'history' && <div className="audit-history"><section className="audit-card"><div className="card-heading"><div><span>Saved securely</span><h2>Recent audit batches</h2><p>Saved in the app's PostgreSQL activity log. Raw Intercom transcripts and temporary identity mappings are not stored.</p></div><button onClick={() => bootstrap()}>Refresh</button></div><div className="history-list">{(data?.jobs || []).map((job) => <button key={job.id} onClick={() => loadJob(job.id)}><span className={`history-state ${job.status}`}>{job.status}</span><span><b>{job.mode === 'direct' ? 'Direct conversation audit' : 'Priority agent sample'}</b><small>Batch #{job.id} · {formatDate(job.createdAt)}</small></span><span><b>{job.processed}/{job.total}</b><small>{job.evaluations} evaluations</small></span><i>→</i></button>)}{!data?.jobs?.length && <div className="empty-results"><h3>No audit history yet</h3><p>Your completed and resumable batches will appear here.</p></div>}</div></section></div>}
 
         {view === 'settings' && data?.access?.canManage && <div className="audit-settings-grid">
           <section className="audit-card"><div className="card-heading"><div><span>Intercom directory</span><h2>Agents in the dropdown</h2><p>Sync the live directory, then choose who can be sampled.</p></div><button disabled={syncingAgents} onClick={syncAgents}>{syncingAgents ? 'Syncing…' : '↻ Sync Intercom'}</button></div><div className="admin-agent-list">{(data.agents || []).map((agent) => <label key={agent.id} className={enabledDraft.includes(agent.id) ? 'enabled' : ''}><input type="checkbox" checked={enabledDraft.includes(agent.id)} onChange={() => setEnabledDraft((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id])}/><span><b>{agent.name}</b><small>{agent.email || agent.id}</small></span><em>{agent.hasInboxSeat ? 'Inbox seat' : 'No inbox seat'}</em></label>)}</div><button className="settings-save" disabled={savingAdmin === 'save-agents'} onClick={() => saveAdmin('save-agents', { agentIds: enabledDraft }, 'Audit agent dropdown updated.')}>{savingAdmin === 'save-agents' ? 'Saving…' : `Save ${enabledDraft.length} enabled agents`}</button></section>
@@ -320,5 +347,6 @@ export default function Audits() {
         </div>}
       </main>
     </div>
+    <ConversationReviewModal state={comparison} onClose={() => setComparison(null)}/>
   </>;
 }
