@@ -268,7 +268,9 @@ function snippetFitsScope(snippet, { selectedProduct, selectedModel, comparisonM
 function snippetFitsQuestion(snippet) {
   const scopeOnly = new Set([
     'account', 'accounts', 'fundednext', 'cfd', 'futures', 'stellar', 'lite',
-    'instant', 'step', 'steps', 'challenge', 'model', 'models', 'product', 'products'
+    'instant', 'step', 'steps', 'challenge', 'model', 'models', 'product', 'products',
+    'stellar-1-step', 'stellar-2-step', 'stellar-lite', 'stellar-instant',
+    'futures-challenge', 'futures-fundednext', 'competition'
   ]);
   const matched = snippet?._triggerMatch?.matched || [];
   // Model/product words establish scope, not topic. Requiring at least one
@@ -278,6 +280,16 @@ function snippetFitsQuestion(snippet) {
     const normalized = String(term || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
     return normalized.length >= 3 && !scopeOnly.has(normalized);
   });
+}
+
+function snippetFitsRuleIntent(snippet, intent) {
+  if (!intent?.dailyLoss && !intent?.maximumLoss && !intent?.minimumTrading) return true;
+  const evidence = (snippet?._evidence || []).map((source) => `${source?.title || ''}\n${source?.excerpt || ''}`).join('\n');
+  const text = normalizedEvidenceText(`${snippet?.title || ''}\n${snippet?.instruction || ''}\n${evidence}`).toLowerCase();
+  if (intent.dailyLoss && !/\b(?:daily|today'?s?|permitted)\b.{0,45}\b(?:loss|drawdown|limit)\b/.test(text)) return false;
+  if (intent.maximumLoss && !(/\b(?:maximum|max|overall)\b.{0,45}\b(?:loss|drawdown|limit)\b/.test(text) || /\bmll\b/.test(text))) return false;
+  if (intent.minimumTrading && !/\bminimum\b.{0,35}\b(?:trades?|trading days?)\b|\btrading days?\b.{0,25}\bminimum\b/.test(text)) return false;
+  return true;
 }
 
 export default async function handler(req, res) {
@@ -626,18 +638,27 @@ export default async function handler(req, res) {
     // short questions from being dominated by campaign pages that merely repeat
     // the selected model name many times.
     const anchorQueries = [];
+    const scopedEnglishAnchor = (orExpression, limit = 80) => {
+      let query = sb.from('chunks').select('id,article_id,article_title,article_url,content')
+        .or(orExpression)
+        .not('article_title', 'ilike', '[FA]%');
+      if (selectedProduct === 'cfd') query = query.ilike('article_url', 'https://help.fundednext.com/en/articles/%');
+      if (selectedProduct === 'futures') query = query.ilike('article_url', 'https://helpfutures.fundednext.com/en/articles/%');
+      return query.limit(limit);
+    };
     if (requestedRuleIntent.dailyLoss) {
-      anchorQueries.push(sb.from('chunks').select('id,article_id,article_title,article_url,content')
-        .or('article_title.ilike.%daily%loss%,article_title.ilike.%permitted%loss%').limit(80));
+      anchorQueries.push(scopedEnglishAnchor('article_title.ilike.%daily%loss%,article_title.ilike.%permitted%loss%'));
     }
     if (requestedRuleIntent.maximumLoss) {
-      anchorQueries.push(sb.from('chunks').select('id,article_id,article_title,article_url,content')
-        .or('article_title.ilike.%maximum%loss%,article_title.ilike.%overall%loss%').limit(80));
+      anchorQueries.push(scopedEnglishAnchor('article_title.ilike.%maximum%loss%,article_title.ilike.%overall%loss%,article_title.ilike.%max%loss%'));
+      // Broad title searches can be saturated by translated duplicate chunks.
+      // These narrower live-database lookups reserve the canonical English rule
+      // and calculation pages without encoding the policy value in application code.
+      anchorQueries.push(scopedEnglishAnchor('article_title.ilike.%calculate%maximum%loss%,article_title.ilike.%what%maximum%loss%', 40));
     }
     if (selectedModel) {
       const modelNeedle = normalizedEvidenceText(selectedModel.name).replace(/[^a-z0-9 -]/gi, ' ').replace(/\s+/g, ' ').trim();
-      if (modelNeedle) anchorQueries.push(sb.from('chunks').select('id,article_id,article_title,article_url,content')
-        .or(`article_title.ilike.%${modelNeedle}%,content.ilike.%${modelNeedle}%`).limit(80));
+      if (modelNeedle) anchorQueries.push(scopedEnglishAnchor(`article_title.ilike.%${modelNeedle}%,content.ilike.%${modelNeedle}%`));
     }
     if (anchorQueries.length) {
       const anchorResults = await Promise.allSettled(anchorQueries);
@@ -1090,7 +1111,7 @@ export default async function handler(req, res) {
       const applicable = annotated.filter((source) => regionIsApplicable(source._regionScope));
       const allEvidenceRegional = annotated.length > 0 && annotated.every((source) => source._regionScope?.regions?.length);
       return { ...snippet, _evidence: applicable, _blockedByRegion: allEvidenceRegional && applicable.length === 0 };
-    }).filter((snippet) => !snippet._blockedByRegion);
+    }).filter((snippet) => !snippet._blockedByRegion && snippetFitsRuleIntent(snippet, requestedRuleIntent));
     // Activation is an explicit Admin approval. Promote only the strongest,
     // phrase-matched correction(s) to citable evidence; broad lower-ranked
     // snippets remain review notes so a generic trigger cannot override scope.
