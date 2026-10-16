@@ -485,6 +485,8 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 /* ================= INSIGHTS RAIL ================= */
 .insights-rail { min-height: 0; padding: 17px; overflow-y: auto; border: 1px solid var(--line); border-radius: 22px; background: linear-gradient(180deg, color-mix(in srgb, var(--surface) 94%, var(--violet-soft)), var(--surface)); box-shadow: var(--shadow); }
 .rail-sync-console { position: relative; display: grid; gap: 13px; padding: 18px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--violet) 48%, var(--line)); border-radius: 18px; background: radial-gradient(circle at 85% 5%, color-mix(in srgb, var(--violet) 22%, transparent), transparent 38%), linear-gradient(155deg, var(--surface), color-mix(in srgb, var(--violet-soft) 70%, var(--surface))); box-shadow: 0 20px 45px -28px color-mix(in srgb, var(--violet) 80%, transparent); }
+.rail-sync-console.is-retrying { border-color: color-mix(in srgb, var(--warn) 58%, var(--line)); background: radial-gradient(circle at 85% 5%, color-mix(in srgb, var(--warn) 14%, transparent), transparent 38%), linear-gradient(155deg, var(--surface), color-mix(in srgb, var(--violet-soft) 55%, var(--surface))); }
+.rail-sync-top { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 10px; align-items: center; }
 .rail-sync-orbit { position: relative; display: grid; place-items: center; width: 52px; height: 52px; margin-bottom: 2px; }
 .rail-sync-orbit:before, .rail-sync-orbit:after { content: ''; position: absolute; inset: 0; border: 1px solid color-mix(in srgb, var(--violet) 45%, transparent); border-radius: 50%; animation: sync-orbit 2.2s linear infinite; }
 .rail-sync-orbit:after { inset: 7px; animation-direction: reverse; animation-duration: 1.5s; }
@@ -496,21 +498,36 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .rail-sync-heading span, .rail-sync-latest > span { color: var(--violet-ink); font-size: 9px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
 .rail-sync-heading strong { color: var(--ink); font-size: 14px; line-height: 1.35; }
 .rail-sync-heading small { color: var(--muted); font-size: 10px; }
+.rail-sync-heading small b { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.rail-sync-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+.rail-sync-steps div { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--faint); font-size: 8px; font-weight: 750; text-transform: uppercase; }
+.rail-sync-steps div:after { content: ''; flex: 1; height: 1px; background: var(--line); }
+.rail-sync-steps div:last-child:after { display: none; }
+.rail-sync-steps i { display: grid; place-items: center; width: 18px; height: 18px; flex: 0 0 18px; border: 1px solid var(--line-strong); border-radius: 50%; font-style: normal; }
+.rail-sync-steps div.active { color: var(--violet-ink); }
+.rail-sync-steps div.active i { border-color: var(--violet); background: color-mix(in srgb, var(--violet) 16%, var(--surface)); box-shadow: 0 0 12px color-mix(in srgb, var(--violet) 25%, transparent); }
+.rail-sync-steps div.done { color: var(--success); }
+.rail-sync-steps div.done i { border-color: var(--success); background: color-mix(in srgb, var(--success) 13%, var(--surface)); }
 .rail-sync-track { height: 5px; overflow: hidden; border-radius: 99px; background: var(--surface-2); }
-.rail-sync-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--violet), var(--success)); transition: width .45s ease; animation: sync-shimmer 1.4s ease-in-out infinite alternate; }
+.rail-sync-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--violet), var(--success)); transition: width .45s ease; }
+.rail-sync-track.indeterminate i { width: 38%; animation: sync-scan 1.35s ease-in-out infinite; }
+.rail-sync-progress-copy { display: flex; justify-content: space-between; gap: 8px; margin-top: -6px; color: var(--muted); font-size: 8px; }
+.rail-sync-progress-copy b { color: var(--violet-ink); font-size: 9px; letter-spacing: .06em; }
 @keyframes sync-shimmer { to { filter: brightness(1.35); } }
 .rail-sync-counts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
 .rail-sync-counts div { display: grid; gap: 2px; padding: 8px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--surface) 78%, transparent); }
+.rail-sync-counts div.has-value { border-color: color-mix(in srgb, var(--success) 36%, var(--line)); background: color-mix(in srgb, var(--success) 7%, var(--surface)); }
 .rail-sync-counts strong { font-size: 15px; }
 .rail-sync-counts span { color: var(--muted); font-size: 8px; text-transform: uppercase; }
 .rail-sync-feed { display: grid; gap: 7px; }
-.rail-sync-feed p { display: grid; grid-template-columns: 8px 1fr; gap: 7px; align-items: start; margin: 0; color: var(--ink-2); font-size: 9px; line-height: 1.45; }
-.rail-sync-feed p i { width: 6px; height: 6px; margin-top: 4px; border-radius: 50%; background: var(--success); box-shadow: 0 0 8px color-mix(in srgb, var(--success) 70%, transparent); }
+.rail-sync-feed p { display: grid; grid-template-columns: 18px 1fr; gap: 7px; align-items: start; margin: 0; color: var(--ink-2); font-size: 9px; line-height: 1.45; }
+.rail-sync-feed p i { display: grid; place-items: center; width: 15px; height: 15px; border-radius: 50%; background: color-mix(in srgb, var(--success) 13%, var(--surface)); color: var(--success); font-size: 8px; font-style: normal; font-weight: 900; }
 .rail-sync-latest { display: grid; gap: 5px; padding-top: 10px; border-top: 1px solid var(--line); }
 .rail-sync-latest small { overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .rail-sync-cancel, .rail-sync-trigger { padding: 9px 11px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--surface); color: var(--ink); font-weight: 700; }
 .rail-sync-cancel:hover, .rail-sync-trigger:hover { border-color: var(--violet); color: var(--violet-ink); }
 .rail-sync-trigger { margin-top: 8px; }
+@keyframes sync-scan { 0% { transform: translateX(-110%); } 50% { transform: translateX(95%); } 100% { transform: translateX(260%); } }
 .rail-head { padding: 4px 4px 16px; display: flex; align-items: center; gap: 11px; }
 .rail-head div { display: flex; flex-direction: column; gap: 3px; }
 .rail-head b { font: 700 13px/1 var(--display); }
