@@ -699,7 +699,7 @@ export default function Home() {
   const currentModels = availableModels.filter((model) => model.status === 'current');
   const previousModels = availableModels.filter((model) => model.status === 'previous');
   const selectedModelName = availableModels.find((model) => model.slug === scopeModel)?.name ||
-    (scopeProduct === 'both' ? 'All products' : `All ${scopeProduct.toUpperCase()} models`);
+    (scopeProduct === 'both' ? 'All products' : scopeProduct === 'fnmarkets' ? 'All FNmarkets knowledge' : `All ${scopeProduct.toUpperCase()} models`);
   const syncPhaseIndex = syncProgress.phase === 'complete' ? 3 : syncProgress.phase === 'indexing' ? 2 : 1;
   const syncQueueTotal = Number(syncProgress.processed || 0) + Number(syncProgress.remaining || 0);
   const syncPercent = syncProgress.phase === 'complete' ? 100
@@ -712,7 +712,8 @@ export default function Home() {
   const productGroups = [{ label: 'Knowledge family', options: [
     { value: 'cfd', label: 'CFD', description: 'CFD Accounts and policies' },
     { value: 'futures', label: 'Futures', description: 'Futures models and policies' },
-    { value: 'both', label: 'Both', description: 'Search both product families' }
+    { value: 'fnmarkets', label: 'FNmarkets', description: 'Brokerage products and policies' },
+    { value: 'both', label: 'All products', description: 'Search CFD, Futures, and FNmarkets' }
   ] }];
   const modelGroups = [
     { label: 'Scope', options: [{ value: 'all', label: scopeProduct === 'both' ? 'All products and models' : `All ${scopeProduct.toUpperCase()} models`, description: 'Use every verified model in this family' }] },
