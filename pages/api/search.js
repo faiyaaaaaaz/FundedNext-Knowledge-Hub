@@ -371,14 +371,16 @@ export default async function handler(req, res) {
 
     const question = String(req.body?.question || '').trim().slice(0, 20000);
     if (!question) return res.status(400).json({ error: 'Please type a question.' });
-    requestMetadata = { question, selectedProduct: req.body?.scope?.product || '', selectedModel: req.body?.scope?.model || '', status: 'processing', stage: 'Preparing request', durationMs: 0 };
+    requestMetadata = { question, askedAt: new Date(started).toISOString(), selectedProduct: req.body?.scope?.product || '', selectedModel: req.body?.scope?.model || '', status: 'processing', stage: 'Preparing request', durationMs: 0 };
     requestLogId = await createActivity({ actorRole: access.role, sessionId: access.sessionId, userName: access.name, userEmail: access.email, authProvider: access.authProvider, eventType: 'query', success: false, questionWordCount: wordCount(question), metadata: requestMetadata });
     if (!requestLogId) return res.status(503).json({ error: 'The request could not be recorded. Please try again.' });
     const sendJson = res.json.bind(res);
     res.json = async (body) => {
       const failed = res.statusCode >= 400;
-      await logActivity({ success: !failed, metadata: { status: failed ? 'failed' : 'completed', stage: failed ? requestMetadata.stage : 'Finished', durationMs: Date.now() - started, ...(body.error ? { error: body.error } : {}), ...(body.answer ? { answer: body.answer } : {}), ...(body.clarifyingQuestion ? { answer: body.clarifyingQuestion } : {}), ...(body.notice ? { answer: body.notice } : {}) } });
-      return sendJson({ ...body, queryLogId: requestLogId });
+      const completedAt = new Date().toISOString();
+      const durationMs = Date.now() - started;
+      await logActivity({ success: !failed, metadata: { status: failed ? 'failed' : 'completed', stage: failed ? requestMetadata.stage : 'Finished', completedAt, durationMs, ...(body.error ? { error: body.error } : {}), ...(body.answer ? { answer: body.answer } : {}), ...(body.clarifyingQuestion ? { answer: body.clarifyingQuestion } : {}), ...(body.notice ? { answer: body.notice } : {}) } });
+      return sendJson({ ...body, queryLogId: requestLogId, responseMeta: { askedAt: requestMetadata.askedAt, answeredAt: completedAt, durationMs } });
     };
 
     const [keySettings, groqPool] = await Promise.all([getKeys(), getGroqKeys()]);
