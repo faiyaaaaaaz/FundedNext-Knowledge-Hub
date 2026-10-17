@@ -5,9 +5,9 @@ import {
   AUDIT_RUBRIC_VERSION, AUDIT_THRESHOLDS, auditConnections, auditCsv, auditHtml,
   canManageAudits, canUseAudits, conversationTurns, deriveMetrics, fetchConversation,
   fetchIntercomAdmins, findConversationCandidates, getAuditAccessConfig,
-  getAuditAgentConfig, getAuditModels, meaningfulAgentIds, parseConversationIds,
+  getAuditAgentConfig, getAuditLevel2Config, getAuditModels, meaningfulAgentIds, parseConversationIds,
   redactConversation, restoreAuditTokens, retrieveAuditEvidence, runAuditModel, sampleCandidates,
-  saveAuditAccessConfig, saveAuditAgentConfig, saveAuditModels
+  saveAuditAccessConfig, saveAuditAgentConfig, saveAuditLevel2Config, saveAuditModels
 } from '../../lib/audits';
 import {
   authenticateExternalApiKey, createExternalApiKey, hasExternalScope,
@@ -29,6 +29,7 @@ function publicJob(row) {
     stage: meta.stage || '', total: Number(meta.total || 0), processed: Number(meta.processed || 0),
     completed: Number(meta.completed || 0), skipped: Number(meta.skipped || 0), failed: Number(meta.failed || 0),
     evaluations: Number(meta.evaluations || 0), currentConversationId: meta.currentConversationId || null,
+    pauseRequested: !!meta.pauseRequested, cancelRequested: !!meta.cancelRequested,
     filters: meta.filters || {}, seed: meta.seed || '', rubricVersion: meta.rubricVersion || AUDIT_RUBRIC_VERSION,
     updatedAt: meta.updatedAt || row?.created_at, error: meta.error || '', directIds: meta.directIds || []
   };
@@ -50,8 +51,9 @@ async function loadResults(sb, jobId) {
 }
 
 async function updateJob(sb, row, patch) {
-  const metadata = { ...(row.metadata || {}), ...patch, updatedAt: new Date().toISOString() };
-  const success = metadata.status === 'completed' ? true : metadata.status === 'failed' ? false : row.success;
+  const latest = checked(await sb.from('activity_logs').select('*').eq('id', row.id).eq('event_type', 'conversation_audit_job').single(), 'Could not refresh audit controls');
+  const metadata = { ...(latest.metadata || {}), ...patch, updatedAt: new Date().toISOString() };
+  const success = metadata.status === 'completed' ? true : metadata.status === 'failed' ? false : latest.success;
   const data = checked(await sb.from('activity_logs').update({ metadata, success }).eq('id', row.id).select('*').single(), 'Could not save audit progress');
   return data;
 }
@@ -125,7 +127,7 @@ async function createJob(req, access, sb, body) {
   const filters = mode === 'direct' ? { conversationIds: directIds } : { agentIds: body.agentIds || [], from: body.from || '', to: body.to || '', sampleSize: Math.max(1, Math.min(Number(body.sampleSize) || 10, 100)), selectionStrategy: 'highest_target_agent_message_count' };
   const metadata = {
     status: 'queued', mode, stage: 'Ready to fetch conversations', total: queue.length, processed: 0, completed: 0,
-    skipped: 0, failed: 0, evaluations: 0, queue, filters, directIds, seed,
+    skipped: 0, failed: 0, evaluations: 0, queue, filters, directIds, seed, pauseRequested: false, cancelRequested: false,
     rubricVersion: AUDIT_RUBRIC_VERSION, thresholds: AUDIT_THRESHOLDS, updatedAt: new Date().toISOString()
   };
   const id = await logActivity({ actorRole: access.role, sessionId: access.sessionId, userName: access.name, userEmail: access.email, authProvider: access.authProvider, eventType: 'conversation_audit_job', success: true, metadata }, { sb });
@@ -139,7 +141,8 @@ function cryptoRandom() {
 
 async function processNext(access, sb, jobId) {
   let row = await loadJob(sb, jobId); let meta = row.metadata || {};
-  if (meta.status === 'completed') return { job: publicJob(row), results: await loadResults(sb, jobId) };
+  if (meta.status === 'completed' || meta.status === 'cancelled') return { job: publicJob(row), results: await loadResults(sb, jobId), done: true };
+  if (meta.pauseRequested) return { job: publicJob(await updateJob(sb, row, { status: 'paused', stage: 'Paused safely — progress is saved', currentConversationId: null })), done: true, paused: true };
   const queue = Array.isArray(meta.queue) ? meta.queue : [];
   const index = Number(meta.processed || 0);
   if (index >= queue.length) {
@@ -165,10 +168,10 @@ async function processNext(access, sb, jobId) {
     const redacted = redactConversation(turns, conversation, admins);
     row = await updateJob(sb, row, { stage: 'Matching current FAQs, Notices and approved corrections' });
     const knowledge = await retrieveAuditEvidence(sb, redacted.transcript);
-    const produced = [];
+    const produced = []; const level2AgentIds = await getAuditLevel2Config(sb);
     for (const targetId of targetIds) {
       const agent = admins.find((candidate) => candidate.id === targetId) || { id: targetId, name: turns.find((turn) => turn.authorId === targetId)?.authorName || `Agent ${targetId}` };
-      const metrics = deriveMetrics(conversation, turns, targetId);
+      const metrics = deriveMetrics(conversation, turns, targetId, { supportLevel: level2AgentIds.includes(String(targetId)) ? 'level2' : 'standard' });
       row = await updateJob(sb, row, { stage: `Scoring ${agent.name} with evidence`, currentConversationId: item.id });
       const model = await runAuditModel({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgent: { token: redacted.agentTokens[targetId] || '[TARGET_AGENT]', conversationAt: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '' } }, sb);
       const restoredAudit = restoreAuditTokens(model.audit, redacted.tokenReplacements);
@@ -182,23 +185,40 @@ async function processNext(access, sb, jobId) {
       produced.push(result);
     }
     const nextProcessed = index + 1;
+    const latestControl = (await loadJob(sb, jobId)).metadata || {};
+    const controlledStatus = latestControl.cancelRequested ? 'cancelled' : latestControl.pauseRequested ? 'paused' : nextProcessed >= queue.length ? 'completed' : 'running';
     row = await updateJob(sb, row, {
       processed: nextProcessed, completed: Number(meta.completed || 0) + 1, evaluations: Number(meta.evaluations || 0) + produced.length,
-      stage: nextProcessed >= queue.length ? 'Audit completed' : 'Saved securely — moving to the next conversation',
-      status: nextProcessed >= queue.length ? 'completed' : 'running', currentConversationId: null
+      stage: controlledStatus === 'cancelled' ? 'Audit cancelled — completed results remain saved' : controlledStatus === 'paused' ? 'Paused safely — progress is saved' : nextProcessed >= queue.length ? 'Audit completed' : 'Saved securely — moving to the next conversation',
+      status: controlledStatus, currentConversationId: null
     });
     // The replacement map was scoped to this request and becomes unreachable here.
     redacted.ephemeralMap.clear();
     redacted.tokenReplacements.clear();
-    return { job: publicJob(row), processed: { conversationId: item.id, status: 'completed', evaluations: produced.length }, results: produced };
+    return { job: publicJob(row), processed: { conversationId: item.id, status: 'completed', evaluations: produced.length }, results: produced, done: ['paused','cancelled','completed'].includes(controlledStatus) };
   } catch (error) {
+    const latestControl = (await loadJob(sb, jobId)).metadata || {};
+    if (latestControl.cancelRequested || latestControl.pauseRequested) {
+      row = await updateJob(sb, row, {
+        status: latestControl.cancelRequested ? 'cancelled' : 'paused',
+        stage: latestControl.cancelRequested ? 'Audit cancelled — completed results remain saved' : 'Paused safely — progress is saved',
+        currentConversationId: null, error: ''
+      });
+      return { job: publicJob(row), done: true, cancelled: !!latestControl.cancelRequested, paused: !!latestControl.pauseRequested };
+    }
+    if (error.code === 'AUDIT_ROUTES_COOLDOWN') {
+      row = await updateJob(sb, row, { status: 'running', stage: `Provider cooldown — conversation ${item.id} will retry automatically`, error: error.message, currentConversationId: item.id });
+      return { job: publicJob(row), retryAfterMs: Math.min(Number(error.retryAfterMs) || 15000, 30000), retrying: true };
+    }
     const attempts = Number(item.attempts || 0) + 1;
     queue[index] = { ...item, attempts };
     if (attempts < 3 && /temporarily unavailable|too long|rate|quota|429|500|502|503|504|fetch/i.test(error.message)) {
-      row = await updateJob(sb, row, { queue, status: 'paused', stage: `Waiting to retry conversation ${item.id}`, error: error.message, currentConversationId: item.id });
+      row = await updateJob(sb, row, { queue, status: 'running', stage: `Waiting to retry conversation ${item.id}`, error: error.message, currentConversationId: item.id });
       return { job: publicJob(row), retryAfterMs: 3000, retrying: true };
     }
-    await insertResult(sb, access, { jobId: String(jobId), status: 'failed', conversationId: String(item.id), error: error.message, rubricVersion: AUDIT_RUBRIC_VERSION }, false);
+    const routeAttempts = Array.isArray(error.attempts) ? error.attempts : [];
+    const routeSummary = routeAttempts.length ? ` ${routeAttempts.length} provider routes were attempted; details are saved for diagnosis.` : '';
+    await insertResult(sb, access, { jobId: String(jobId), status: 'failed', conversationId: String(item.id), error: `${error.message}${routeSummary}`, routeAttempts, rubricVersion: AUDIT_RUBRIC_VERSION }, false);
     const nextProcessed = index + 1;
     row = await updateJob(sb, row, { queue, processed: nextProcessed, failed: Number(meta.failed || 0) + 1, status: nextProcessed >= queue.length ? 'completed' : 'running', stage: nextProcessed >= queue.length ? 'Audit completed with failures' : 'Failure recorded — continuing safely', error: error.message, currentConversationId: null });
     return { job: publicJob(row), processed: { conversationId: item.id, status: 'failed', error: error.message } };
@@ -215,7 +235,7 @@ export default async function handler(req, res) {
     if (!access.external && !(await canUseAudits(access, sb))) return res.status(403).json({ error: 'Conversation Audit access has not been granted to this account.' });
     if (access.external) {
       const required = action === 'health' || action === 'bootstrap' ? 'diagnostics:read'
-        : action === 'create-job' || action === 'process-next' ? 'audit:run'
+        : ['create-job','process-next','pause-job','resume-job','cancel-job'].includes(action) ? 'audit:run'
           : action === 'conversation-view' ? 'transcripts:read-redacted' : 'audit:read';
       if (!hasExternalScope(access, required)) return res.status(403).json({ error: `Developer API key lacks the ${required} permission.` });
     }
@@ -237,10 +257,11 @@ export default async function handler(req, res) {
       let admins = []; let intercomError = '';
       if (keys.intercomToken) try { admins = await fetchIntercomAdmins(keys.intercomToken); } catch (error) { intercomError = error.message; }
       const enabledAgentIds = await getAuditAgentConfig(sb, admins);
+      const level2AgentIds = await getAuditLevel2Config(sb);
       const jobs = checked(await sb.from('activity_logs').select('*').eq('event_type', 'conversation_audit_job').order('created_at', { ascending: false }).limit(20), 'Could not load audit history');
       return res.json({
         access: { allowed: access.external || await canUseAudits(access, sb), canManage: !access.external && canManageAudits(access), email: access.email || '', config: !access.external && canManageAudits(access) ? await getAuditAccessConfig(sb) : undefined },
-        agents: admins, enabledAgentIds, intercomError, models: await getAuditModels(sb),
+        agents: admins, enabledAgentIds, level2AgentIds, intercomError, models: await getAuditModels(sb),
         connection: { intercomConfigured: !!keys.intercomToken, geminiKeyCount: (keys.geminiKeyPool || []).length, geminiKeyNames: (keys.geminiKeyPool || []).map((item) => item.name) },
         thresholds: AUDIT_THRESHOLDS, rubricVersion: AUDIT_RUBRIC_VERSION, jobs: (jobs || []).map(publicJob),
         developerKeys: canManageAudits(access) ? await listExternalApiKeys(sb) : undefined,
@@ -269,14 +290,31 @@ export default async function handler(req, res) {
     }
     if (action === 'create-job') return res.json({ job: await createJob(req, access, sb, body) });
     if (action === 'process-next') return res.json(await processNext(access, sb, body.jobId));
+    if (action === 'pause-job') {
+      const row = await loadJob(sb, body.jobId);
+      if (['completed','cancelled'].includes(row.metadata?.status)) return res.json({ job: publicJob(row) });
+      return res.json({ job: publicJob(await updateJob(sb, row, { pauseRequested: true, status: 'paused', stage: 'Pause requested — finishing the current conversation safely' })) });
+    }
+    if (action === 'resume-job') {
+      const row = await loadJob(sb, body.jobId);
+      if (row.metadata?.status === 'cancelled') throw new Error('A cancelled audit cannot be resumed. Start a new audit instead.');
+      return res.json({ job: publicJob(await updateJob(sb, row, { pauseRequested: false, cancelRequested: false, status: 'queued', stage: 'Resume confirmed — preparing the next conversation', error: '' })) });
+    }
+    if (action === 'cancel-job') {
+      const row = await loadJob(sb, body.jobId);
+      if (row.metadata?.status === 'completed') return res.json({ job: publicJob(row) });
+      return res.json({ job: publicJob(await updateJob(sb, row, { cancelRequested: true, pauseRequested: false, status: 'cancelled', stage: 'Audit cancelled — completed results remain saved', currentConversationId: null })) });
+    }
     if (action === 'sync-agents') {
       const keys = await getKeys(); if (!keys.intercomToken) throw new Error('Intercom is not connected.');
-      const agents = await fetchIntercomAdmins(keys.intercomToken); const enabledAgentIds = await getAuditAgentConfig(sb, agents);
-      return res.json({ agents, enabledAgentIds, syncedAt: new Date().toISOString() });
+      const agents = await fetchIntercomAdmins(keys.intercomToken); const enabledAgentIds = await getAuditAgentConfig(sb, agents); const level2AgentIds = await getAuditLevel2Config(sb);
+      return res.json({ agents, enabledAgentIds, level2AgentIds, syncedAt: new Date().toISOString() });
     }
     if (action === 'save-agents') {
       if (!canManageAudits(access)) return res.status(403).json({ error: 'Admin access is required to change the agent dropdown.' });
-      return res.json({ enabledAgentIds: await saveAuditAgentConfig(body.agentIds, sb) });
+      const enabledAgentIds = await saveAuditAgentConfig(body.agentIds, sb);
+      const level2AgentIds = await saveAuditLevel2Config((body.level2AgentIds || []).filter((id) => enabledAgentIds.includes(String(id))), sb);
+      return res.json({ enabledAgentIds, level2AgentIds });
     }
     if (action === 'save-access') {
       if (!canManageAudits(access)) return res.status(403).json({ error: 'Admin access is required to change Audit access.' });
