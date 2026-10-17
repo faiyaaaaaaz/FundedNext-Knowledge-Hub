@@ -3,10 +3,11 @@ import {
   openaiChatDetailed, geminiChatDetailed, getBrandingRules, brandingInstructions,
   applyBrandingReplacements, getRelevantSnippets, logActivity as createActivity,
   expandConcepts, clarifyQuery, correctTypos, runCalculators,
-  sha256, getGroqKeys, verifyGrounding, getPublishedScopeCatalog, modelsMentioned, getArticleScopeOverrides,
-  getArticleRegionScopes, questionRegionIntent
+  sha256, getGroqKeys, verifyGrounding, getSearchScopeState, modelsMentioned,
+  questionRegionIntent
 } from '../../lib/server';
 import { retrieveNotices, noticesAccess } from '../../lib/notices';
+import { shouldUseLlmClarifier } from '../../lib/query-planning.mjs';
 import { authenticateExternalApiKey } from '../../lib/externalAccess';
 
 export const config = { maxDuration: 60 };
@@ -326,10 +327,15 @@ export default async function handler(req, res) {
     reviewTrace.prompts[promptId] = messages;
     const attempt = { model, provider: geminiPool ? 'gemini' : /groq/.test(baseUrl || '') ? 'groq' : 'openai', promptId, startedAt: new Date().toISOString(), status: 'started' };
     reviewTrace.attempts.push(attempt);
-    await logActivity({ metadata: { reviewTrace } });
+    const traceStartLog = logActivity({ metadata: { reviewTrace } }).catch(() => null);
     const attemptStart = Date.now();
     try {
-      const result = geminiPool ? await geminiChatDetailed(geminiPool, model, messages) : await openaiChatDetailed(key, model, messages, baseUrl);
+      const modelRequest = geminiPool
+        ? geminiChatDetailed(geminiPool, model, messages)
+        : openaiChatDetailed(key, model, messages, baseUrl);
+      // Preserve the trace write, but overlap its database latency with the
+      // provider request instead of delaying every answer attempt before it.
+      const [result] = await Promise.all([modelRequest, traceStartLog.then(() => null)]);
       attempt.status = 'completed';
       attempt.usage = result.usage || null;
       attempt.response = String(result.content || '').slice(0, 20000);
@@ -343,6 +349,7 @@ export default async function handler(req, res) {
       attempt.error = attempt.error.replace(/AIza[A-Za-z0-9_-]+/g, '[redacted]');
       throw error;
     } finally {
+      await traceStartLog;
       attempt.durationMs = Date.now() - attemptStart;
       await logActivity({ metadata: { reviewTrace } });
     }
@@ -374,11 +381,11 @@ export default async function handler(req, res) {
       return sendJson({ ...body, queryLogId: requestLogId });
     };
 
-    const { openaiKey, groqKey, geminiKeys, geminiKeyPool, embeddingProvider, chatModel, chatProvider, smartRetrieval, normalUserGptFallback, adminAutoFallback, fallbackProvider, fallbackModel } = await getKeys();
+    const [keySettings, groqPool] = await Promise.all([getKeys(), getGroqKeys()]);
+    const { openaiKey, groqKey, geminiKeys, geminiKeyPool, embeddingProvider, chatModel, chatProvider, smartRetrieval, normalUserGptFallback, adminAutoFallback, fallbackProvider, fallbackModel } = keySettings;
 
     // Groq key pool for rotation; a single primary key powers the small helper
     // calls (query clarify, calculator extraction, grounding check).
-    const groqPool = await getGroqKeys();
     const groqPrimary = groqKey || (groqPool[0] && groqPool[0].key) || null;
     // Groq→GPT automatic fallback is allowed ONLY for the master admin / creator.
     const canFallback = access.role === 'admin' ? adminAutoFallback : normalUserGptFallback;
@@ -420,9 +427,10 @@ export default async function handler(req, res) {
     if (chatProvider === 'gemini' && !(geminiKeyPool && geminiKeyPool.length)) return res.status(400).json({ error: 'Gemini is selected, but no Gemini keys are saved. Add them in Admin → Gemini API keys.' });
 
     const sb = supabaseAdmin();
-    const [scopeCatalog, articleScopeOverrides, articleRegionScopes] = await Promise.all([
-      getPublishedScopeCatalog(sb), getArticleScopeOverrides(sb), getArticleRegionScopes(sb)
-    ]);
+    // These independent reads can run while scope validation and retrieval are
+    // prepared. Their results are still awaited before they influence an answer.
+    const scopeStatePromise = getSearchScopeState(sb);
+    const { scopeCatalog, articleScopeOverrides, articleRegionScopes } = await scopeStatePromise;
     const regionIntent = questionRegionIntent(question);
     const regionScopeFor = (articleId) => articleRegionScopes[String(articleId || '')] || null;
     const regionIsApplicable = (regionScope) => !regionScope?.regions?.length ||
@@ -495,7 +503,16 @@ export default async function handler(req, res) {
     const concepts = expandConcepts(question);
     // 2) optional LLM rewrite for messy/vague input (non-fatal, may be null)
     let clarity = null;
-    if (smartRetrieval) {
+    const normalizedQuestion = question.toLowerCase().replace(/\s+/g, ' ').trim();
+    const typoCorrectedQuestion = correctTypos(question).toLowerCase().replace(/\s+/g, ' ').trim();
+    const useLlmClarifier = shouldUseLlmClarifier({
+      question,
+      smartRetrieval,
+      hasSelectedModel: !!selectedModel,
+      conceptGroupCount: concepts.groups.length,
+      typoCorrectionChanged: typoCorrectedQuestion !== normalizedQuestion
+    });
+    if (useLlmClarifier) {
       await logActivity({ metadata: { stage: 'Interpreting question', durationMs: Date.now() - started } });
       clarity = await clarifyQuery({
         question, provider: chatProvider, model: chatModel, openaiKey, groqKey: groqPrimary
@@ -615,6 +632,23 @@ export default async function handler(req, res) {
       ? statedParts.map((part) => ({ question: part, queries: [] }))
       : (clarity?.topics?.length ? clarity.topics : [{ question: clearQuestion, queries: clarity?.queries || [] }]);
     const isAmbiguous = !!clarity?.ambiguous || distinctMeanings.length >= 2 || payoutUmbrella || topicPlan.length > 1;
+
+    // Prompt rules/snippets and the separate official-notice index do not
+    // depend on FAQ vector retrieval. Start them now and await them only where
+    // their results are consumed, preserving the same evidence and safeguards.
+    const supportMaterialsPromise = Promise.all([
+      getPrompt(), getBrandingRules(), getRelevantSnippets(question)
+    ]).then((values) => ({ values }), (error) => ({ error }));
+    const noticeEvidencePromise = noticesAccess(access, sb)
+      .then((allowed) => allowed ? retrieveNotices(sb, {
+        openaiKey,
+        embeddingProvider,
+        question: clearQuestion || question,
+        product: selectedProduct,
+        model: selectedModel?.slug || 'all',
+        limit: 3
+      }) : { matches: [], escalations: [], rejected: [] })
+      .catch(() => ({ matches: [], escalations: [], rejected: [] }));
 
     const DEFAULT_PAYOUT_INTERPRETATIONS = [
       'Payout eligibility and timing — this depends on the Account model / trading cycle',
@@ -1090,15 +1124,7 @@ export default async function handler(req, res) {
     let hasNoticeEvidence = false;
     let noticeMetaByAid = {};
     try {
-      if (await noticesAccess(access, sb)) {
-        const { matches: nMatches, escalations, rejected: nRejected } = await retrieveNotices(sb, {
-          openaiKey,
-          embeddingProvider,
-          question: clearQuestion || question,
-          product: selectedProduct,
-          model: selectedModel?.slug || 'all',
-          limit: 3
-        });
+        const { matches: nMatches, escalations, rejected: nRejected } = await noticeEvidencePromise;
         noticeRejections = nRejected || [];
         if (nMatches && nMatches.length) {
           hasNoticeEvidence = true;
@@ -1117,7 +1143,6 @@ export default async function handler(req, res) {
           }));
           matches = [...noticeEvidence, ...matches].slice(0, 16);
         }
-      }
     } catch (e) { /* notices are best-effort */ }
 
     if (!matches.length) {
@@ -1136,9 +1161,9 @@ export default async function handler(req, res) {
     // preserving the larger budget where it is useful.
     matches = matches.slice(0, topicPlan.length > 1 ? 10 : 7);
 
-    const [basePrompt, brandRules, rawSnippets] = await Promise.all([
-      getPrompt(), getBrandingRules(), getRelevantSnippets(question)
-    ]);
+    const supportMaterials = await supportMaterialsPromise;
+    if (supportMaterials.error) throw supportMaterials.error;
+    const [basePrompt, brandRules, rawSnippets] = supportMaterials.values;
     const sourceArticleId = (source) => String(source?.id || String(source?.url || '').match(/\/articles\/(\d+)/)?.[1] || '');
     // Reviewed corrections can carry captured FAQ evidence. Apply the same
     // regional gate to that provenance so snippets cannot re-introduce an FAQ
