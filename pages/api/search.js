@@ -92,6 +92,9 @@ function cleanAnswer(raw) {
     .replace(/^\s*(?:\*\*)?SEGMENTS?(?:\*\*)?\s*:.*$/gim, '')
     .replace(/^\s*(?:\*\*)?COVERAGE(?:\*\*)?\s*:.*$/gim, '')
     .replace(/^\s*(?:\*\*)?NOTICE_CONFLICT(?:\*\*)?\s*:.*$/gim, '')
+    // Some providers wrap a multiline SOURCES value onto its own bullet. It is
+    // transport metadata, not part of the customer-facing answer.
+    .replace(/^\s*[-•]\s*\d+(?:\s*,\s*\d+)+\s*$/gm, '')
     .replace(/\s*\((?:Excerpt|Source)\s*\d+\)/gi, '')
     .replace(/\b(?:Excerpt|Source)\s*\d+\b/gi, '')
     .replace(/[\[{(]?\d+†L\d+(?:\s*[-–]\s*L?\d+)?[\]})]?/g, '')
@@ -547,7 +550,8 @@ export default async function handler(req, res) {
     // as payment/payments. Those commonly refer to reset or registration fees.
     const payoutish = /\b(?:get paid|getting paid|payouts?|performance rewards?|reward share|profit split|withdraw|withdrawal|cash ?out)\b/.test(probe);
     // The classic ambiguous case: a payout question that names no specific aspect.
-    const payoutUmbrella = payoutish && !hasProcessingQualifier && !hasCycleQualifier && !hasMethodQualifier;
+    const requestsPayoutOverview = /\b(?:full|complete|overview|explain|compare|all|three|3)\b/.test(probe);
+    const payoutUmbrella = payoutish && !hasProcessingQualifier && !hasCycleQualifier && !hasMethodQualifier && !requestsPayoutOverview;
     const bareWithdrawalMinimum = /(?:\bminimum\b.{0,35}\b(?:withdraw|withdrawal)\b|\b(?:withdraw|withdrawal)\b.{0,35}\bminimum\b)/.test(probe) &&
       !/\b(?:performance reward|fundednext account|commission|refer|affiliate|partner|pay-?in|purchase|registration fee)\b/.test(probe);
     if (bareWithdrawalMinimum && !req.body?.clarification) {
@@ -1522,7 +1526,7 @@ export default async function handler(req, res) {
     }
     draftCoverage = coverageFromDraft(raw, topicPlan.length);
     allDraftTopicsUnconfirmed = !!draftCoverage?.length && draftCoverage.every((status) => status === 'not_confirmed');
-    let sourceLine = raw.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
+    let sourceLine = raw.match(/(?:\*\*)?SOURCES(?:\*\*)?[ \t]*:[ \t]*(?:\r?\n[ \t]*[-•]?[ \t]*)?([^\r\n]*)/i);
     const citationCoverage = (draft) => {
       const text = cleanAnswer(draft);
       if (text === SAFE_UNCONFIRMED || !text.trim()) return { complete: true, groups: [] };
@@ -1547,13 +1551,13 @@ export default async function handler(req, res) {
         ];
         try {
           const retried = await runAnswerRecovery(retryMessages);
-          const retrySources = retried.content.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
+          const retrySources = retried.content.match(/(?:\*\*)?SOURCES(?:\*\*)?[ \t]*:[ \t]*(?:\r?\n[ \t]*[-•]?[ \t]*)?([^\r\n]*)/i);
           if (parseNumbers(retrySources).length && citationCoverage(retried.content).complete) { completion = retried; raw = retried.content; sourceLine = retrySources; }
         } catch (retryError) {
           if (isLimit(retryError) && canFallback) {
             try {
               const retried = await runConfiguredFallback(retryMessages);
-              const retrySources = retried?.content?.match(/(?:\*\*)?SOURCES(?:\*\*)?\s*:\s*([^\n]*)/i);
+              const retrySources = retried?.content?.match(/(?:\*\*)?SOURCES(?:\*\*)?[ \t]*:[ \t]*(?:\r?\n[ \t]*[-•]?[ \t]*)?([^\r\n]*)/i);
               if (parseNumbers(retrySources).length && citationCoverage(retried.content).complete) { completion = retried; raw = retried.content; sourceLine = retrySources; answerProvider = fallbackProvider; usedFallback = true; }
             } catch { /* retain the original answer when all providers fail */ }
           }
