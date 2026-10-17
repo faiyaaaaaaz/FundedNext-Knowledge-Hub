@@ -9,6 +9,11 @@ import {
 import { retrieveNotices, noticesAccess } from '../../lib/notices';
 import { shouldUseLlmClarifier } from '../../lib/query-planning.mjs';
 import { authenticateExternalApiKey } from '../../lib/externalAccess';
+import {
+  PRODUCT_SCOPES, detectNamedProduct, deterministicPolicyAnswer,
+  explicitDifferentOwnerCopyRule, explicitHedgingRule, isFnmarketsEvidence,
+  policyPrecisionIntent, repairHedgingLanguage
+} from '../../lib/policyPrecision.mjs';
 
 export const config = { maxDuration: 60 };
 
@@ -208,6 +213,7 @@ function normalizedEvidenceText(value) {
 
 function evidenceProduct(item, override, catalog) {
   if (override?.product) return override.product;
+  if (isFnmarketsEvidence(item)) return 'fnmarkets';
   const url = normalizedEvidenceText(item?.article_url).toLowerCase();
   if (/helpfutures\.fundednext\.com/.test(url)) return 'futures';
   const title = normalizedEvidenceText(item?.article_title);
@@ -221,11 +227,14 @@ function evidenceProduct(item, override, catalog) {
 
 function ruleIntent(text) {
   const value = normalizedEvidenceText(text).toLowerCase();
+  const precision = policyPrecisionIntent(value);
   return {
     dailyLoss: /\b(?:daily|today'?s?|permitted)\b.{0,30}\b(?:loss|drawdown|limit)\b|\b(?:loss|drawdown)\b.{0,20}\b(?:daily|permitted)\b/.test(value),
     maximumLoss: /\b(?:maximum|max|overall)\b.{0,30}\b(?:loss|drawdown|limit|mll)\b|\bmll\b/.test(value),
     minimumTrading: asksMinimumTradingRequirement(value),
-    expertAdvisor: /\b(?:eas?|expert advisors?|automated trading(?: systems?)?|algorithmic trading|trading bots?)\b/.test(value)
+    expertAdvisor: /\b(?:eas?|expert advisors?|automated trading(?: systems?)?|algorithmic trading|trading bots?)\b/.test(value),
+    hedging: precision.hedging || precision.prohibitedOverview,
+    copyTrading: /\bcopy\s+trad(?:e|es|ing)\b/.test(value) || precision.friendCoordination
   };
 }
 
@@ -256,6 +265,14 @@ function directIntentScore(item, intent) {
     if (/\b(?:eas?|expert advisors?|automated trading|trading bots?)\b/.test(title)) score += 54;
     else if (directlyStatesExpertAdvisorRule(item)) score += 36;
   }
+  if (intent.hedging) {
+    if (/\b(?:hedging|group hedging)\b/.test(title)) score += 62;
+    else if (explicitHedgingRule(content)) score += 48;
+  }
+  if (intent.copyTrading) {
+    if (/\bcopy trading\b/.test(title)) score += 62;
+    else if (explicitDifferentOwnerCopyRule(content)) score += 48;
+  }
   return score;
 }
 
@@ -266,6 +283,8 @@ function hasDirectRuleEvidence(items, intent) {
     if (intent.maximumLoss && /\b(?:maximum|max|overall)\b.{0,60}\bloss\b|\bmll\b/.test(text) && /\b\d+(?:\.\d+)?%\b|\binitial balance\b/.test(text)) return true;
     if (intent.minimumTrading && directlyStatesMinimumTradingRequirement(item)) return true;
     if (intent.expertAdvisor && directlyStatesExpertAdvisorRule(item)) return true;
+    if (intent.hedging && explicitHedgingRule(`${item?.article_title || ''}\n${item?.content || ''}`)) return true;
+    if (intent.copyTrading && explicitDifferentOwnerCopyRule(`${item?.article_title || ''}\n${item?.content || ''}`)) return true;
     return false;
   });
 }
@@ -300,13 +319,15 @@ function snippetFitsQuestion(snippet) {
 }
 
 function snippetFitsRuleIntent(snippet, intent) {
-  if (!intent?.dailyLoss && !intent?.maximumLoss && !intent?.minimumTrading && !intent?.expertAdvisor) return true;
+  if (!intent?.dailyLoss && !intent?.maximumLoss && !intent?.minimumTrading && !intent?.expertAdvisor && !intent?.hedging && !intent?.copyTrading) return true;
   const evidence = (snippet?._evidence || []).map((source) => `${source?.title || ''}\n${source?.excerpt || ''}`).join('\n');
   const text = normalizedEvidenceText(`${snippet?.title || ''}\n${snippet?.instruction || ''}\n${evidence}`).toLowerCase();
   if (intent.dailyLoss && !/\b(?:daily|today'?s?|permitted)\b.{0,45}\b(?:loss|drawdown|limit)\b/.test(text)) return false;
   if (intent.maximumLoss && !(/\b(?:maximum|max|overall)\b.{0,45}\b(?:loss|drawdown|limit)\b/.test(text) || /\bmll\b/.test(text))) return false;
   if (intent.minimumTrading && !/\bminimum\b.{0,35}\b(?:trades?|trading days?)\b|\btrading days?\b.{0,25}\bminimum\b/.test(text)) return false;
   if (intent.expertAdvisor && !/\b(?:eas?|expert advisors?|automated trading|algorithmic trading|trading bots?)\b/.test(text)) return false;
+  if (intent.hedging && !/\bhedg(?:e|ed|es|ing)\b/.test(text)) return false;
+  if (intent.copyTrading && !/\bcopy\s+trad(?:e|es|ing)\b/.test(text)) return false;
   return true;
 }
 
@@ -437,7 +458,7 @@ export default async function handler(req, res) {
     const regionScopeFor = (articleId) => articleRegionScopes[String(articleId || '')] || null;
     const regionIsApplicable = (regionScope) => !regionScope?.regions?.length ||
       regionScope.regions.some((region) => regionIntent.included.includes(region));
-    const selectedProduct = ['cfd', 'futures', 'both'].includes(req.body?.scope?.product) ? req.body.scope.product : 'cfd';
+    const selectedProduct = PRODUCT_SCOPES.includes(req.body?.scope?.product) ? req.body.scope.product : 'cfd';
     const selectedModelSlug = String(req.body?.scope?.model || 'all');
     const selectedModelFromUi = selectedModelSlug === 'all' ? null : scopeCatalog.models.find((item) =>
       item.slug === selectedModelSlug && ['current','previous'].includes(item.status) && (selectedProduct === 'both' || item.product === selectedProduct)
@@ -450,13 +471,13 @@ export default async function handler(req, res) {
       });
     }
     const questionModels = modelsMentioned(question, scopeCatalog.models);
-    const questionProduct = /\bfundednext\W*futures\b|\bfutures\W+(?:account|challenge|model|rules?)\b/i.test(normalizedEvidenceText(question)) ? 'futures' : null;
+    const questionProduct = detectNamedProduct(question);
     const productConflict = selectedProduct !== 'both' && (questionProduct && questionProduct !== selectedProduct || questionModels.some((item) => item.product !== selectedProduct));
     if (productConflict) {
       return res.status(200).json({
         scopeNotice: true,
         noticeTitle: 'Your question and selected product do not match',
-        notice: `The selector is set to ${selectedProduct.toUpperCase()}, but the question names a ${questionProduct === 'futures' || questionModels.some((item) => item.product === 'futures') ? 'Futures' : 'CFD'} product or Account model. Change the Product selector before asking again.`
+        notice: `The selector is set to ${selectedProduct.toUpperCase()}, but the question names a ${questionProduct === 'fnmarkets' ? 'FNmarkets' : questionProduct === 'futures' || questionModels.some((item) => item.product === 'futures') ? 'Futures' : 'CFD'} product or Account model. Change the Product selector before asking again.`
       });
     }
     const conflictingModel = selectedModelFromUi && questionModels.find((item) => item.slug !== selectedModelFromUi.slug);
@@ -701,6 +722,7 @@ export default async function handler(req, res) {
         .not('article_title', 'ilike', '[FA]%');
       if (selectedProduct === 'cfd') query = query.ilike('article_url', 'https://help.fundednext.com/en/articles/%');
       if (selectedProduct === 'futures') query = query.ilike('article_url', 'https://helpfutures.fundednext.com/en/articles/%');
+      if (selectedProduct === 'fnmarkets') query = query.or('article_url.ilike.%help.fnmarkets.com%,article_title.ilike.%FNmarkets%,article_title.ilike.%FN markets%');
       return query.limit(limit);
     };
     if (requestedRuleIntent.dailyLoss) {
@@ -716,6 +738,12 @@ export default async function handler(req, res) {
     if (requestedRuleIntent.expertAdvisor) {
       anchorQueries.push(scopedEnglishAnchor('content.ilike.%expert advisor%,content.ilike.%automated trading%,content.ilike.%trading bot%,article_title.ilike.%ea%allowed%', 60));
     }
+    if (requestedRuleIntent.hedging) {
+      anchorQueries.push(scopedEnglishAnchor('article_title.ilike.%restricted%prohibited%,article_title.ilike.%hedging%,content.ilike.%hedging is allowed only within the same account%,content.ilike.%hedging across multiple accounts is prohibited%', 80));
+    }
+    if (requestedRuleIntent.copyTrading) {
+      anchorQueries.push(scopedEnglishAnchor('article_title.ilike.%restricted%prohibited%,article_title.ilike.%copy trading%,content.ilike.%copy trading%,content.ilike.%friends%', 80));
+    }
     if (selectedModel) {
       const modelNeedle = normalizedEvidenceText(selectedModel.name).replace(/[^a-z0-9 -]/gi, ' ').replace(/\s+/g, ' ').trim();
       if (modelNeedle) anchorQueries.push(scopedEnglishAnchor(`article_title.ilike.%${modelNeedle}%,content.ilike.%${modelNeedle}%`));
@@ -728,6 +756,22 @@ export default async function handler(req, res) {
         for (const item of result.value?.data || []) {
           if (!seenKeyword.has(String(item.id))) { seenKeyword.add(String(item.id)); keywordMatches.push(item); }
         }
+      }
+    }
+    if (requestedRuleIntent.hedging || requestedRuleIntent.copyTrading) {
+      const direct = candidates.filter((item) => {
+        const text = `${item.article_title || ''}\n${item.content || ''}`;
+        return (requestedRuleIntent.hedging && explicitHedgingRule(text)) ||
+          (requestedRuleIntent.copyTrading && explicitDifferentOwnerCopyRule(text));
+      }).slice(0, 4);
+      if (direct.length) {
+        const seen = new Set();
+        matches = [...direct, ...matches].filter((item) => {
+          const key = String(item.id);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        }).slice(0, 12);
       }
     }
     const competitionMinimumQuestion = selectedModel?.slug === 'competition' && asksMinimumTradingRequirement(clearQuestion || question);
@@ -1287,6 +1331,9 @@ export default async function handler(req, res) {
       : '';
     const formatText = '\n\nWrite all formulas and math in plain text using × ÷ + − = and parentheses. Never use LaTeX or markup such as \\frac, \\text, \\[, \\], or any backslash command.';
     const groundingText = '\n\nGROUNDING: Base your answer on the FAQ evidence above and prefer it over prior knowledge. If the evidence only partially covers the question, answer the part it supports and briefly note what is uncertain — you do not need to refuse the whole answer. Only decline (set CONFIDENCE to 0 and SOURCES to none) if the evidence contains essentially nothing relevant to the question. Do not state specific rules, numbers, or permissions that are absent from the evidence, and do not cite a source that does not contain the claim. If the evidence provides a percentage, ratio, or formula rule, you may apply it to specific numbers the customer stated (e.g., calculating 5% of $15,000) — this IS evidence-supported and you must cite the source that states the rule.';
+    const policyPrecisionText = (requestedRuleIntent.hedging || requestedRuleIntent.copyTrading)
+      ? '\n\nPOLICY PRECISION: Keep these concepts separate. Ordinary hedging within one account and hedging/group hedging across multiple accounts are different rules. Never say hedging is broadly prohibited when the evidence allows it within the same account. Same-direction matching trades between accounts owned by different people are copy trading or coordinated trading, not hedging; opposite positions across multiple accounts are hedging/group hedging. Prefer the detailed restricted-strategies article over a shorter summary list when both are supplied.'
+      : '';
     // If the question is about a calculation (max lot, margin, pip value, lot
     // size, risk), push the model to use the calculator formulas that are in the
     // evidence and to ask for any missing number rather than assuming it.
@@ -1300,7 +1347,7 @@ export default async function handler(req, res) {
     const noticesText = hasNoticeEvidence
       ? '\n\nAUTHORITATIVE UPDATES: Some evidence items are official CEx notices marked "OFFICIAL NOTICE (dated ...)". A Notice overrides an older FAQ or Notice ONLY for the exact rule and conditions it explicitly changes. Silence about a different requirement does not repeal that requirement. For example, a Notice changing a competition duration does not remove a separate minimum-trading-day rule. You MUST follow these rules: (1) Compare evidence by topic, product, model, region, effective date, and condition before declaring a conflict. (2) For the same rule and conditions, follow only the newest applicable statement. Never merge an older allowance with a newer restriction. (3) If a newer Notice explicitly restricts, prohibits, or removes something, do not present the old allowance as valid. (4) Honor every condition exactly as written. If the answer depends on a condition the customer did not state, give each supported conditional branch or ask. (5) Never soften a prohibition into "allowed with an add-on" unless the newest applicable Notice explicitly says so.'
       : '';
-    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + correctionText + snippetText + scopeText + regionText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText + noticesText +
+    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + correctionText + snippetText + scopeText + regionText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText + policyPrecisionText + noticesText +
       `\n\nAfter the customer-ready answer, add five private final lines. COVERAGE must contain exactly ${topicPlan.length} comma-separated values, one for each customer question in order:\n` +
       'SOURCES: comma-separated evidence numbers actually used, or none\n' +
       'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim\n' +
@@ -1759,13 +1806,51 @@ export default async function handler(req, res) {
     });
     let usedCalculator = sources.some((s) => s.kind === 'calculator');
 
+    // Resolve the two policy distinctions that must never depend on model
+    // phrasing. The deterministic wording is enabled only when the selected,
+    // scoped FAQ passage itself explicitly proves the rule.
+    const precisionIntent = policyPrecisionIntent(clearQuestion || question);
+    let deterministicPolicyResolved = false;
+    const policyEvidence = (precisionIntent.friendCoordination
+      ? matches.find((item) => explicitDifferentOwnerCopyRule(`${item.article_title || ''}\n${item.content || ''}`))
+      : null) || matches.find((item) => explicitHedgingRule(`${item.article_title || ''}\n${item.content || ''}`));
+    if (policyEvidence) {
+      const policyText = `${policyEvidence.article_title || ''}\n${policyEvidence.content || ''}`;
+      const policyResult = deterministicPolicyAnswer(clearQuestion || question, policyText);
+      const rawPolicySource = sourceRecord(policyEvidence);
+      const { _aid: ignoredPolicyId, ...publicPolicySource } = rawPolicySource;
+      let policyRef = sources.findIndex((source) => source.url === publicPolicySource.url && source.title === publicPolicySource.title) + 1;
+      if (!policyRef) { sources.push(publicPolicySource); policyRef = sources.length; }
+      if (policyResult) {
+        deterministicPolicyResolved = true;
+        answer = policyResult.answer;
+        segments = answer.split(/\n{2,}/).map((text) => ({ text, refs: [policyRef] }));
+        sources = [publicPolicySource];
+        segments = segments.map((segment) => ({ ...segment, refs: [1] }));
+        confidence = 96;
+        confidenceLabel = 'High confidence';
+        questionCoverage = topicPlan.map((topic) => ({ question: topic.question, status: 'answered' }));
+        coverageSummary = { total: questionCoverage.length, answered: questionCoverage.length, partial: 0, notConfirmed: 0 };
+        answeredCount = questionCoverage.length; partialCount = 0; notConfirmedCount = 0;
+      } else if (requestedRuleIntent.hedging && /\bhedg/i.test(answer)) {
+        const repaired = repairHedgingLanguage(answer, policyText);
+        if (repaired !== answer) {
+          const oldSegments = segments || [];
+          answer = repaired;
+          segments = answer.split(/\n{2,}/).map((text, index) => ({ text, refs: oldSegments[index]?.refs?.length ? oldSegments[index].refs : [policyRef] }));
+          confidence = Math.min(96, Math.max(confidence, 90));
+          confidenceLabel = 'High confidence';
+        }
+      }
+    }
+
     // ---- Grounding verification --------------------------------------------
     // The grounding check is a CONFIDENCE signal, not a refusal switch. It lowers
     // confidence when the evidence weakly supports the answer, and only replaces
     // the answer when the evidence supports almost nothing (a clear fabrication).
     // This keeps the assistant useful for agents while catching invented claims.
     let groundingScore = null;
-    if (smartRetrieval && answer !== SAFE_UNCONFIRMED && !usedCalculator) {
+    if (smartRetrieval && answer !== SAFE_UNCONFIRMED && !usedCalculator && !deterministicPolicyResolved) {
       await logActivity({ metadata: { stage: 'Verifying answer', durationMs: Date.now() - started } });
       const check = await verifyGrounding({
         question: clearQuestion || question, answer, context,
