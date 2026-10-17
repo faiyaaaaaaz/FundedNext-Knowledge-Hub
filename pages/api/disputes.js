@@ -26,7 +26,7 @@ export default async function handler(req, res) {
       if (!String(body.question || '').trim() || !String(body.answer || '').trim()) {
         return res.status(400).json({ error: 'The question and answer are required.' });
       }
-      const selectedScope = body.scope && ['cfd', 'futures', 'both'].includes(body.scope.product)
+      const selectedScope = body.scope && ['cfd', 'futures', 'fnmarkets', 'both'].includes(body.scope.product)
         ? { type: 'answer_scope', product: body.scope.product, model: String(body.scope.model || 'all'), label: String(body.scope.label || '').slice(0, 160), title: `Answer scope: ${body.scope.product.toUpperCase()} Â· ${String(body.scope.label || body.scope.model || 'All models').slice(0, 160)}`, url: '' }
         : null;
       const recordedSources = Array.isArray(body.sources) ? body.sources.slice(0, 30) : [];
@@ -119,7 +119,7 @@ export default async function handler(req, res) {
         const annotationContext = passageAnnotations.map((item, index) =>
           `${index + 1}. ${String(item.target || 'passage').toUpperCase()} characters ${item.start ?? '?'}-${item.end ?? '?'}\nExact quote: "${String(item.quote || '').slice(0, 1800)}"\nReviewer note: ${String(item.note || '').slice(0, 1800)}`
         ).join('\n\n');
-        const product = ['cfd', 'futures', 'both'].includes(recordedScope?.product) ? recordedScope.product : 'both';
+        const product = ['cfd', 'futures', 'fnmarkets', 'both'].includes(recordedScope?.product) ? recordedScope.product : 'both';
         const model = String(recordedScope?.model || 'all');
         const evidenceQueries = [...new Set([
           dispute.question,
