@@ -19,7 +19,7 @@ export default async function handler(req,res){
   const overrides=stored.data?.value?JSON.parse(stored.data.value):{};
   let model=catalog.models.find(m=>m.slug===body.slug);
   if(body.action==='nominate'){
-   if(!String(body.name||'').trim()||!['cfd','futures'].includes(body.product))return res.status(400).json({error:'Enter a name and product.'});
+   if(!String(body.name||'').trim()||!['cfd','futures','fnmarkets'].includes(body.product))return res.status(400).json({error:'Enter a name and product.'});
    const article=await sb.from('articles').select('intercom_id,title,body,url').eq('intercom_id',body.articleId).eq('state','published').single();if(article.error)throw new Error('Choose an existing published FAQ article ID.');
    const name=String(body.name).trim().slice(0,120),slug=body.product+'-'+name.toLowerCase().replace(/[^a-z0-9]+/g,'-');
    if(catalog.models.some(m=>m.slug===slug))return res.status(400).json({error:'That candidate already exists. Review it below.'});
@@ -28,7 +28,7 @@ export default async function handler(req,res){
   }else{
    if(!model)return res.status(400).json({error:'Model not found. Refresh the review queue.'});
    if(body.action==='correct-product'){
-    if(!['cfd','futures'].includes(body.product))return res.status(400).json({error:'Choose CFD or Futures.'});
+    if(!['cfd','futures','fnmarkets'].includes(body.product))return res.status(400).json({error:'Choose CFD, Futures, or FNmarkets.'});
     overrides[model.slug]={...model,product:body.product,status:'review'};
    }else if(body.action==='merge'){
     const target=catalog.models.find(m=>m.slug===body.target&&m.slug!==model.slug&&m.product===model.product&&['current','previous'].includes(m.status));
