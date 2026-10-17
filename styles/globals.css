@@ -233,6 +233,18 @@ label { display: block; margin: 0 0 8px; color: var(--ink); font-size: 12.5px; f
 .user-message { display: flex; flex-direction: column; align-items: flex-end; }
 .message-label { margin: 0 8px 6px; color: var(--faint); font: 700 10px/1 var(--display); letter-spacing: .12em; text-transform: uppercase; }
 .user-bubble { max-width: 74%; padding: 13px 17px; border-radius: 17px 17px 5px 17px; background: linear-gradient(135deg, var(--violet-2), var(--violet)); color: #fff; line-height: 1.55; box-shadow: 0 14px 30px -14px rgba(108,71,245,.6); white-space: pre-wrap; overflow-wrap: anywhere; }
+.message-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 12px; color: var(--faint); font: 650 10px/1.35 var(--display); }
+.message-meta span + span::before { content: '•'; margin-right: 12px; color: color-mix(in srgb, var(--violet) 58%, var(--faint)); }
+.user-meta { max-width: 74%; margin: 8px 6px 0; justify-content: flex-end; }
+.answer-meta { margin: -7px 0 18px; padding-bottom: 13px; border-bottom: 1px dashed color-mix(in srgb, var(--line) 68%, transparent); }
+.workspace-release { margin-top: 8px; padding: clamp(22px, 4vw, 38px); border: 1px solid color-mix(in srgb, var(--success) 34%, var(--line)); border-radius: 20px; background: linear-gradient(145deg, color-mix(in srgb, var(--success) 9%, var(--surface)), var(--surface)); box-shadow: var(--shadow-sm); }
+.workspace-release h3 { margin: 10px 0 7px; font: 800 clamp(24px, 4vw, 34px)/1.08 var(--display); letter-spacing: -.035em; }
+.workspace-release > p { margin: 0; color: var(--muted); }
+.workspace-release ul { margin: 24px 0; padding: 0; display: grid; gap: 12px; list-style: none; }
+.workspace-release li { padding: 13px 15px 13px 42px; position: relative; border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--surface-2) 82%, transparent); color: var(--ink-2); line-height: 1.5; }
+.workspace-release li::before { content: '✓'; width: 20px; height: 20px; display: grid; place-items: center; position: absolute; left: 13px; top: 13px; border-radius: 50%; background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); font-weight: 850; }
+.workspace-release > small { color: var(--faint); font-size: 10px; }
+.activity-api-toggle { min-height: 44px; align-self: end; padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
 
 .assistant-message { display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: 15px; align-items: start; }
 .bot-avatar { width: 40px; height: 40px; padding: 8px; border-radius: 12px; background: linear-gradient(150deg, var(--violet-soft), color-mix(in srgb, var(--violet-soft) 45%, var(--surface))); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--violet) 14%, transparent); }
