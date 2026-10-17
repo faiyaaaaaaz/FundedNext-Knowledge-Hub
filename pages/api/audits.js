@@ -50,6 +50,26 @@ async function loadResults(sb, jobId) {
   return (rows || []).map(publicResult);
 }
 
+async function resultsWithLiveTranscripts(results, intercomToken) {
+  if (!intercomToken) return results;
+  const admins = await fetchIntercomAdmins(intercomToken);
+  const completed = results.filter((item) => item.status === 'completed' && item.conversationId);
+  const turnsByConversation = new Map();
+  for (let offset = 0; offset < completed.length; offset += 10) {
+    const batch = completed.slice(offset, offset + 10);
+    const fetched = await Promise.allSettled(batch.map((item) => fetchConversation(intercomToken, item.conversationId)));
+    fetched.forEach((entry, index) => {
+      if (entry.status !== 'fulfilled') return;
+      const turns = conversationTurns(entry.value, admins).map((turn) => ({
+        id: turn.id, at: turn.at, kind: turn.kind, authorName: turn.authorName,
+        body: turn.body, partType: turn.partType
+      }));
+      turnsByConversation.set(String(batch[index].conversationId), turns);
+    });
+  }
+  return results.map((result) => ({ ...result, reportTurns: turnsByConversation.get(String(result.conversationId)) || [] }));
+}
+
 async function updateJob(sb, row, patch) {
   const latest = checked(await sb.from('activity_logs').select('*').eq('id', row.id).eq('event_type', 'conversation_audit_job').single(), 'Could not refresh audit controls');
   const metadata = { ...(latest.metadata || {}), ...patch, updatedAt: new Date().toISOString() };
@@ -243,8 +263,13 @@ export default async function handler(req, res) {
     if (req.method === 'GET' && action === 'export') {
       const job = publicJob(await loadJob(sb, req.query.jobId)); const results = await loadResults(sb, req.query.jobId);
       if (req.query.format === 'html') {
+        const keys = await getKeys();
+        // UI auditors receive the live transcript in the offline report. A
+        // developer API key cannot use the report route to bypass its separate
+        // transcript permission or redaction boundary.
+        const reportResults = access.external ? results : await resultsWithLiveTranscripts(results, keys.intercomToken);
         res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.setHeader('Content-Disposition', `attachment; filename="fundednext-audit-${job.id}.html"`);
-        return res.status(200).send(auditHtml(job, results));
+        return res.status(200).send(auditHtml(job, reportResults));
       }
       res.setHeader('Content-Type', 'text/csv; charset=utf-8'); res.setHeader('Content-Disposition', `attachment; filename="fundednext-audit-${job.id}${req.query.detailed === '1' ? '-detailed' : ''}.csv"`);
       return res.status(200).send(auditCsv(results, req.query.detailed === '1'));
