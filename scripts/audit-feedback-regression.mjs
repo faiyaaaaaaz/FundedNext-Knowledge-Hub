@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { auditReportTranscript, humanEfficiencyComment } from '../lib/auditFeedback.mjs';
+import { auditReportTranscript, humanEfficiencyComment, scoreEfficiency } from '../lib/auditFeedback.mjs';
 
 const metrics = {
   supportLevel: 'standard', ahtSeconds: 2193, ahtMessageCount: 3, ahtHit: false, ahtTarget: 1200,
@@ -26,11 +26,40 @@ const html = auditReportTranscript({
   ]
 });
 assert.match(html, /Chat transcript/);
+assert.match(html, /<details class="transcript">/);
+assert.doesNotMatch(html, /<details class="transcript" open/);
+assert.match(html, /2 messages · Expand/);
 assert.match(html, /The dashboard is confusing\.\nCan you check it\?/);
 assert.match(html, /<mark class="flag-quality">The policy rule is correct\.<\/mark>/);
 assert.match(html, /Referenced in verdict/);
 const auditSource = readFileSync(new URL('../lib/audits.js', import.meta.url), 'utf8');
 assert.match(auditSource, /Flagged excerpt:/);
 assert.match(auditSource, /Next time:/);
+assert.match(auditSource, /Self-assignment is prohibited and automatically sets Efficiency to 0\/10/);
+assert.match(auditSource, /Critical workflow violation: The agent assigned this conversation to themselves/);
+assert.match(auditSource, /selfAssignmentEventId/);
 
-console.log('audit feedback regression: 12 assertions passed');
+const level1 = (overrides = {}) => ({
+  supportLevel: 'standard', frtSeconds: 30, frtHit: true, ahtSeconds: 1200, ahtHit: true,
+  artBreaches: 0, responseTimes: [90], slaStatus: 'hit', ...overrides
+});
+assert.equal(scoreEfficiency(level1()), 8, 'meeting all Level 1 thresholds is the benchmark 8');
+assert.equal(scoreEfficiency(level1({ frtSeconds: 31, frtHit: false })), 2, 'FRT miss alone sets the score to 2');
+assert.equal(scoreEfficiency(level1({ frtSeconds: 31, frtHit: false, artBreaches: 1, responseTimes: [91] })), 0, 'FRT plus ART miss sets the score to 0');
+assert.equal(scoreEfficiency(level1({ frtSeconds: 31, frtHit: false, ahtSeconds: 1201, ahtHit: false })), 0, 'FRT plus AHT miss sets the score to 0');
+assert.equal(scoreEfficiency(level1({ ahtSeconds: 1201, ahtHit: false })), 8, 'AHT miss alone retains the benchmark score when FRT and ART pass');
+assert.equal(scoreEfficiency(level1({ frtSeconds: 29, ahtSeconds: 1199, responseTimes: [89] })), 9, 'beating every target earns more than 8');
+assert.equal(scoreEfficiency(level1({ frtSeconds: 15, ahtSeconds: 600, responseTimes: [45] })), 10, 'exceptional half-target timing earns 10');
+assert.equal(scoreEfficiency(level1({ artBreaches: 1, responseTimes: [91] })), 6, 'one ART-only miss is a limited deduction');
+assert.equal(scoreEfficiency(level1({ artBreaches: 2, responseTimes: [91, 120] })), 4, 'repeated ART-only misses receive a larger deduction');
+assert.equal(scoreEfficiency(level1({ selfAssigned: true })), 0, 'self-assignment overrides every timing result and sets Efficiency to 0');
+const selfAssignedFeedback = humanEfficiencyComment(level1({ selfAssigned: true, ahtMessageCount: 2 }));
+assert.match(selfAssignedFeedback, /^The agent assigned this conversation to themselves\./);
+assert.match(selfAssignedFeedback, /automatically sets Efficiency to 0\/10/);
+
+const pageSource = readFileSync(new URL('../pages/audits.js', import.meta.url), 'utf8');
+assert.match(pageSource, /ART breach \$\{index \+ 1\}/);
+assert.match(pageSource, /cycle\.breached/);
+assert.match(pageSource, /Self-assignment violation/);
+
+console.log('audit feedback regression: 30 assertions passed');
