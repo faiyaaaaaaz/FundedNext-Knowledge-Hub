@@ -10,7 +10,7 @@ function safePreference(value) {
   try {
     const parsed = typeof value === 'string' ? JSON.parse(value) : value;
     return {
-      product: ['cfd', 'futures', 'both'].includes(parsed?.product) ? parsed.product : 'cfd',
+      product: ['cfd', 'futures', 'fnmarkets', 'both'].includes(parsed?.product) ? parsed.product : 'cfd',
       model: String(parsed?.model || 'all').slice(0, 120)
     };
   } catch { return { product: 'cfd', model: 'all' }; }
