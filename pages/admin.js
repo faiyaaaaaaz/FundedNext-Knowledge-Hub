@@ -42,6 +42,10 @@ function formatDuration(ms) {
   return `${m}m ${s % 60}s`;
 }
 
+function displayStoredAnswer(value) {
+  return String(value || '').replace(/^\s*[-•]\s*\d+(?:\s*,\s*\d+)+\s*$/gm, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function syncStatusLabel(status) {
   return { success: 'Success', partial: 'Checkpoint saved', failed: 'Failed', skipped: 'Skipped' }[status] || status;
 }
@@ -127,7 +131,7 @@ function ActivityLogCard({ log, expanded, onToggle }) {
   const metadata = log.metadata && typeof log.metadata === 'object' ? log.metadata : {};
   const acknowledgement = log.event_type === 'workspace_acknowledgement';
   const question = metadata.question || metadata.questionPreview || '';
-  const answer = metadata.answer || metadata.answerPreview || '';
+  const answer = displayStoredAnswer(metadata.answer || metadata.answerPreview || '');
   const sources = Array.isArray(metadata.sources) ? metadata.sources : [];
   const cost = log.estimated_cost == null ? '—' : `$${Number(log.estimated_cost).toFixed(6)}`;
   return <article className={`activity-log-card${expanded ? ' expanded' : ''}`}>
