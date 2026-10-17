@@ -6,15 +6,18 @@ const defaultKey = (email) => `activity_filter_default:${String(email).toLowerCa
 function applyFilters(rows, query) {
   const includeTypes = list(query.types), excludeTypes = list(query.excludeTypes), roles = list(query.roles);
   const status = String(query.status || '').toLowerCase(), search = String(query.search || '').trim().toLowerCase();
+  const includeApi = ['1', 'true', 'yes'].includes(String(query.includeApi || '').toLowerCase());
   return rows.filter((item) => {
     const type = String(item.event_type || '').toLowerCase();
+    const meta = item.metadata && typeof item.metadata === 'object' ? item.metadata : {};
+    const isApiActivity = String(item.auth_provider || '').toLowerCase() === 'external_api' || type === 'external_api_request' || !!meta.externalKeyId || !!meta.keyId;
+    if (!includeApi && isApiActivity) return false;
     if (includeTypes.length && !includeTypes.includes(type)) return false;
     if (excludeTypes.includes(type)) return false;
     if (roles.length && !roles.includes(String(item.actor_role || '').toLowerCase())) return false;
     if (status === 'success' && item.success === false) return false;
     if (status === 'failed' && item.success !== false) return false;
     if (!search) return true;
-    const meta = item.metadata && typeof item.metadata === 'object' ? item.metadata : {};
     return `${item.event_type || ''} ${item.user_name || ''} ${item.user_email || ''} ${item.provider || ''} ${item.model || ''} ${meta.question || ''} ${meta.answer || ''}`.toLowerCase().includes(search);
   });
 }
