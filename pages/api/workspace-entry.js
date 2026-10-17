@@ -3,14 +3,13 @@ import { authenticateRequest, logActivity, supabaseAdmin } from '../../lib/serve
 // Updating this release object as part of a deployment automatically shows the
 // real release notes once to every user, including Admins.
 const CURRENT_RELEASE = {
-  version: '2026.09.workspace-v2',
+  version: '2026.10.speed-and-clarity-v1',
   title: 'What’s new',
   changes: [
-    'A redesigned workspace with light and dark modes.',
-    'Your previous questions and answers are available in My conversations.',
-    'Track your submitted disputes and receive decision notifications.',
-    'Admin messages now appear in your personal inbox.',
-    'A guided introduction explains scope, source review, and answer feedback.'
+    'Verified answers now arrive significantly faster, including longer multi-part questions.',
+    'Questions show the selected product scope and the exact time they were asked.',
+    'Answers show their scope, completion time, and total response duration.',
+    'Conversation records are more precise and easier to review.'
   ]
 };
 
