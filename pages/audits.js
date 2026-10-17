@@ -71,6 +71,10 @@ function Metric({ label, value, detail, tone = '' }) {
   return <div className={`audit-metric ${tone}`}><span>{label}</span><strong>{value}</strong>{detail && <small>{detail}</small>}</div>;
 }
 
+function AuditTip({ text, label = 'More information' }) {
+  return <span className="audit-tip" tabIndex="0" aria-label={`${label}: ${text}`}><b aria-hidden="true">i</b><span role="tooltip">{text}</span></span>;
+}
+
 function ScoreRing({ value }) {
   const score = Math.max(0, Math.min(10, Number(value) || 0));
   return <div className="score-ring" style={{ '--score': `${score * 10}%` }}><span><b>{score.toFixed(2).replace(/\.00$/, '')}</b><small>/10</small></span></div>;
@@ -202,6 +206,7 @@ export default function Audits() {
   const [elapsed, setElapsed] = useState(0);
   const [syncingAgents, setSyncingAgents] = useState(false);
   const [enabledDraft, setEnabledDraft] = useState([]);
+  const [level2Draft, setLevel2Draft] = useState([]);
   const [accessDraft, setAccessDraft] = useState('');
   const [modelsDraft, setModelsDraft] = useState('');
   const [savingAdmin, setSavingAdmin] = useState('');
@@ -255,7 +260,7 @@ export default function Audits() {
       const response = await fetch('/api/audits?action=bootstrap', { headers: { 'x-app-session': token } });
       const result = await response.json();
       if (!response.ok) { if (response.status === 403) setAccessDenied(true); throw new Error(result.error || 'Could not load Conversation Audit.'); }
-      setData(result); setSelectedAgents(result.enabledAgentIds?.slice(0, 1) || []); setEnabledDraft(result.enabledAgentIds || []);
+      setData(result); setSelectedAgents([]); setEnabledDraft(result.enabledAgentIds || []); setLevel2Draft(result.level2AgentIds || []);
       setAccessDraft((result.access?.config?.emails || []).join('\n')); setModelsDraft((result.models || []).join('\n'));
       const active = (result.jobs || []).find((job) => ['queued','running','paused'].includes(job.status));
       if (active) await loadJob(active.id, token);
@@ -275,7 +280,7 @@ export default function Audits() {
       const response = await fetch(`/api/audits?action=job&id=${encodeURIComponent(id)}`, { headers: { 'x-app-session': token } });
       const result = await response.json(); if (!response.ok) throw new Error(result.error || 'Could not load this audit.');
       setCurrentJob(result.job); setResults(result.results || []); setView('results');
-      if (['queued','running','paused'].includes(result.job.status)) runQueue(result.job.id, token);
+      if (['queued','running'].includes(result.job.status) && !result.job.pauseRequested) runQueue(result.job.id, token);
     } catch (err) { setError(err.message); }
   }
 
@@ -315,17 +320,39 @@ export default function Audits() {
           const fresh = await fetch(`/api/audits?action=job&id=${encodeURIComponent(jobId)}`, { headers: { 'x-app-session': token } }).then((response) => response.json());
           if (fresh.results) setResults(fresh.results);
         }
-        if (result.job?.status === 'completed' || result.done) break;
-        if (result.retryAfterMs) await new Promise((resolve) => setTimeout(resolve, Math.min(result.retryAfterMs, 5000)));
+        if (['completed','cancelled'].includes(result.job?.status) || result.done) break;
+        if (result.retryAfterMs) await new Promise((resolve) => setTimeout(resolve, Math.min(result.retryAfterMs, 30000)));
         else await new Promise((resolve) => setTimeout(resolve, 350));
       }
     } catch (err) { setError(err.message); }
     finally { processingRef.current = false; setRunning(false); }
   }
 
+  async function pauseAudit() {
+    if (!currentJob?.id) return;
+    stopRef.current = true; setNotice('Pause requested. The current conversation will finish saving, then the batch will stop.');
+    try { const result = await request('pause-job', { jobId: currentJob.id }); setCurrentJob(result.job); }
+    catch (err) { setError(err.message); }
+  }
+
+  async function resumeAudit() {
+    if (!currentJob?.id || running) return;
+    setError(''); setNotice('Resuming from the next saved checkpoint…'); stopRef.current = false;
+    try { const result = await request('resume-job', { jobId: currentJob.id }); setCurrentJob(result.job); await runQueue(result.job.id); }
+    catch (err) { setError(err.message); setRunning(false); }
+  }
+
+  async function cancelAudit() {
+    if (!currentJob?.id || currentJob.status === 'completed' || currentJob.status === 'cancelled') return;
+    if (!window.confirm('Cancel this audit batch? Completed results will remain saved, but unprocessed conversations will not run.')) return;
+    stopRef.current = true; setNotice('Cancelling the audit. Completed results remain saved.');
+    try { const result = await request('cancel-job', { jobId: currentJob.id }); setCurrentJob(result.job); setRunning(false); }
+    catch (err) { setError(err.message); }
+  }
+
   async function syncAgents() {
     setSyncingAgents(true); setError('');
-    try { const result = await request('sync-agents'); setData((current) => ({ ...current, agents: result.agents, enabledAgentIds: result.enabledAgentIds })); setEnabledDraft(result.enabledAgentIds); setNotice(`Intercom connected · ${result.agents.length} agents found.`); }
+    try { const result = await request('sync-agents'); setData((current) => ({ ...current, agents: result.agents, enabledAgentIds: result.enabledAgentIds, level2AgentIds: result.level2AgentIds })); setEnabledDraft(result.enabledAgentIds); setLevel2Draft(result.level2AgentIds || []); setNotice(`Intercom connected · ${result.agents.length} agents found.`); }
     catch (err) { setError(err.message); } finally { setSyncingAgents(false); }
   }
 
@@ -333,7 +360,7 @@ export default function Audits() {
     setSavingAdmin(action); setError('');
     try {
       const result = await request(action, payload); setNotice(success);
-      if (result.enabledAgentIds) setData((current) => ({ ...current, enabledAgentIds: result.enabledAgentIds }));
+      if (result.enabledAgentIds) { setData((current) => ({ ...current, enabledAgentIds: result.enabledAgentIds, level2AgentIds: result.level2AgentIds || current.level2AgentIds || [] })); setEnabledDraft(result.enabledAgentIds); setLevel2Draft(result.level2AgentIds || []); }
       if (result.access) setData((current) => ({ ...current, access: { ...current.access, config: result.access } }));
       if (result.models) setData((current) => ({ ...current, models: result.models }));
     } catch (err) { setError(err.message); } finally { setSavingAdmin(''); }
@@ -408,7 +435,7 @@ export default function Audits() {
 
         {view === 'control' && <div className="audit-control-layout">
           <section className="audit-card connection-card">
-            <div className="card-heading"><div><span>Live readiness</span><h2>Connections and capacity</h2><p>Live checks use harmless test requests and never send a customer conversation.</p></div><StatusOrb state={health?.state || 'checking'}/></div>
+            <div className="card-heading"><div><span>Live readiness</span><h2>Connections and capacity <AuditTip text="Shows whether Intercom, the Gemini key pool, and saved knowledge are ready before an audit starts."/></h2><p>Live checks use harmless test requests and never send a customer conversation.</p></div><StatusOrb state={health?.state || 'checking'}/></div>
             <div className="connection-grid">
               <div className={health?.intercom?.connected ? 'connected' : health?.state === 'checking' ? 'checking' : 'disconnected'}><ConnectionLogo type="intercom" state={health?.intercom?.connected ? 'connected' : health?.state === 'checking' ? 'checking' : 'disconnected'}/><span><b>Intercom</b><small>{health?.intercom?.detail || 'Checking connection…'}</small></span></div>
               <div className={(health?.healthyGeminiKeys || 0) > 0 ? 'connected' : health?.state === 'checking' ? 'checking' : 'disconnected'}><ConnectionLogo type="gemini" state={(health?.healthyGeminiKeys || 0) > 0 ? 'connected' : health?.state === 'checking' ? 'checking' : 'disconnected'}/><span><b>Gemini pool</b><small>{health?.state === 'checking' ? 'Testing saved keys…' : `${health?.healthyGeminiKeys || 0} of ${health?.gemini?.length ?? data?.connection?.geminiKeyCount ?? 0} keys ready`}</small></span></div>
@@ -417,26 +444,26 @@ export default function Audits() {
           </section>
 
           <section className={`audit-card direct-card ${directMode ? 'engaged' : ''}`}>
-            <div className="card-heading"><div><span>Direct audit</span><h2>Specific conversation IDs</h2><p>Enter one or multiple Intercom conversation IDs separated by commas or new lines.</p></div>{directMode && <b className="override-pill">Override active</b>}</div>
+            <div className="card-heading"><div><span>Direct audit</span><h2>Specific conversation IDs <AuditTip text="Audits only the IDs entered here. Agent, date, and sample controls are ignored while this field contains an ID."/></h2><p>Enter one or multiple Intercom conversation IDs separated by commas or new lines.</p></div>{directMode && <b className="override-pill">Override active</b>}</div>
             <textarea value={conversationIds} onChange={(event) => setConversationIds(event.target.value)} placeholder={'Paste one or more real Intercom conversation IDs here…'} rows={4}/>
             {directMode && <div className="override-note"><i>↳</i><span><b>Direct conversation mode</b>Agent, date and priority-sample filters below will be ignored.</span></div>}
           </section>
 
           <div className={`sample-controls ${directMode ? 'disabled' : ''}`} aria-disabled={directMode}>
             <section className="audit-card agent-card">
-              <div className="card-heading"><div><span>Step 1</span><h2>Select agents</h2><p>{selectedAgents.length} selected from {enabledAgents.length} enabled agents.</p></div><button onClick={() => setSelectedAgents(selectedAgents.length === enabledAgents.length ? [] : enabledAgents.map((agent) => agent.id))}>{selectedAgents.length === enabledAgents.length ? 'Clear all' : 'Select all'}</button></div>
+              <div className="card-heading"><div><span>Step 1</span><h2>Select agents <AuditTip text="Choose whose conversations can enter this batch. No agent is selected automatically."/></h2><p>{selectedAgents.length} selected from {enabledAgents.length} enabled agents.</p></div><button onClick={() => setSelectedAgents(selectedAgents.length === enabledAgents.length ? [] : enabledAgents.map((agent) => agent.id))}>{selectedAgents.length === enabledAgents.length ? 'Clear all' : 'Select all'}</button></div>
               <input className="agent-search" value={agentSearch} onChange={(event) => setAgentSearch(event.target.value)} placeholder="Search agents…"/>
               <div className="agent-picker">{visibleAgents.map((agent) => <label key={agent.id} className={selectedAgents.includes(agent.id) ? 'selected' : ''}><input type="checkbox" checked={selectedAgents.includes(agent.id)} onChange={() => setSelectedAgents((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id])}/><span className="agent-avatar">{agent.name.split(/\s+/).map((part) => part[0]).slice(0, 2).join('')}</span><span><b>{agent.name}</b><small>{agent.email || `Intercom ID ${agent.id}`}</small></span><i>✓</i></label>)}</div>
             </section>
             <section className="audit-card sample-card">
-              <div className="card-heading"><div><span>Step 2</span><h2>Choose the sample</h2><p>Bot-only chats are excluded, then the conversations with the most messages from each selected agent are prioritized.</p></div></div>
+              <div className="card-heading"><div><span>Step 2</span><h2>Choose the sample <AuditTip text="The date range limits eligible conversations; the requested sample size is shared across all selected agents."/></h2><p>Bot-only chats are excluded, then the conversations with the most messages from each selected agent are prioritized.</p></div></div>
               <AuditDateRangeFilter from={from} to={to} onApply={(nextFrom, nextTo) => { setFrom(nextFrom); setTo(nextTo); }}/>
-              <label className="sample-label">Priority conversations</label>
+              <label className="sample-label">Priority conversations <AuditTip text="The auditor favors conversations with the most messages written by the selected agent because they provide more evidence of handling skill."/></label>
               <div className="sample-options">{[10,20,30,40].map((value) => <button key={value} className={!customSample && sampleSize === value ? 'active' : ''} onClick={() => { setSampleSize(value); setCustomSample(''); }}>{value}</button>)}<label className={customSample ? 'active' : ''}><span>Custom</span><input type="number" min="1" max="100" value={customSample} onChange={(event) => setCustomSample(event.target.value)} placeholder="50"/></label></div>
-              <div className="sampling-note"><i>⌁</i><span><b>Insight-first selection</b>The auditor compares a broad candidate pool and selects the conversations with the highest message count from the chosen agent. Recent conversations break ties.</span></div>
+              <div className="sampling-note"><i>⌁</i><span><b>Insight-first selection <AuditTip text="Selection is based on the selected agent's own meaningful replies, not total bot or customer message volume."/></b>The auditor compares a broad candidate pool and selects the conversations with the highest message count from the chosen agent. Recent conversations break ties.</span></div>
             </section>
           </div>
-          <section className="launch-card"><div><span>Ready when you are</span><h2>{directMode ? `${conversationIds.split(/[\s,]+/).filter(Boolean).length} specific conversation${conversationIds.split(/[\s,]+/).filter(Boolean).length === 1 ? '' : 's'}` : `${customSample || sampleSize} priority conversations across ${selectedAgents.length} agent${selectedAgents.length === 1 ? '' : 's'}`}</h2><p>Audits are saved after every conversation and can safely resume after a refresh.</p></div><button className="launch-button" disabled={running || health?.state === 'offline'} onClick={startAudit}><span>{running ? 'Auditing…' : 'Start audit'}</span><i>{running ? '◌' : '→'}</i></button></section>
+          <section className="launch-card"><div><span>Ready when you are</span><h2>{directMode ? `${conversationIds.split(/[\s,]+/).filter(Boolean).length} specific conversation${conversationIds.split(/[\s,]+/).filter(Boolean).length === 1 ? '' : 's'}` : `${customSample || sampleSize} priority conversations across ${selectedAgents.length} agent${selectedAgents.length === 1 ? '' : 's'}`}</h2><p>Audits are saved after every conversation and can safely resume after a refresh.</p></div><div className="launch-action"><AuditTip text="Creates a saved batch and processes one conversation at a time. Progress survives refreshes and can be paused or cancelled."/><button className="launch-button" disabled={running || health?.state === 'offline'} onClick={startAudit}><span>{running ? 'Auditing…' : 'Start audit'}</span><i>{running ? '◌' : '→'}</i></button></div></section>
         </div>}
 
         {view === 'results' && <div className="audit-results-page">
@@ -444,7 +471,7 @@ export default function Audits() {
             <section className={`audit-progress-card ${running ? 'running' : ''}`}>
               <div className="progress-visual"><div className="progress-orbit"><i/><i/><b>{currentJob.status === 'completed' ? '✓' : 'QA'}</b></div></div>
               <div className="progress-copy"><span>Batch #{currentJob.id} · {currentJob.mode === 'direct' ? 'Direct conversation audit' : 'Priority sample'}</span><h2>{currentJob.stage || 'Preparing audit'}</h2><p>{currentJob.status === 'completed' ? `Completed ${formatDate(currentJob.updatedAt)}` : `${elapsed}s in this session · progress is saved after every conversation`}</p><div className="progress-track"><i style={{ width: `${Math.max(currentJob.processed ? 4 : 0, progress)}%` }}/></div><small>{currentJob.processed} of {currentJob.total} conversations · {progress}%</small></div>
-              <div className="progress-actions">{running ? <button onClick={() => { stopRef.current = true; }}>Pause safely</button> : currentJob.status !== 'completed' ? <button onClick={() => runQueue(currentJob.id)}>Resume audit</button> : <button onClick={() => { setView('control'); setCurrentJob(null); setResults([]); }}>New audit</button>}</div>
+              <div className="progress-actions">{running && <><span><AuditTip text="Stops after the current conversation is safely saved. The batch remains resumable on any device."/><button onClick={pauseAudit}>Pause safely</button></span><span><AuditTip text="Stops the remaining queue permanently. Results already completed stay saved."/><button className="danger" onClick={cancelAudit}>Cancel audit</button></span></>}{!running && currentJob.status === 'paused' && <><span><AuditTip text="Continues from the next unsaved conversation in this batch."/><button onClick={resumeAudit}>Resume audit</button></span><span><AuditTip text="Stops the remaining queue permanently. Results already completed stay saved."/><button className="danger" onClick={cancelAudit}>Cancel audit</button></span></>}{!running && ['completed','cancelled'].includes(currentJob.status) && <button onClick={() => { setView('control'); setCurrentJob(null); setResults([]); setSelectedAgents([]); }}>New audit</button>}</div>
             </section>
             <div className="audit-kpis"><Metric label="Completed chats" value={currentJob.completed}/><Metric label="Agent evaluations" value={currentJob.evaluations}/><Metric label="Average quality" value={avg('quality')}/><Metric label="Average efficiency" value={avg('efficiency')}/><Metric label="Average final" value={avg('finalScore')} tone="accent"/><Metric label="Manual review" value={completedResults.filter((item) => item.audit?.manualReview).length}/></div>
             <section className="results-toolbar"><div><h2>Conversation evaluations</h2><p>{results.length} saved result{results.length === 1 ? '' : 's'} in this batch.</p></div><div><button onClick={() => download('csv')}>⇩ Summary CSV</button><button onClick={() => download('csv', true)}>⇩ Detailed CSV</button><button className="primary" onClick={() => download('html')}>⇩ HTML report</button></div></section>
@@ -455,7 +482,7 @@ export default function Audits() {
         {view === 'history' && <div className="audit-history"><section className="audit-card"><div className="card-heading"><div><span>Saved securely</span><h2>Recent audit batches</h2><p>Saved in the app's PostgreSQL activity log. Raw Intercom transcripts and temporary identity mappings are not stored.</p></div><button onClick={() => bootstrap()}>Refresh</button></div><div className="history-list">{(data?.jobs || []).map((job) => <button key={job.id} onClick={() => loadJob(job.id)}><span className={`history-state ${job.status}`}>{job.status}</span><span><b>{job.mode === 'direct' ? 'Direct conversation audit' : 'Priority agent sample'}</b><small>Batch #{job.id} · {formatDate(job.createdAt)}</small></span><span><b>{job.processed}/{job.total}</b><small>{job.evaluations} evaluations</small></span><i>→</i></button>)}{!data?.jobs?.length && <div className="empty-results"><h3>No audit history yet</h3><p>Your completed and resumable batches will appear here.</p></div>}</div></section></div>}
 
         {view === 'settings' && data?.access?.canManage && <div className="audit-settings-grid">
-          <section className="audit-card"><div className="card-heading"><div><span>Intercom directory</span><h2>Agents in the dropdown</h2><p>Sync the live directory, then choose who can be sampled.</p></div><button disabled={syncingAgents} onClick={syncAgents}>{syncingAgents ? 'Syncing…' : '↻ Sync Intercom'}</button></div><div className="admin-agent-list">{(data.agents || []).map((agent) => <label key={agent.id} className={enabledDraft.includes(agent.id) ? 'enabled' : ''}><input type="checkbox" checked={enabledDraft.includes(agent.id)} onChange={() => setEnabledDraft((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id])}/><span><b>{agent.name}</b><small>{agent.email || agent.id}</small></span><em>{agent.hasInboxSeat ? 'Inbox seat' : 'No inbox seat'}</em></label>)}</div><button className="settings-save" disabled={savingAdmin === 'save-agents'} onClick={() => saveAdmin('save-agents', { agentIds: enabledDraft }, 'Audit agent dropdown updated.')}>{savingAdmin === 'save-agents' ? 'Saving…' : `Save ${enabledDraft.length} enabled agents`}</button></section>
+          <section className="audit-card"><div className="card-heading"><div><span>Intercom directory</span><h2>Agents and support level <AuditTip text="Enabled agents appear in audit selection. Level 2 agents are measured on AHT only because their work follows an email-style response cadence."/></h2><p>Sync the live directory, choose who can be sampled, and mark Level 2 email support.</p></div><button disabled={syncingAgents} onClick={syncAgents}>{syncingAgents ? 'Syncing…' : '↻ Sync Intercom'}</button></div><div className="admin-agent-list">{(data.agents || []).map((agent) => { const enabled = enabledDraft.includes(agent.id); const level2 = level2Draft.includes(agent.id); return <div key={agent.id} className={`admin-agent-row ${enabled ? 'enabled' : ''}`}><label><input type="checkbox" checked={enabled} onChange={() => { setEnabledDraft((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id]); if (enabled) setLevel2Draft((current) => current.filter((id) => id !== agent.id)); }}/><span><b>{agent.name}</b><small>{agent.email || agent.id}</small></span><em>{agent.hasInboxSeat ? 'Inbox seat' : 'No inbox seat'}</em></label><span className="level2-control"><button type="button" className={`level2-toggle ${level2 ? 'active' : ''}`} disabled={!enabled} aria-pressed={level2} onClick={() => setLevel2Draft((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id])}>{level2 ? 'Level 2 · AHT only' : 'Standard · FRT + ART + AHT'}</button><AuditTip text="Level 2 removes FRT and ART from scoring. AHT is still calculated from assignment or the immediately preceding agent reply, reply by reply."/></span></div>; })}</div><button className="settings-save" disabled={savingAdmin === 'save-agents'} onClick={() => saveAdmin('save-agents', { agentIds: enabledDraft, level2AgentIds: level2Draft }, 'Audit agents and Level 2 rules updated.')}>{savingAdmin === 'save-agents' ? 'Saving…' : `Save ${enabledDraft.length} enabled agents`}</button></section>
           <section className="audit-card"><div className="card-heading"><div><span>Restricted access</span><h2>Authorized auditors</h2><p>One verified @nextventures.io email per line. Faiyaz and Master access remain protected.</p></div></div><textarea rows={8} value={accessDraft} onChange={(event) => setAccessDraft(event.target.value)} placeholder="name@nextventures.io"/><button className="settings-save" disabled={savingAdmin === 'save-access'} onClick={() => saveAdmin('save-access', { emails: accessDraft.split(/[\s,]+/).filter(Boolean) }, 'Conversation Audit access updated.')}>{savingAdmin === 'save-access' ? 'Saving…' : 'Save audit access'}</button></section>
           <section className="audit-card"><div className="card-heading"><div><span>Failover order</span><h2>Gemini model chain</h2><p>One stable model ID per line. The next model and key are tried automatically.</p></div></div><textarea className="mono" rows={8} value={modelsDraft} onChange={(event) => setModelsDraft(event.target.value)} placeholder="gemini-3.5-flash-lite"/><button className="settings-save" disabled={savingAdmin === 'save-models'} onClick={() => saveAdmin('save-models', { models: modelsDraft.split(/[\s,]+/).filter(Boolean) }, 'Gemini audit model chain updated.')}>{savingAdmin === 'save-models' ? 'Saving…' : 'Save model chain'}</button></section>
           <section className="audit-card developer-api-card"><div className="card-heading"><div><span>Controlled testing access</span><h2>Developer API keys</h2><p>Create a temporary, revocable key for deployed chatbot and auditor testing. Intercom and Gemini secrets remain inside the app.</p></div><span className={`developer-live-state ${developerConnection?.connected ? 'connected' : ''}`}><i/>{developerConnection?.connected ? 'Connected' : 'Scoped access'}</span></div><div className="developer-key-form"><label>Name<input value={developerKeyName} maxLength={80} onChange={(event) => setDeveloperKeyName(event.target.value)} placeholder="Codex testing"/></label><label>Expires<select value={developerKeyDays} onChange={(event) => setDeveloperKeyDays(event.target.value)}><option value="1">24 hours</option><option value="7">7 days</option><option value="30">30 days</option></select></label><button className="settings-save" disabled={savingAdmin === 'create-external-key'} onClick={createDeveloperKey}>{savingAdmin === 'create-external-key' ? 'Creating and testing…' : 'Generate testing key'}</button></div><div className="developer-scopes">{(data.developerScopes || []).map((scope) => <span key={scope}>✓ {scope}</span>)}</div>{revealedDeveloperKey && <div className="developer-key-reveal"><div><span>Copy this key now</span><b>{developerConnection?.connected ? 'Connection verified' : 'Testing connection…'}</b></div><code>{revealedDeveloperKey}</code><button onClick={() => navigator.clipboard.writeText(revealedDeveloperKey)}>Copy key</button><small>{developerConnection?.detail || 'The full key is displayed only once.'}</small></div>}<div className="developer-endpoints"><span>Available endpoints</span><code>POST /api/external/chat-test</code><code>POST /api/external/audit?action=create-job</code><code>GET /api/external/audit?action=job&amp;id=…</code><code>GET /api/external/health</code><code>GET /api/external/diagnostics</code></div><div className="developer-key-list">{(data.developerKeys || []).map((item) => <article key={item.id} className={item.status}><div><b>{item.name}</b><small>{item.prefix}… · expires {formatDate(item.expiresAt)}</small><small>{item.lastUsedAt ? `Last used ${formatDate(item.lastUsedAt)}` : 'Never used'}</small></div><span>{item.status}</span>{item.status === 'active' && <button disabled={savingAdmin === `revoke-${item.id}`} onClick={() => revokeDeveloperKey(item.id)}>Revoke</button>}</article>)}{!(data.developerKeys || []).length && <p className="developer-empty">No developer keys have been generated.</p>}</div></section>
