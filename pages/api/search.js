@@ -758,22 +758,6 @@ export default async function handler(req, res) {
         }
       }
     }
-    if (requestedRuleIntent.hedging || requestedRuleIntent.copyTrading) {
-      const direct = candidates.filter((item) => {
-        const text = `${item.article_title || ''}\n${item.content || ''}`;
-        return (requestedRuleIntent.hedging && explicitHedgingRule(text)) ||
-          (requestedRuleIntent.copyTrading && explicitDifferentOwnerCopyRule(text));
-      }).slice(0, 4);
-      if (direct.length) {
-        const seen = new Set();
-        matches = [...direct, ...matches].filter((item) => {
-          const key = String(item.id);
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        }).slice(0, 12);
-      }
-    }
     const competitionMinimumQuestion = selectedModel?.slug === 'competition' && asksMinimumTradingRequirement(clearQuestion || question);
     // Competition rules are account-specific. Semantic recall was finding a
     // general FundedNext Account article about no minimum days, then treating
@@ -1089,6 +1073,25 @@ export default async function handler(req, res) {
     // Competition or platform text and then has to refuse.
     if (requestedRuleIntent.expertAdvisor) {
       const direct = candidates.filter(directlyStatesExpertAdvisorRule).slice(0, 4);
+      if (direct.length) {
+        const seen = new Set();
+        matches = [...direct, ...matches].filter((item) => {
+          const key = String(item.id);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        }).slice(0, 12);
+      }
+    }
+    // Reserve the exact policy passage only after ranked candidates and the
+    // initial match set exist. Keeping this here avoids accessing either
+    // block-scoped variable during its temporal dead zone.
+    if (requestedRuleIntent.hedging || requestedRuleIntent.copyTrading) {
+      const direct = candidates.filter((item) => {
+        const text = `${item.article_title || ''}\n${item.content || ''}`;
+        return (requestedRuleIntent.hedging && explicitHedgingRule(text)) ||
+          (requestedRuleIntent.copyTrading && explicitDifferentOwnerCopyRule(text));
+      }).slice(0, 4);
       if (direct.length) {
         const seen = new Set();
         matches = [...direct, ...matches].filter((item) => {
