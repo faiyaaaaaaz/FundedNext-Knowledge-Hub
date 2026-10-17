@@ -125,14 +125,27 @@ function flagSpecs(audit) {
   const accuracyFlags = (audit?.accuracyIssues || []).filter((item) => item.wrongInformation).map((item) => ({ phrase: cleanFlagPhrase(item.wrongInformation), category: 'accuracy', label: 'Incorrect information' }));
   return [...deductionFlags, ...accuracyFlags].filter((item) => item.phrase.length >= 5);
 }
+function flagSpan(text, phrase) {
+  const source = String(text || ''); const target = String(phrase || '');
+  const exact = source.toLowerCase().indexOf(target.toLowerCase());
+  if (exact >= 0) return { start: exact, end: exact + target.length };
+  const terms = target.toLowerCase().match(/[a-z0-9]{4,}/g) || [];
+  if (terms.length < 2) return null;
+  let cursor = 0; let best = null;
+  for (const segment of source.split(/(?<=[.!?])\s+|\n+/)) {
+    const start = source.indexOf(segment, cursor); cursor = Math.max(cursor, start + segment.length);
+    const lower = segment.toLowerCase(); const ratio = terms.filter((word) => lower.includes(word)).length / terms.length;
+    if (ratio >= .7 && (!best || ratio > best.ratio)) best = { start, end: start + segment.length, ratio };
+  }
+  return best;
+}
 function matchedFlags(text, flags) {
-  const source = String(text || '').toLowerCase();
-  return flags.filter((flag) => { const phrase = flag.phrase.toLowerCase(); if (source.includes(phrase)) return true; const words = phrase.match(/[a-z0-9]{4,}/g) || []; return words.length >= 2 && words.filter((word) => source.includes(word)).length / words.length >= .7; });
+  return flags.filter((flag) => !!flagSpan(text, flag.phrase));
 }
 function HighlightedMessage({ text, flags }) {
   const matches = matchedFlags(text, flags); if (!matches.length) return <>{text}</>;
   let parts = [{ text: String(text || ''), marked: false, category: '' }];
-  for (const flag of matches) parts = parts.flatMap((part) => { if (part.marked) return [part]; const index = part.text.toLowerCase().indexOf(flag.phrase.toLowerCase()); if (index < 0) return [{ ...part, marked: true, category: flag.category }]; return [{ text: part.text.slice(0,index), marked:false },{ text: part.text.slice(index,index+flag.phrase.length), marked:true, category:flag.category },{ text:part.text.slice(index+flag.phrase.length), marked:false }].filter((item) => item.text); });
+  for (const flag of matches) parts = parts.flatMap((part) => { if (part.marked) return [part]; const span = flagSpan(part.text, flag.phrase); if (!span) return [part]; return [{ text: part.text.slice(0,span.start), marked:false },{ text: part.text.slice(span.start,span.end), marked:true, category:flag.category },{ text:part.text.slice(span.end), marked:false }].filter((item) => item.text); });
   return <>{parts.map((part, index) => part.marked ? <mark key={index} className={`flag-${part.category}`}>{part.text}</mark> : <span key={index}>{part.text}</span>)}</>;
 }
 function formatSeconds(value) { const seconds = Math.max(0, Number(value) || 0); return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`; }
