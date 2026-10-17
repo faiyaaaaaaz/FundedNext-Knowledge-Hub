@@ -1,10 +1,12 @@
 import { authenticateRequest, supabaseAdmin, getArticleScopeOverrides, getPublishedScopeCatalog } from '../../lib/server';
 import { listNotices } from '../../lib/notices';
+import { isFnmarketsEvidence } from '../../lib/policyPrecision.mjs';
 
 export const config = { maxDuration: 60, api: { responseLimit: false } };
 
 function productForArticle(article, override) {
   if (override?.product) return override.product;
+  if (isFnmarketsEvidence({ article_title: article.title, article_url: article.url })) return 'fnmarkets';
   const url = String(article.url || '');
   if (/helpfutures\.fundednext\.com/i.test(url)) return 'futures';
   if (/help\.fundednext\.com/i.test(url)) return 'cfd';
@@ -41,7 +43,7 @@ export default async function handler(req, res) {
     // Preserve the governed product/account-scope tree even where a scope has
     // no FAQ evidence yet. Hiding it made the explorer look incomplete and
     // obscured gaps that the team needs to see.
-    for (const [product, label] of [['cfd', 'General CFD policies'], ['futures', 'General Futures policies'], ['policy', 'Policies & rules']]) {
+    for (const [product, label] of [['cfd', 'General CFD policies'], ['futures', 'General Futures policies'], ['fnmarkets', 'General FNmarkets policies'], ['policy', 'Policies & rules']]) {
       addGroup(faqGroups, `${product}:general`, label, product, 'general');
     }
     for (const model of catalog.models || []) {
@@ -58,11 +60,11 @@ export default async function handler(req, res) {
       addGroup(faqGroups, key, label, product, model?.slug || 'general', titleRecord(article));
     }
     const noticeGroups = new Map();
-    for (const [product, label] of [['cfd', 'General CFD notices'], ['futures', 'General Futures notices'], ['policy', 'Policies & rules']]) {
+    for (const [product, label] of [['cfd', 'General CFD notices'], ['futures', 'General Futures notices'], ['fnmarkets', 'General FNmarkets notices'], ['policy', 'Policies & rules']]) {
       addGroup(noticeGroups, `${product}:general`, label, product, 'general');
     }
     for (const notice of notices) {
-      const product = ['cfd', 'futures'].includes(notice.product) ? notice.product : 'policy';
+      const product = ['cfd', 'futures', 'fnmarkets'].includes(notice.product) ? notice.product : 'policy';
       const model = notice.model && notice.model !== 'all' ? notice.model : 'general';
       const label = model !== 'general' ? ((catalog.models || []).find((item) => item.slug === model)?.name || model) : (product === 'policy' ? 'Non-product policies' : 'General product policies');
       addGroup(noticeGroups, `${product}:${model}`, label, product, model, titleRecord(notice));
