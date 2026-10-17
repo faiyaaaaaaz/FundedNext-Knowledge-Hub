@@ -3,13 +3,13 @@ import { authenticateRequest, logActivity, supabaseAdmin } from '../../lib/serve
 // Updating this release object as part of a deployment automatically shows the
 // real release notes once to every user, including Admins.
 const CURRENT_RELEASE = {
-  version: '2026.10.audit-coaching-v3',
+  version: '2026.10.audit-efficiency-v5',
   title: 'What’s new',
   changes: [
-    'Audit feedback now uses clear, constructive coaching with a specific action for the next similar case.',
-    'AHT is shown in minutes and seconds, while FRT and ART remain in seconds.',
-    'Deducted wording is highlighted directly in the live transcript and in downloaded reports.',
-    'HTML audit reports now include the complete live Intercom transcript with its original line breaks.'
+    'Self-assignment is shown as a prohibited workflow violation and automatically sets Efficiency to 0/10.',
+    'Every missed ART response cycle appears at its exact place in the conversation timeline.',
+    'Audit deductions now explain the specific reason for lost marks separately from the category overview.',
+    'Downloaded HTML reports keep the complete transcript collapsed until the reader expands it.'
   ]
 };
 
