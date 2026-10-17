@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { detectNamedProduct, deterministicPolicyAnswer, explicitHedgingRule, isFnmarketsEvidence, repairHedgingLanguage } from '../lib/policyPrecision.mjs';
 
 const evidence = `At FundedNext, hedging is allowed only within the same account. Hedging across multiple accounts is prohibited.
@@ -18,4 +19,10 @@ assert.match(multiPolicyAnswer, /prohibited copy trading/i);
 const repaired = repairHedgingLanguage('Prohibited practices include:\n\nGroup Hedging or Hedging\n\nArbitrage', evidence);
 assert.match(repaired, /hedging across multiple accounts/i);
 assert.match(repaired, /Hedging within the same account is allowed/i);
-console.log('policy precision regression: 12 assertions passed');
+const searchSource = readFileSync(new URL('../pages/api/search.js', import.meta.url), 'utf8');
+const candidateDeclaration = searchSource.indexOf('let candidates =');
+const matchDeclaration = searchSource.indexOf('let matches;');
+const policyReservation = searchSource.indexOf('// Reserve the exact policy passage');
+assert.ok(candidateDeclaration >= 0 && matchDeclaration >= 0 && policyReservation > candidateDeclaration && policyReservation > matchDeclaration,
+  'Policy evidence reservation must run after candidates and matches are initialized.');
+console.log('policy precision regression: 13 assertions passed');
