@@ -3,13 +3,13 @@ import { authenticateRequest, logActivity, supabaseAdmin } from '../../lib/serve
 // Updating this release object as part of a deployment automatically shows the
 // real release notes once to every user, including Admins.
 const CURRENT_RELEASE = {
-  version: '2026.10.scope-and-policy-v2',
+  version: '2026.10.audit-coaching-v3',
   title: 'What’s new',
   changes: [
-    'FNmarkets is now a separate brokerage scope, isolated from CFD and Futures evidence.',
-    'Hedging answers now state the exact rule: same-account hedging is allowed; cross-account and group hedging are prohibited.',
-    'Questions about coordinated trades between different owners are identified as copy-trading policy questions.',
-    'Product and policy regression checks now protect these rules before deployment.'
+    'Audit feedback now uses clear, constructive coaching with a specific action for the next similar case.',
+    'AHT is shown in minutes and seconds, while FRT and ART remain in seconds.',
+    'Deducted wording is highlighted directly in the live transcript and in downloaded reports.',
+    'HTML audit reports now include the complete live Intercom transcript with its original line breaks.'
   ]
 };
 
