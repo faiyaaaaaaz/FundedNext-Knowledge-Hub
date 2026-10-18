@@ -21,8 +21,9 @@ function checked(result, label) {
   return result.data;
 }
 
-function publicJob(row) {
+function publicJob(row, enrichment = {}) {
   const meta = row?.metadata || {};
+  const agentNames = [...new Set([...(meta.agentNames || []), ...(enrichment.agentNames || [])].map((item) => String(item || '').trim()).filter(Boolean))];
   return {
     id: row?.id, createdAt: row?.created_at, createdBy: row?.user_email || row?.user_name || '',
     status: meta.status || (row?.success ? 'completed' : 'failed'), mode: meta.mode || 'sample',
@@ -31,8 +32,18 @@ function publicJob(row) {
     evaluations: Number(meta.evaluations || 0), currentConversationId: meta.currentConversationId || null,
     pauseRequested: !!meta.pauseRequested, cancelRequested: !!meta.cancelRequested,
     filters: meta.filters || {}, seed: meta.seed || '', rubricVersion: meta.rubricVersion || AUDIT_RUBRIC_VERSION,
-    updatedAt: meta.updatedAt || row?.created_at, error: meta.error || '', directIds: meta.directIds || []
+    updatedAt: meta.updatedAt || row?.created_at, error: meta.error || '', directIds: meta.directIds || [], agentNames
   };
+}
+
+function fileSafe(value) {
+  return String(value || '').normalize('NFKD').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 70) || 'agent';
+}
+
+function auditFileBase(job, results = []) {
+  const names = [...new Set([...(job.agentNames || []), ...results.map((item) => item.agentName)].map((item) => String(item || '').trim()).filter(Boolean))];
+  const agent = names.length > 1 ? `${fileSafe(names[0])}-plus-${names.length - 1}` : fileSafe(names[0] || 'agent');
+  return `${agent}-audit-${job.id}`;
 }
 
 function publicResult(row) {
@@ -106,7 +117,7 @@ async function createJob(req, access, sb, body) {
     if (invalidIds.length) throw new Error(`Check these conversation IDs: ${invalidIds.slice(0, 5).join(', ')}${invalidIds.length > 5 ? '…' : ''}`);
   }
   const seed = String(body.seed || cryptoRandom());
-  let queue = []; let mode = 'sample';
+  let queue = []; let mode = 'sample'; let agentNames = [];
   if (directInput) {
     mode = 'direct'; queue = directIds.map((id) => ({ id, targetAgentId: null, attempts: 0 }));
   } else {
@@ -117,6 +128,7 @@ async function createJob(req, access, sb, body) {
     const enabledIds = await getAuditAgentConfig(sb, liveAdmins);
     const requested = [...new Set((body.agentIds || []).map(String))].filter((id) => enabledIds.includes(id));
     if (!requested.length) throw new Error('Select at least one enabled Intercom agent.');
+    agentNames = requested.map((id) => liveAdmins.find((agent) => String(agent.id) === String(id))?.name).filter(Boolean);
     const requestedSize = Math.max(1, Math.min(Number(body.sampleSize) || 10, 100));
     const candidates = await findConversationCandidates(keys.intercomToken, { agentIds: requested, from: body.from, to: body.to, maxPerAgent: Math.max(150, requestedSize * 4) });
     if (!candidates.length) throw new Error('Intercom returned no conversations for the selected agents and date range.');
@@ -148,7 +160,7 @@ async function createJob(req, access, sb, body) {
   const metadata = {
     status: 'queued', mode, stage: 'Ready to fetch conversations', total: queue.length, processed: 0, completed: 0,
     skipped: 0, failed: 0, evaluations: 0, queue, filters, directIds, seed, pauseRequested: false, cancelRequested: false,
-    rubricVersion: AUDIT_RUBRIC_VERSION, thresholds: AUDIT_THRESHOLDS, updatedAt: new Date().toISOString()
+    rubricVersion: AUDIT_RUBRIC_VERSION, thresholds: AUDIT_THRESHOLDS, agentNames, updatedAt: new Date().toISOString()
   };
   const id = await logActivity({ actorRole: access.role, sessionId: access.sessionId, userName: access.name, userEmail: access.email, authProvider: access.authProvider, eventType: 'conversation_audit_job', success: true, metadata }, { sb });
   if (!id) throw new Error('Could not create the audit job.');
@@ -209,6 +221,7 @@ async function processNext(access, sb, jobId) {
     const controlledStatus = latestControl.cancelRequested ? 'cancelled' : latestControl.pauseRequested ? 'paused' : nextProcessed >= queue.length ? 'completed' : 'running';
     row = await updateJob(sb, row, {
       processed: nextProcessed, completed: Number(meta.completed || 0) + 1, evaluations: Number(meta.evaluations || 0) + produced.length,
+      agentNames: [...new Set([...(latestControl.agentNames || meta.agentNames || []), ...produced.map((result) => result.agentName).filter(Boolean)])],
       stage: controlledStatus === 'cancelled' ? 'Audit cancelled — completed results remain saved' : controlledStatus === 'paused' ? 'Paused safely — progress is saved' : nextProcessed >= queue.length ? 'Audit completed' : 'Saved securely — moving to the next conversation',
       status: controlledStatus, currentConversationId: null
     });
@@ -262,16 +275,17 @@ export default async function handler(req, res) {
 
     if (req.method === 'GET' && action === 'export') {
       const job = publicJob(await loadJob(sb, req.query.jobId)); const results = await loadResults(sb, req.query.jobId);
+      const fileBase = auditFileBase(job, results);
       if (req.query.format === 'html') {
         const keys = await getKeys();
         // UI auditors receive the live transcript in the offline report. A
         // developer API key cannot use the report route to bypass its separate
         // transcript permission or redaction boundary.
         const reportResults = access.external ? results : await resultsWithLiveTranscripts(results, keys.intercomToken);
-        res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.setHeader('Content-Disposition', `attachment; filename="fundednext-audit-${job.id}.html"`);
+        res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.setHeader('Content-Disposition', `attachment; filename="${fileBase}.html"`);
         return res.status(200).send(auditHtml(job, reportResults));
       }
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8'); res.setHeader('Content-Disposition', `attachment; filename="fundednext-audit-${job.id}${req.query.detailed === '1' ? '-detailed' : ''}.csv"`);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8'); res.setHeader('Content-Disposition', `attachment; filename="${fileBase}${req.query.detailed === '1' ? '-detailed' : '-summary'}.csv"`);
       return res.status(200).send(auditCsv(results, req.query.detailed === '1'));
     }
 
@@ -283,12 +297,29 @@ export default async function handler(req, res) {
       if (keys.intercomToken) try { admins = await fetchIntercomAdmins(keys.intercomToken); } catch (error) { intercomError = error.message; }
       const enabledAgentIds = await getAuditAgentConfig(sb, admins);
       const level2AgentIds = await getAuditLevel2Config(sb);
-      const jobs = checked(await sb.from('activity_logs').select('*').eq('event_type', 'conversation_audit_job').order('created_at', { ascending: false }).limit(20), 'Could not load audit history');
+      const jobs = checked(await sb.from('activity_logs').select('*').eq('event_type', 'conversation_audit_job').order('created_at', { ascending: false }).limit(100), 'Could not load audit history');
+      const jobIds = (jobs || []).map((row) => String(row.id));
+      let recentResults = [];
+      if (jobIds.length) {
+        const resultQuery = await sb.from('activity_logs').select('jobId:metadata->>jobId,agentName:metadata->>agentName').eq('event_type', 'conversation_audit_result').in('metadata->>jobId', jobIds).limit(5000);
+        if (!resultQuery.error) recentResults = resultQuery.data || [];
+      }
+      const namesByJob = new Map();
+      for (const row of recentResults) {
+        const jobId = String(row.jobId || ''); if (!jobId) continue;
+        if (!namesByJob.has(jobId)) namesByJob.set(jobId, new Set());
+        if (row.agentName) namesByJob.get(jobId).add(row.agentName);
+      }
+      const adminNameById = new Map(admins.map((agent) => [String(agent.id), agent.name]));
+      const publicJobs = (jobs || []).map((row) => {
+        const id = String(row.id); const filterNames = (row.metadata?.filters?.agentIds || []).map((agentId) => adminNameById.get(String(agentId))).filter(Boolean);
+        return publicJob(row, { agentNames: [...filterNames, ...(namesByJob.get(id) || [])] });
+      });
       return res.json({
         access: { allowed: access.external || await canUseAudits(access, sb), canManage: !access.external && canManageAudits(access), email: access.email || '', config: !access.external && canManageAudits(access) ? await getAuditAccessConfig(sb) : undefined },
         agents: admins, enabledAgentIds, level2AgentIds, intercomError, models: await getAuditModels(sb),
         connection: { intercomConfigured: !!keys.intercomToken, geminiKeyCount: (keys.geminiKeyPool || []).length, geminiKeyNames: (keys.geminiKeyPool || []).map((item) => item.name) },
-        thresholds: AUDIT_THRESHOLDS, rubricVersion: AUDIT_RUBRIC_VERSION, jobs: (jobs || []).map(publicJob),
+        thresholds: AUDIT_THRESHOLDS, rubricVersion: AUDIT_RUBRIC_VERSION, jobs: publicJobs,
         developerKeys: canManageAudits(access) ? await listExternalApiKeys(sb) : undefined,
         developerScopes: canManageAudits(access) ? EXTERNAL_SCOPES : undefined
       });
@@ -329,6 +360,23 @@ export default async function handler(req, res) {
       const row = await loadJob(sb, body.jobId);
       if (row.metadata?.status === 'completed') return res.json({ job: publicJob(row) });
       return res.json({ job: publicJob(await updateJob(sb, row, { cancelRequested: true, pauseRequested: false, status: 'cancelled', stage: 'Audit cancelled — completed results remain saved', currentConversationId: null })) });
+    }
+    if (action === 'delete-jobs') {
+      if (access.external || !canManageAudits(access)) return res.status(403).json({ error: 'Master audit access is required to delete audit history.' });
+      const jobIds = [...new Set((body.jobIds || []).map((id) => String(id || '').trim()).filter(Boolean))].slice(0, 100);
+      if (!jobIds.length) throw new Error('Select at least one audit batch to delete.');
+      const jobRows = checked(await sb.from('activity_logs').select('id,metadata').eq('event_type', 'conversation_audit_job').in('id', jobIds), 'Could not verify audit batches');
+      const active = (jobRows || []).filter((row) => ['queued','running','paused'].includes(String(row.metadata?.status || '')));
+      if (active.length) throw new Error('Running, queued, or paused audits cannot be deleted. Cancel them first.');
+      const resultRows = checked(await sb.from('activity_logs').select('id,metadata').eq('event_type', 'conversation_audit_result').in('metadata->>jobId', jobIds).limit(10000), 'Could not find saved audit results');
+      const resultIds = (resultRows || []).map((row) => row.id);
+      for (let offset = 0; offset < resultIds.length; offset += 500) {
+        const removal = await sb.from('activity_logs').delete().in('id', resultIds.slice(offset, offset + 500));
+        if (removal.error) throw new Error(`Could not delete saved audit results: ${removal.error.message}`);
+      }
+      const jobRemoval = await sb.from('activity_logs').delete().eq('event_type', 'conversation_audit_job').in('id', jobIds);
+      if (jobRemoval.error) throw new Error(`Could not delete audit batches: ${jobRemoval.error.message}`);
+      return res.json({ deletedJobs: (jobRows || []).length, deletedResults: resultIds.length, jobIds });
     }
     if (action === 'sync-agents') {
       const keys = await getKeys(); if (!keys.intercomToken) throw new Error('Intercom is not connected.');
