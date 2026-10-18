@@ -7,11 +7,15 @@ function applyFilters(rows, query) {
   const includeTypes = list(query.types), excludeTypes = list(query.excludeTypes), roles = list(query.roles);
   const status = String(query.status || '').toLowerCase(), search = String(query.search || '').trim().toLowerCase();
   const includeApi = ['1', 'true', 'yes'].includes(String(query.includeApi || '').toLowerCase());
+  const includeApiAudits = ['1', 'true', 'yes'].includes(String(query.includeApiAudits || '').toLowerCase());
   return rows.filter((item) => {
     const type = String(item.event_type || '').toLowerCase();
     const meta = item.metadata && typeof item.metadata === 'object' ? item.metadata : {};
-    const isApiActivity = String(item.auth_provider || '').toLowerCase() === 'external_api' || type === 'external_api_request' || !!meta.externalKeyId || !!meta.keyId;
+    const external = String(item.auth_provider || '').toLowerCase() === 'external_api';
+    const isApiAudit = external && ['conversation_audit_job','conversation_audit_result'].includes(type);
+    const isApiActivity = !isApiAudit && (external || type === 'external_api_request' || !!meta.externalKeyId || !!meta.keyId);
     if (!includeApi && isApiActivity) return false;
+    if (!includeApiAudits && isApiAudit) return false;
     if (includeTypes.length && !includeTypes.includes(type)) return false;
     if (excludeTypes.includes(type)) return false;
     if (roles.length && !roles.includes(String(item.actor_role || '').toLowerCase())) return false;
@@ -65,13 +69,23 @@ export default async function handler(req, res) {
       return res.status(200).json({ filters });
     }
     const email = String(req.query.email || '').trim(), from = String(req.query.from || '').trim(), to = String(req.query.to || '').trim();
-    let query = sb.from('activity_logs').select('*').order('created_at', { ascending: false }).limit(1000);
-    if (email) query = query.ilike('user_email', `%${email}%`);
-    if (from) query = query.gte('created_at', `${from}T00:00:00+06:00`);
-    if (to) query = query.lte('created_at', `${to}T23:59:59.999+06:00`);
-    const { data, error } = await query;
-    if (error) throw error;
-    const logs = applyFilters(data || [], req.query);
+    const includeApi = ['1', 'true', 'yes'].includes(String(req.query.includeApi || '').toLowerCase());
+    const includeApiAudits = ['1', 'true', 'yes'].includes(String(req.query.includeApiAudits || '').toLowerCase());
+    const scopedQuery = () => {
+      let query = sb.from('activity_logs').select('*').order('created_at', { ascending: false }).limit(1000);
+      if (email) query = query.ilike('user_email', `%${email}%`);
+      if (from) query = query.gte('created_at', `${from}T00:00:00+06:00`);
+      if (to) query = query.lte('created_at', `${to}T23:59:59.999+06:00`);
+      return query;
+    };
+    const requests = [scopedQuery().or('auth_provider.is.null,auth_provider.neq.external_api')];
+    if (includeApi) requests.push(scopedQuery().eq('auth_provider', 'external_api').not('event_type', 'in', '(conversation_audit_job,conversation_audit_result)'));
+    if (includeApiAudits) requests.push(scopedQuery().eq('auth_provider', 'external_api').in('event_type', ['conversation_audit_job','conversation_audit_result']));
+    const responses = await Promise.all(requests);
+    const failed = responses.find((response) => response.error); if (failed) throw failed.error;
+    const unique = new Map(responses.flatMap((response) => response.data || []).map((row) => [row.id, row]));
+    const rows = [...unique.values()].sort((a, b) => Date.parse(b.created_at || 0) - Date.parse(a.created_at || 0)).slice(0, 1000);
+    const logs = applyFilters(rows, req.query);
     const queries = logs.filter((item) => item.event_type === 'query'), sessions = new Set(logs.map((item) => item.session_id).filter(Boolean)), users = new Set(logs.map((item) => item.user_email).filter(Boolean));
     return res.status(200).json({ logs, summary: { events: logs.length, queries: queries.length, users: users.size, sessions: sessions.size, questionWords: queries.reduce((sum, item) => sum + Number(item.question_word_count || 0), 0), inputTokens: queries.reduce((sum, item) => sum + Number(item.input_tokens || 0), 0), outputTokens: queries.reduce((sum, item) => sum + Number(item.output_tokens || 0), 0), estimatedCost: queries.reduce((sum, item) => sum + Number(item.estimated_cost || 0), 0), failures: logs.filter((item) => item.success === false).length } });
   } catch (error) { return res.status(500).json({ error: error.message }); }
