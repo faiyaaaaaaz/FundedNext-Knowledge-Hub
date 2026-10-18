@@ -11,6 +11,17 @@ function formatDate(value) {
   return new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Dhaka', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true }).format(new Date(value)) + ' GMT+6';
 }
 
+function auditAgentLabel(job, results = []) {
+  const names = [...new Set([...(job?.agentNames || []), ...results.map((item) => item.agentName)].map((item) => String(item || '').trim()).filter(Boolean))];
+  if (!names.length) return job?.mode === 'direct' ? 'Direct audit' : 'Agent audit';
+  return names.length === 1 ? names[0] : `${names[0]} +${names.length - 1}`;
+}
+
+function auditDownloadBase(job, results = []) {
+  const agent = auditAgentLabel(job, results).normalize('NFKD').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 70) || 'agent';
+  return `${agent}-audit-${job?.id}`;
+}
+
 function today(offset = 0) {
   const date = new Date(Date.now() + offset * 86400000);
   const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date).filter((item) => item.type !== 'literal').map((item) => [item.type, item.value]));
@@ -234,6 +245,8 @@ export default function Audits() {
   const [revealedDeveloperKey, setRevealedDeveloperKey] = useState('');
   const [developerConnection, setDeveloperConnection] = useState(null);
   const [comparison, setComparison] = useState(null);
+  const [selectedHistoryJobs, setSelectedHistoryJobs] = useState([]);
+  const [deletingHistory, setDeletingHistory] = useState(false);
   const stopRef = useRef(false);
   const processingRef = useRef(false);
   const directMode = conversationIds.trim().length > 0;
@@ -374,6 +387,20 @@ export default function Audits() {
     catch (err) { setError(err.message); }
   }
 
+  async function deleteSelectedHistory() {
+    const jobs = (data?.jobs || []).filter((job) => selectedHistoryJobs.includes(String(job.id)));
+    if (!jobs.length || deletingHistory) return;
+    const evaluations = jobs.reduce((sum, job) => sum + Number(job.evaluations || 0), 0);
+    if (!window.confirm(`Permanently delete ${jobs.length} audit batch${jobs.length === 1 ? '' : 'es'} and ${evaluations} saved evaluation${evaluations === 1 ? '' : 's'}? The saved scores, feedback, evidence references, and timing details will be removed. This cannot be undone.`)) return;
+    setDeletingHistory(true); setError('');
+    try {
+      const result = await request('delete-jobs', { jobIds: jobs.map((job) => job.id) });
+      setData((current) => ({ ...current, jobs: (current.jobs || []).filter((job) => !result.jobIds.map(String).includes(String(job.id))) }));
+      setSelectedHistoryJobs([]); setNotice(`Deleted ${result.deletedJobs} audit batch${result.deletedJobs === 1 ? '' : 'es'} and ${result.deletedResults} saved result${result.deletedResults === 1 ? '' : 's'}.`);
+    } catch (err) { setError(err.message); }
+    finally { setDeletingHistory(false); }
+  }
+
   async function syncAgents() {
     setSyncingAgents(true); setError('');
     try { const result = await request('sync-agents'); setData((current) => ({ ...current, agents: result.agents, enabledAgentIds: result.enabledAgentIds, level2AgentIds: result.level2AgentIds })); setEnabledDraft(result.enabledAgentIds); setLevel2Draft(result.level2AgentIds || []); setNotice(`Intercom connected · ${result.agents.length} agents found.`); }
@@ -415,7 +442,8 @@ export default function Audits() {
       const response = await fetch(`/api/audits?action=export&jobId=${currentJob.id}&format=${format}${detailed ? '&detailed=1' : ''}`, { headers: headers() });
       if (!response.ok) { const problem = await response.json(); throw new Error(problem.error || 'Download failed.'); }
       const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement('a');
-      link.href = url; link.download = `fundednext-audit-${currentJob.id}${detailed ? '-detailed' : ''}.${format}`; document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+      const base = auditDownloadBase(currentJob, results);
+      link.href = url; link.download = `${base}${format === 'csv' ? (detailed ? '-detailed' : '-summary') : ''}.${format}`; document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
       setNotice(`${format.toUpperCase()} report downloaded.`);
     } catch (err) { setError(err.message); }
   }
@@ -503,7 +531,7 @@ export default function Audits() {
           </> : <div className="empty-results large"><span>▤</span><h2>No audit selected</h2><p>Start a new audit or open one from Audit history.</p><button onClick={() => setView('control')}>Open audit control</button></div>}
         </div>}
 
-        {view === 'history' && <div className="audit-history"><section className="audit-card"><div className="card-heading"><div><span>Saved securely</span><h2>Recent audit batches</h2><p>Saved in the app's PostgreSQL activity log. Raw Intercom transcripts and temporary identity mappings are not stored.</p></div><button onClick={() => bootstrap()}>Refresh</button></div><div className="history-list">{(data?.jobs || []).map((job) => <button key={job.id} onClick={() => loadJob(job.id)}><span className={`history-state ${job.status}`}>{job.status}</span><span><b>{job.mode === 'direct' ? 'Direct conversation audit' : 'Priority agent sample'}</b><small>Batch #{job.id} · {formatDate(job.createdAt)}</small></span><span><b>{job.processed}/{job.total}</b><small>{job.evaluations} evaluations</small></span><i>→</i></button>)}{!data?.jobs?.length && <div className="empty-results"><h3>No audit history yet</h3><p>Your completed and resumable batches will appear here.</p></div>}</div></section></div>}
+        {view === 'history' && <div className="audit-history"><section className="audit-card"><div className="card-heading"><div><span>Saved securely</span><h2>Recent audit batches</h2><p>Each batch stores structured scores, feedback, evidence references, and timing details. Raw Intercom transcripts and temporary identity mappings are not stored.</p></div><div className="history-heading-actions"><button onClick={() => bootstrap()}>Refresh</button>{data?.access?.canManage && <button className="history-delete" disabled={!selectedHistoryJobs.length || deletingHistory} onClick={deleteSelectedHistory}>{deletingHistory ? 'Deleting…' : `Delete selected${selectedHistoryJobs.length ? ` (${selectedHistoryJobs.length})` : ''}`}</button>}</div></div>{data?.access?.canManage && !!(data?.jobs || []).length && <div className="history-selection-bar"><label><input type="checkbox" checked={(data.jobs || []).filter((job) => !['queued','running','paused'].includes(job.status)).length > 0 && (data.jobs || []).filter((job) => !['queued','running','paused'].includes(job.status)).every((job) => selectedHistoryJobs.includes(String(job.id)))} onChange={(event) => setSelectedHistoryJobs(event.target.checked ? (data.jobs || []).filter((job) => !['queued','running','paused'].includes(job.status)).map((job) => String(job.id)) : [])}/> Select all finished batches</label><small>{selectedHistoryJobs.length ? `${selectedHistoryJobs.length} batch${selectedHistoryJobs.length === 1 ? '' : 'es'} selected · ${(data.jobs || []).filter((job) => selectedHistoryJobs.includes(String(job.id))).reduce((sum, job) => sum + Number(job.evaluations || 0), 0)} saved evaluations` : 'Select completed or cancelled batches for permanent deletion'}</small></div>}<div className="history-list">{(data?.jobs || []).map((job) => { const active = ['queued','running','paused'].includes(job.status); const selected = selectedHistoryJobs.includes(String(job.id)); return <article key={job.id} className={`history-row ${selected ? 'selected' : ''}`}><label className="history-select" title={active ? 'Cancel or complete this audit before deleting it' : `Select audit ${job.id}`}><input type="checkbox" disabled={active || !data?.access?.canManage} checked={selected} onChange={(event) => setSelectedHistoryJobs((current) => event.target.checked ? [...new Set([...current, String(job.id)])] : current.filter((id) => id !== String(job.id)))}/></label><button className="history-open" onClick={() => loadJob(job.id)}><span className={`history-state ${job.status}`}>{job.status}</span><span><b>{auditAgentLabel(job)} · Audit #{job.id}</b><small>{formatDate(job.createdAt)} · Structured result data only</small></span><span><b>{job.processed}/{job.total}</b><small>{job.evaluations} evaluations</small></span><i>→</i></button></article>; })}{!data?.jobs?.length && <div className="empty-results"><h3>No audit history yet</h3><p>Your completed and resumable batches will appear here.</p></div>}</div></section></div>}
 
         {view === 'settings' && data?.access?.canManage && <div className="audit-settings-grid">
           <section className="audit-card"><div className="card-heading"><div><span>Intercom directory</span><h2>Agents and support level <AuditTip text="Enabled agents appear in audit selection. Level 2 agents are measured on AHT only because their work follows an email-style response cadence."/></h2><p>Sync the live directory, choose who can be sampled, and mark Level 2 email support.</p></div><button disabled={syncingAgents} onClick={syncAgents}>{syncingAgents ? 'Syncing…' : '↻ Sync Intercom'}</button></div><div className="admin-agent-search"><span aria-hidden="true">⌕</span><input value={adminAgentSearch} onChange={(event) => setAdminAgentSearch(event.target.value)} placeholder="Search by agent name, email, or Intercom ID…" aria-label="Search Intercom agents"/>{adminAgentSearch && <button type="button" onClick={() => setAdminAgentSearch('')} aria-label="Clear agent search">×</button>}<small>{adminVisibleAgents.length} of {(data.agents || []).length}</small></div><div className="admin-agent-list">{adminVisibleAgents.map((agent) => { const enabled = enabledDraft.includes(agent.id); const level2 = level2Draft.includes(agent.id); return <div key={agent.id} className={`admin-agent-row ${enabled ? 'enabled' : ''}`}><label><input type="checkbox" checked={enabled} onChange={() => { setEnabledDraft((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id]); if (enabled) setLevel2Draft((current) => current.filter((id) => id !== agent.id)); }}/><span><b>{agent.name}</b><small>{agent.email || agent.id}</small></span><em>{agent.hasInboxSeat ? 'Inbox seat' : 'No inbox seat'}</em></label><span className="level2-control"><button type="button" className={`level2-toggle ${level2 ? 'active' : ''}`} disabled={!enabled} aria-pressed={level2} onClick={() => setLevel2Draft((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id])}>{level2 ? 'Level 2 · AHT only' : 'Standard · FRT + ART + AHT'}</button><AuditTip text="Level 2 removes FRT and ART from scoring. AHT is still calculated from assignment or the immediately preceding agent reply, reply by reply."/></span></div>; })}{!adminVisibleAgents.length && <div className="admin-agent-empty"><b>No matching agents</b><span>Try a name, email address, or Intercom ID.</span></div>}</div><button className="settings-save" disabled={savingAdmin === 'save-agents'} onClick={() => saveAdmin('save-agents', { agentIds: enabledDraft, level2AgentIds: level2Draft }, 'Audit agents and Level 2 rules updated.')}>{savingAdmin === 'save-agents' ? 'Saving…' : `Save ${enabledDraft.length} enabled agents`}</button></section>
