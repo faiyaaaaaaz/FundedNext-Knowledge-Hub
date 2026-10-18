@@ -3,12 +3,12 @@ import { authenticateRequest, logActivity, supabaseAdmin } from '../../lib/serve
 // Updating this release object as part of a deployment automatically shows the
 // real release notes once to every user, including Admins.
 const CURRENT_RELEASE = {
-  version: '2026.10.audit-history-v6',
+  version: '2026.10.audit-history-v6.1',
   title: 'What’s new',
   changes: [
     'Audit history now identifies each batch by agent name and audit ID, with confirmed bulk deletion for finished batches.',
     'HTML and CSV exports now use the agent name and audit ID in their filenames.',
-    'API-key audit records are hidden from Activity by default behind their own optional checkbox.',
+    'All audit job and result records, including legacy Master Admin records, are hidden from Activity by default behind their own optional checkbox.',
     'Self-assignment remains a prohibited workflow violation that automatically sets Efficiency to 0/10.'
   ]
 };
