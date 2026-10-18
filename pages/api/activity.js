@@ -12,10 +12,10 @@ function applyFilters(rows, query) {
     const type = String(item.event_type || '').toLowerCase();
     const meta = item.metadata && typeof item.metadata === 'object' ? item.metadata : {};
     const external = String(item.auth_provider || '').toLowerCase() === 'external_api';
-    const isApiAudit = external && ['conversation_audit_job','conversation_audit_result'].includes(type);
-    const isApiActivity = !isApiAudit && (external || type === 'external_api_request' || !!meta.externalKeyId || !!meta.keyId);
+    const isAuditRecord = ['conversation_audit_job','conversation_audit_result'].includes(type);
+    const isApiActivity = !isAuditRecord && (external || type === 'external_api_request' || !!meta.externalKeyId || !!meta.keyId);
     if (!includeApi && isApiActivity) return false;
-    if (!includeApiAudits && isApiAudit) return false;
+    if (!includeApiAudits && isAuditRecord) return false;
     if (includeTypes.length && !includeTypes.includes(type)) return false;
     if (excludeTypes.includes(type)) return false;
     if (roles.length && !roles.includes(String(item.actor_role || '').toLowerCase())) return false;
@@ -78,9 +78,10 @@ export default async function handler(req, res) {
       if (to) query = query.lte('created_at', `${to}T23:59:59.999+06:00`);
       return query;
     };
-    const requests = [scopedQuery().or('auth_provider.is.null,auth_provider.neq.external_api')];
+    const auditEventTypes = '(conversation_audit_job,conversation_audit_result)';
+    const requests = [scopedQuery().or('auth_provider.is.null,auth_provider.neq.external_api').not('event_type', 'in', auditEventTypes)];
     if (includeApi) requests.push(scopedQuery().eq('auth_provider', 'external_api').not('event_type', 'in', '(conversation_audit_job,conversation_audit_result)'));
-    if (includeApiAudits) requests.push(scopedQuery().eq('auth_provider', 'external_api').in('event_type', ['conversation_audit_job','conversation_audit_result']));
+    if (includeApiAudits) requests.push(scopedQuery().in('event_type', ['conversation_audit_job','conversation_audit_result']));
     const responses = await Promise.all(requests);
     const failed = responses.find((response) => response.error); if (failed) throw failed.error;
     const unique = new Map(responses.flatMap((response) => response.data || []).map((row) => [row.id, row]));
