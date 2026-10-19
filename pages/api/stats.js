@@ -5,7 +5,7 @@ const STATS_SETTING_KEYS = [
   'chat_provider', 'chat_model', 'last_auto_sync_at', 'last_manual_sync_at',
   'last_auto_sync_summary', 'last_sync_summary', 'notices_indexed_at',
   'notices_domain_all', 'notices_access_emails', 'notices_enabled', 'notice_lab_emails',
-  'audit_access_emails'
+  'audit_access_emails', 'audit_self_access_emails'
 ];
 
 async function withinDeadline(query, fallback = { data: null, error: { message: 'Health check timed out.' } }) {
@@ -32,9 +32,12 @@ function permittedFromSettings(access, settings) {
   const canReadNotices = admin || (noticesEnabled && (noticeList.includes(email) || (noticeDomain && email.endsWith('@nextventures.io'))));
   const auditList = String(settings.get('audit_access_emails') ?? 'faiyaz@nextventures.io')
     .split(',').map((item) => item.trim().toLowerCase()).filter(Boolean);
-  const canAuditConversations = access?.authProvider === 'master_password' || email === String(MASTER_PRINCIPAL).toLowerCase() ||
-    (email.endsWith('@nextventures.io') && auditList.includes(email));
-  return { canReadNotices, canAuditConversations };
+  const selfAuditList = String(settings.get('audit_self_access_emails') || '').split(',').map((item) => item.trim().toLowerCase()).filter(Boolean);
+  const manager = access?.authProvider === 'master_password' || email === String(MASTER_PRINCIPAL).toLowerCase() || email === 'faiyaz@nextventures.io';
+  const auditor = email.endsWith('@nextventures.io') && auditList.includes(email);
+  const self = email.endsWith('@nextventures.io') && selfAuditList.includes(email);
+  const auditAccess = manager ? 'manager' : auditor ? 'auditor' : self ? 'self' : 'none';
+  return { canReadNotices, canAuditConversations: auditAccess !== 'none', auditAccess };
 }
 
 export function databaseHealthReading(response) {
@@ -69,6 +72,12 @@ export default async function handler(req, res) {
     ]);
     const settings = settingMap(settingsResult);
     const permissions = permittedFromSettings(access, settings);
+    let auditResultCount = 0;
+    if (permissions.auditAccess !== 'none') {
+      let countQuery = sb.from('activity_logs').select('*', { count: 'exact', head: true }).eq('event_type', 'conversation_audit_result').contains('metadata', { status: 'completed' });
+      if (permissions.auditAccess === 'self') countQuery = countQuery.contains('metadata', { agentEmail: String(access.email || '').toLowerCase() });
+      const counted = await withinDeadline(countQuery); auditResultCount = counted.count || 0;
+    }
     let lastSyncSummary = null;
     try { lastSyncSummary = JSON.parse(settings.get('last_auto_sync_summary') || settings.get('last_sync_summary') || 'null'); } catch { lastSyncSummary = null; }
     const latestFaq = latest.data?.[0] || null;
@@ -91,6 +100,8 @@ export default async function handler(req, res) {
       lastSyncSummary,
       pendingDisputes: access.role === 'admin' ? (disputes.count || 0) : undefined,
       canAuditConversations: permissions.canAuditConversations,
+      auditAccess: permissions.auditAccess,
+      auditResultCount,
       answerProvider: settings.get('chat_provider') === 'groq' ? 'groq' : settings.get('chat_provider') === 'gemini' ? 'gemini' : 'openai',
       answerModel: settings.get('chat_model') || 'gpt-4o',
       automaticFallback: false,
