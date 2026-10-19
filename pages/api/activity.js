@@ -12,7 +12,7 @@ function applyFilters(rows, query) {
     const type = String(item.event_type || '').toLowerCase();
     const meta = item.metadata && typeof item.metadata === 'object' ? item.metadata : {};
     const external = String(item.auth_provider || '').toLowerCase() === 'external_api';
-    const isAuditRecord = ['conversation_audit_job','conversation_audit_result'].includes(type);
+    const isAuditRecord = ['conversation_audit_job','conversation_audit_result','conversation_audit_dispute','conversation_audit_correction'].includes(type);
     const isApiActivity = !isAuditRecord && (external || type === 'external_api_request' || !!meta.externalKeyId || !!meta.keyId);
     if (!includeApi && isApiActivity) return false;
     if (!includeApiAudits && isAuditRecord) return false;
@@ -78,10 +78,10 @@ export default async function handler(req, res) {
       if (to) query = query.lte('created_at', `${to}T23:59:59.999+06:00`);
       return query;
     };
-    const auditEventTypes = '(conversation_audit_job,conversation_audit_result)';
+    const auditEventTypes = '(conversation_audit_job,conversation_audit_result,conversation_audit_dispute,conversation_audit_correction)';
     const requests = [scopedQuery().or('auth_provider.is.null,auth_provider.neq.external_api').not('event_type', 'in', auditEventTypes)];
-    if (includeApi) requests.push(scopedQuery().eq('auth_provider', 'external_api').not('event_type', 'in', '(conversation_audit_job,conversation_audit_result)'));
-    if (includeApiAudits) requests.push(scopedQuery().in('event_type', ['conversation_audit_job','conversation_audit_result']));
+    if (includeApi) requests.push(scopedQuery().eq('auth_provider', 'external_api').not('event_type', 'in', auditEventTypes));
+    if (includeApiAudits) requests.push(scopedQuery().in('event_type', ['conversation_audit_job','conversation_audit_result','conversation_audit_dispute','conversation_audit_correction']));
     const responses = await Promise.all(requests);
     const failed = responses.find((response) => response.error); if (failed) throw failed.error;
     const unique = new Map(responses.flatMap((response) => response.data || []).map((row) => [row.id, row]));
