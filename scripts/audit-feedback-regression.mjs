@@ -38,6 +38,11 @@ assert.match(auditSource, /Next time:/);
 assert.match(auditSource, /Self-assignment is prohibited and automatically sets Efficiency to 0\/10/);
 assert.match(auditSource, /Critical workflow violation: The agent assigned this conversation to themselves/);
 assert.match(auditSource, /selfAssignmentEventId/);
+assert.match(auditSource, /!turn\.assignmentAutomated/, 'automated or balanced assignment cannot trigger self-assignment');
+assert.match(auditSource, /balanced\[ _-\]\*assignment/, 'balanced assignment metadata is recognized explicitly');
+assert.match(auditSource, /inappropriateBotWarningCount/, 'investigation-status warning violations are measured');
+assert.match(auditSource, /Deduct exactly one Process point per listed warning/, 'auto-closing warning penalty is explicit');
+assert.match(auditSource, /Review requests belong to Process & Judgment, not Quality/, 'review request cannot reduce Quality');
 
 const level1 = (overrides = {}) => ({
   supportLevel: 'standard', frtSeconds: 30, frtHit: true, ahtSeconds: 1200, ahtHit: true,
@@ -62,4 +67,4 @@ assert.match(pageSource, /ART breach \$\{index \+ 1\}/);
 assert.match(pageSource, /cycle\.breached/);
 assert.match(pageSource, /Self-assignment violation/);
 
-console.log('audit feedback regression: 30 assertions passed');
+console.log('audit feedback regression: 35 assertions passed');
