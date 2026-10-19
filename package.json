@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "test:policy": "node scripts/policy-precision-regression.mjs",
-    "test:audit-feedback": "node scripts/audit-feedback-regression.mjs"
+    "test:audit-feedback": "node scripts/audit-feedback-regression.mjs",
+    "test:audit-history": "node scripts/audit-history-regression.mjs",
+    "test:audit-disputes": "node scripts/audit-dispute-regression.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
