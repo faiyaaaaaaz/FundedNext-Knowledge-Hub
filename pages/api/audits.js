@@ -4,10 +4,10 @@ import {
 import {
   AUDIT_RUBRIC_VERSION, AUDIT_THRESHOLDS, auditConnections, auditCsv, auditHtml,
   canManageAudits, canUseAudits, conversationTurns, deriveMetrics, fetchConversation,
-  fetchIntercomAdmins, findConversationCandidates, getAuditAccessConfig,
+  fetchIntercomAdmins, findConversationCandidates, getAuditAccessConfig, getAuditPermission, getAuditSelfAccessConfig,
   getAuditAgentConfig, getAuditLevel2Config, getAuditModels, meaningfulAgentIds, parseConversationIds,
   redactConversation, restoreAuditTokens, retrieveAuditEvidence, runAuditModel, sampleCandidates,
-  saveAuditAccessConfig, saveAuditAgentConfig, saveAuditLevel2Config, saveAuditModels
+  saveAuditAccessConfig, saveAuditAgentConfig, saveAuditLevel2Config, saveAuditModels, saveAuditSelfAccessConfig
 } from '../../lib/audits';
 import {
   authenticateExternalApiKey, createExternalApiKey, hasExternalScope,
@@ -32,7 +32,8 @@ function publicJob(row, enrichment = {}) {
     evaluations: Number(meta.evaluations || 0), currentConversationId: meta.currentConversationId || null,
     pauseRequested: !!meta.pauseRequested, cancelRequested: !!meta.cancelRequested,
     filters: meta.filters || {}, seed: meta.seed || '', rubricVersion: meta.rubricVersion || AUDIT_RUBRIC_VERSION,
-    updatedAt: meta.updatedAt || row?.created_at, error: meta.error || '', directIds: meta.directIds || [], agentNames
+    updatedAt: meta.updatedAt || row?.created_at, error: meta.error || '', directIds: meta.directIds || [], agentNames,
+    scoreSummary: enrichment.scoreSummary || meta.scoreSummary || null
   };
 }
 
@@ -56,9 +57,40 @@ async function loadJob(sb, id) {
   return data;
 }
 
+async function loadDisputes(sb, resultIds = []) {
+  if (!resultIds.length) return new Map();
+  const rows = checked(await sb.from('activity_logs').select('id,created_at,user_name,user_email,metadata').eq('event_type', 'conversation_audit_dispute').in('metadata->>resultId', resultIds.map(String)).order('created_at', { ascending: false }).limit(5000), 'Could not load audit disputes');
+  const byResult = new Map();
+  for (const row of rows || []) {
+    const resultId = String(row.metadata?.resultId || '');
+    if (!resultId || byResult.has(resultId)) continue;
+    byResult.set(resultId, { id: row.id, createdAt: row.created_at, submittedBy: row.user_name || row.user_email || '', submittedByEmail: row.user_email || '', ...(row.metadata || {}) });
+  }
+  return byResult;
+}
+
 async function loadResults(sb, jobId) {
   const rows = checked(await sb.from('activity_logs').select('id,created_at,metadata').eq('event_type', 'conversation_audit_result').contains('metadata', { jobId: String(jobId) }).order('created_at', { ascending: true }).order('id', { ascending: true }), 'Could not load audit results');
-  return (rows || []).map(publicResult);
+  const disputes = await loadDisputes(sb, (rows || []).map((row) => String(row.id)));
+  return (rows || []).map((row) => ({ ...publicResult(row), dispute: disputes.get(String(row.id)) || null }));
+}
+
+function resultOwnedBy(result, email, agentIds = []) {
+  const normalized = String(email || '').trim().toLowerCase();
+  return (!!normalized && String(result?.agentEmail || '').trim().toLowerCase() === normalized) || agentIds.includes(String(result?.agentId || ''));
+}
+
+async function auditIdentity(access, permission, sb) {
+  if (permission !== 'self') return { agentIds: [], admins: [] };
+  const keys = await getKeys();
+  const admins = keys.intercomToken ? await fetchIntercomAdmins(keys.intercomToken) : [];
+  return { admins, agentIds: admins.filter((agent) => String(agent.email || '').toLowerCase() === String(access.email || '').toLowerCase()).map((agent) => String(agent.id)) };
+}
+
+function requireRunner(permission, access) {
+  if (!access.external && !['manager', 'auditor'].includes(permission)) {
+    const error = new Error('Your My Audits access lets you review and dispute your own results, but does not allow running audits.'); error.status = 403; throw error;
+  }
 }
 
 async function resultsWithLiveTranscripts(results, intercomToken) {
@@ -209,7 +241,7 @@ async function processNext(access, sb, jobId) {
       const restoredAudit = restoreAuditTokens(model.audit, redacted.tokenReplacements);
       const result = await insertResult(sb, access, {
         jobId: String(jobId), status: 'completed', conversationId: String(item.id), conversationDate: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '',
-        agentId: targetId, agentName: agent.name, intercomLink: intercomLink(conversation), audit: restoredAudit, metrics,
+        agentId: targetId, agentName: agent.name, agentEmail: agent.email || '', intercomLink: intercomLink(conversation), audit: restoredAudit, metrics,
         evidence: knowledge.evidence.map(({ kind, id, title, url, postedAt }) => ({ kind, id, title, url, postedAt })), evidenceRetrievedAt: knowledge.retrievedAt,
         redactionCount: redacted.redactionCount, rubricVersion: AUDIT_RUBRIC_VERSION, provider: 'gemini', model: model.model,
         keyName: model.keyName, keyFingerprint: model.keyFingerprint, routeAttempts: model.attempts, usage: model.usage
@@ -265,7 +297,9 @@ export default async function handler(req, res) {
     const access = await authenticateRequest(req) || await authenticateExternalApiKey(req);
     if (!access) return res.status(401).json({ error: 'Your session has ended. Please sign in again.' });
     const sb = supabaseAdmin();
-    if (!access.external && !(await canUseAudits(access, sb))) return res.status(403).json({ error: 'Conversation Audit access has not been granted to this account.' });
+    const permission = access.external ? 'auditor' : await getAuditPermission(access, sb);
+    if (!access.external && permission === 'none') return res.status(403).json({ error: 'Conversation Audit access has not been granted to this account.' });
+    const identity = await auditIdentity(access, permission, sb);
     if (access.external) {
       const required = action === 'health' || action === 'bootstrap' ? 'diagnostics:read'
         : ['create-job','process-next','pause-job','resume-job','cancel-job'].includes(action) ? 'audit:run'
@@ -274,7 +308,9 @@ export default async function handler(req, res) {
     }
 
     if (req.method === 'GET' && action === 'export') {
-      const job = publicJob(await loadJob(sb, req.query.jobId)); const results = await loadResults(sb, req.query.jobId);
+      const job = publicJob(await loadJob(sb, req.query.jobId)); let results = await loadResults(sb, req.query.jobId);
+      if (permission === 'self') results = results.filter((result) => resultOwnedBy(result, access.email, identity.agentIds));
+      if (!results.length && permission === 'self') return res.status(403).json({ error: 'This audit does not contain a result assigned to your email.' });
       const fileBase = auditFileBase(job, results);
       if (req.query.format === 'html') {
         const keys = await getKeys();
@@ -289,7 +325,13 @@ export default async function handler(req, res) {
       return res.status(200).send(auditCsv(results, req.query.detailed === '1'));
     }
 
-    if (req.method === 'GET' && action === 'job') return res.json({ job: publicJob(await loadJob(sb, req.query.id)), results: await loadResults(sb, req.query.id) });
+    if (req.method === 'GET' && action === 'job') {
+      let job = publicJob(await loadJob(sb, req.query.id)); let results = await loadResults(sb, req.query.id);
+      if (permission === 'self') results = results.filter((result) => resultOwnedBy(result, access.email, identity.agentIds));
+      if (!results.length && permission === 'self') return res.status(403).json({ error: 'This audit does not contain a result assigned to your email.' });
+      if (permission === 'self') job = { ...job, total: results.length, processed: results.length, completed: results.filter((item) => item.status === 'completed').length, evaluations: results.length, skipped: 0, failed: 0, currentConversationId: null, filters: {}, agentNames: [...new Set(results.map((item) => item.agentName).filter(Boolean))] };
+      return res.json({ job, results });
+    }
 
     if (req.method === 'GET' && action === 'bootstrap') {
       const keys = await getKeys();
@@ -297,27 +339,41 @@ export default async function handler(req, res) {
       if (keys.intercomToken) try { admins = await fetchIntercomAdmins(keys.intercomToken); } catch (error) { intercomError = error.message; }
       const enabledAgentIds = await getAuditAgentConfig(sb, admins);
       const level2AgentIds = await getAuditLevel2Config(sb);
-      const jobs = checked(await sb.from('activity_logs').select('*').eq('event_type', 'conversation_audit_job').order('created_at', { ascending: false }).limit(100), 'Could not load audit history');
+      let jobs = checked(await sb.from('activity_logs').select('*').eq('event_type', 'conversation_audit_job').order('created_at', { ascending: false }).limit(100), 'Could not load audit history');
       const jobIds = (jobs || []).map((row) => String(row.id));
       let recentResults = [];
       if (jobIds.length) {
-        const resultQuery = await sb.from('activity_logs').select('jobId:metadata->>jobId,agentName:metadata->>agentName').eq('event_type', 'conversation_audit_result').in('metadata->>jobId', jobIds).limit(5000);
+        const resultQuery = await sb.from('activity_logs').select('id,metadata').eq('event_type', 'conversation_audit_result').in('metadata->>jobId', jobIds).limit(5000);
         if (!resultQuery.error) recentResults = resultQuery.data || [];
       }
+      recentResults = recentResults.map((row) => ({ id: row.id, ...(row.metadata || {}) }));
+      if (permission === 'self') {
+        recentResults = recentResults.filter((result) => resultOwnedBy(result, access.email, identity.agentIds));
+        const ownedJobs = new Set(recentResults.map((result) => String(result.jobId)));
+        jobs = (jobs || []).filter((job) => ownedJobs.has(String(job.id)));
+      }
       const namesByJob = new Map();
+      const scoresByJob = new Map();
       for (const row of recentResults) {
         const jobId = String(row.jobId || ''); if (!jobId) continue;
         if (!namesByJob.has(jobId)) namesByJob.set(jobId, new Set());
         if (row.agentName) namesByJob.get(jobId).add(row.agentName);
+        if (row.status === 'completed' && row.audit) {
+          if (!scoresByJob.has(jobId)) scoresByJob.set(jobId, []);
+          scoresByJob.get(jobId).push(row.audit);
+        }
       }
       const adminNameById = new Map(admins.map((agent) => [String(agent.id), agent.name]));
       const publicJobs = (jobs || []).map((row) => {
-        const id = String(row.id); const filterNames = (row.metadata?.filters?.agentIds || []).map((agentId) => adminNameById.get(String(agentId))).filter(Boolean);
-        return publicJob(row, { agentNames: [...filterNames, ...(namesByJob.get(id) || [])] });
+        const id = String(row.id); const filterNames = permission === 'self' ? [] : (row.metadata?.filters?.agentIds || []).map((agentId) => adminNameById.get(String(agentId))).filter(Boolean);
+        const scores = scoresByJob.get(id) || []; const average = (key) => scores.length ? Number((scores.reduce((sum, audit) => sum + Number(audit?.[key] || 0), 0) / scores.length).toFixed(2)) : null;
+        const quality = average('quality'); const efficiency = average('efficiency'); const process = average('complexity');
+        const visible = publicJob(row, { agentNames: [...filterNames, ...(namesByJob.get(id) || [])], scoreSummary: scores.length ? { quality, efficiency, process, final: Number(((quality + efficiency + process) / 3).toFixed(2)) } : null });
+        return permission === 'self' ? { ...visible, total: scores.length, processed: scores.length, completed: scores.length, evaluations: scores.length, skipped: 0, failed: 0, currentConversationId: null, filters: {} } : visible;
       });
       return res.json({
-        access: { allowed: access.external || await canUseAudits(access, sb), canManage: !access.external && canManageAudits(access), email: access.email || '', config: !access.external && canManageAudits(access) ? await getAuditAccessConfig(sb) : undefined },
-        agents: admins, enabledAgentIds, level2AgentIds, intercomError, models: await getAuditModels(sb),
+        access: { allowed: true, permission, canManage: !access.external && canManageAudits(access), canRun: access.external || ['manager','auditor'].includes(permission), email: access.email || '', config: !access.external && canManageAudits(access) ? await getAuditAccessConfig(sb) : undefined, selfConfig: !access.external && canManageAudits(access) ? await getAuditSelfAccessConfig(sb) : undefined },
+        agents: permission === 'self' ? [] : admins, enabledAgentIds: permission === 'self' ? [] : enabledAgentIds, level2AgentIds: permission === 'self' ? [] : level2AgentIds, intercomError, models: permission === 'self' ? [] : await getAuditModels(sb),
         connection: { intercomConfigured: !!keys.intercomToken, geminiKeyCount: (keys.geminiKeyPool || []).length, geminiKeyNames: (keys.geminiKeyPool || []).map((item) => item.name) },
         thresholds: AUDIT_THRESHOLDS, rubricVersion: AUDIT_RUBRIC_VERSION, jobs: publicJobs,
         developerKeys: canManageAudits(access) ? await listExternalApiKeys(sb) : undefined,
@@ -327,11 +383,18 @@ export default async function handler(req, res) {
 
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.' });
     const body = req.body || {};
-    if (action === 'health') return res.json({ health: await auditConnections() });
+    if (action === 'health') {
+      if (permission === 'self') return res.json({ health: { state: 'healthy', checkedAt: new Date().toISOString(), intercom: { connected: true, detail: 'My Audits access ready' }, gemini: [], healthyGeminiKeys: 0 } });
+      return res.json({ health: await auditConnections() });
+    }
     if (action === 'conversation-view') {
       const conversationId = parseConversationIds(body.conversationId)[0];
       if (!conversationId) throw new Error('A valid conversation ID is required.');
       const keys = await getKeys(); if (!keys.intercomToken) throw new Error('Intercom is not connected.');
+      if (permission === 'self') {
+        const rows = checked(await sb.from('activity_logs').select('id,metadata').eq('event_type', 'conversation_audit_result').contains('metadata', { conversationId }).limit(100), 'Could not verify transcript access');
+        if (!(rows || []).map(publicResult).some((result) => resultOwnedBy(result, access.email, identity.agentIds))) return res.status(403).json({ error: 'You can open transcripts only for your own audit results.' });
+      }
       const [conversation, admins] = await Promise.all([fetchConversation(keys.intercomToken, conversationId), fetchIntercomAdmins(keys.intercomToken)]);
       const fullTurns = conversationTurns(conversation, admins);
       if (access.external) {
@@ -340,23 +403,26 @@ export default async function handler(req, res) {
       }
       const turns = fullTurns.map((turn) => ({
         id: turn.id, at: turn.at, kind: turn.kind, authorId: turn.authorId, authorName: turn.authorName,
-        body: turn.body, partType: turn.partType, assignedTo: turn.assignedTo
+        body: turn.body, partType: turn.partType, assignedTo: turn.assignedTo, attachments: turn.attachments || []
       }));
       return res.json({ conversation: { id: conversationId, intercomLink: intercomLink(conversation), turns } });
     }
-    if (action === 'create-job') return res.json({ job: await createJob(req, access, sb, body) });
-    if (action === 'process-next') return res.json(await processNext(access, sb, body.jobId));
+    if (action === 'create-job') { requireRunner(permission, access); return res.json({ job: await createJob(req, access, sb, body) }); }
+    if (action === 'process-next') { requireRunner(permission, access); return res.json(await processNext(access, sb, body.jobId)); }
     if (action === 'pause-job') {
+      requireRunner(permission, access);
       const row = await loadJob(sb, body.jobId);
       if (['completed','cancelled'].includes(row.metadata?.status)) return res.json({ job: publicJob(row) });
       return res.json({ job: publicJob(await updateJob(sb, row, { pauseRequested: true, status: 'paused', stage: 'Pause requested — finishing the current conversation safely' })) });
     }
     if (action === 'resume-job') {
+      requireRunner(permission, access);
       const row = await loadJob(sb, body.jobId);
       if (row.metadata?.status === 'cancelled') throw new Error('A cancelled audit cannot be resumed. Start a new audit instead.');
       return res.json({ job: publicJob(await updateJob(sb, row, { pauseRequested: false, cancelRequested: false, status: 'queued', stage: 'Resume confirmed — preparing the next conversation', error: '' })) });
     }
     if (action === 'cancel-job') {
+      requireRunner(permission, access);
       const row = await loadJob(sb, body.jobId);
       if (row.metadata?.status === 'completed') return res.json({ job: publicJob(row) });
       return res.json({ job: publicJob(await updateJob(sb, row, { cancelRequested: true, pauseRequested: false, status: 'cancelled', stage: 'Audit cancelled — completed results remain saved', currentConversationId: null })) });
@@ -370,6 +436,11 @@ export default async function handler(req, res) {
       if (active.length) throw new Error('Running, queued, or paused audits cannot be deleted. Cancel them first.');
       const resultRows = checked(await sb.from('activity_logs').select('id,metadata').eq('event_type', 'conversation_audit_result').in('metadata->>jobId', jobIds).limit(10000), 'Could not find saved audit results');
       const resultIds = (resultRows || []).map((row) => row.id);
+      for (let offset = 0; offset < resultIds.length; offset += 500) {
+        const related = resultIds.slice(offset, offset + 500).map(String);
+        const removal = await sb.from('activity_logs').delete().in('event_type', ['conversation_audit_dispute','conversation_audit_correction']).in('metadata->>resultId', related);
+        if (removal.error) throw new Error(`Could not delete related audit disputes: ${removal.error.message}`);
+      }
       for (let offset = 0; offset < resultIds.length; offset += 500) {
         const removal = await sb.from('activity_logs').delete().in('id', resultIds.slice(offset, offset + 500));
         if (removal.error) throw new Error(`Could not delete saved audit results: ${removal.error.message}`);
@@ -392,6 +463,42 @@ export default async function handler(req, res) {
     if (action === 'save-access') {
       if (!canManageAudits(access)) return res.status(403).json({ error: 'Admin access is required to change Audit access.' });
       return res.json({ access: await saveAuditAccessConfig(body.emails, sb) });
+    }
+    if (action === 'save-self-access') {
+      if (!canManageAudits(access)) return res.status(403).json({ error: 'Admin access is required to change My Audits access.' });
+      return res.json({ access: await saveAuditSelfAccessConfig(body.emails, sb) });
+    }
+    if (action === 'submit-dispute') {
+      if (access.external) return res.status(403).json({ error: 'Audit disputes require a signed-in workspace account.' });
+      const resultId = String(body.resultId || '');
+      const reason = String(body.reason || '').trim().slice(0, 4000);
+      if (!resultId || reason.length < 10) throw new Error('Explain the audit concern in at least 10 characters.');
+      const row = checked(await sb.from('activity_logs').select('id,metadata').eq('id', resultId).eq('event_type', 'conversation_audit_result').maybeSingle(), 'Could not load the audit result');
+      if (!row) throw new Error('Audit result not found.');
+      const result = publicResult(row);
+      if (permission === 'self' && !resultOwnedBy(result, access.email, identity.agentIds)) return res.status(403).json({ error: 'You can dispute only your own audit results.' });
+      const existing = checked(await sb.from('activity_logs').select('id,metadata').eq('event_type', 'conversation_audit_dispute').contains('metadata', { resultId }).order('created_at', { ascending: false }).limit(1), 'Could not check existing disputes');
+      if (existing?.[0]?.metadata?.status === 'pending') throw new Error('This result already has a pending dispute.');
+      const metadata = { resultId, jobId: String(result.jobId || ''), conversationId: String(result.conversationId || ''), agentId: String(result.agentId || ''), agentEmail: result.agentEmail || '', agentName: result.agentName || '', reason, status: 'pending', submittedAt: new Date().toISOString() };
+      const created = checked(await sb.from('activity_logs').insert({ actor_role: access.role, session_id: access.sessionId, user_name: access.name, user_email: access.email, auth_provider: access.authProvider, event_type: 'conversation_audit_dispute', success: true, metadata }).select('id,created_at,user_name,user_email,metadata').single(), 'Could not submit the audit dispute');
+      return res.json({ dispute: { id: created.id, createdAt: created.created_at, submittedBy: created.user_name || created.user_email || '', submittedByEmail: created.user_email || '', ...created.metadata } });
+    }
+    if (action === 'review-dispute') {
+      if (access.external) return res.status(403).json({ error: 'Audit dispute decisions require a signed-in auditor.' });
+      requireRunner(permission, access);
+      const disputeId = String(body.disputeId || ''); const decision = String(body.decision || '');
+      if (!['approved','rejected'].includes(decision)) throw new Error('Choose approve or reject.');
+      const row = checked(await sb.from('activity_logs').select('*').eq('id', disputeId).eq('event_type', 'conversation_audit_dispute').maybeSingle(), 'Could not load the dispute');
+      if (!row) throw new Error('Audit dispute not found.');
+      const reviewerNote = String(body.reviewerNote || '').trim().slice(0, 4000);
+      const correction = String(body.correction || '').trim().slice(0, 6000);
+      if (decision === 'approved' && correction.length < 20) throw new Error('Add the corrected audit guidance before approving this dispute.');
+      const metadata = { ...(row.metadata || {}), status: decision, reviewerNote, correction, reviewedAt: new Date().toISOString(), reviewedBy: access.name || access.email || '' };
+      checked(await sb.from('activity_logs').update({ metadata }).eq('id', disputeId), 'Could not save the dispute decision');
+      if (decision === 'approved') {
+        await sb.from('activity_logs').insert({ actor_role: access.role, session_id: access.sessionId, user_name: access.name, user_email: access.email, auth_provider: access.authProvider, event_type: 'conversation_audit_correction', success: true, metadata: { disputeId, resultId: metadata.resultId, conversationId: metadata.conversationId, title: `Audit correction · ${metadata.agentName || metadata.conversationId || metadata.resultId}`, instruction: correction, approvedAt: metadata.reviewedAt } });
+      }
+      return res.json({ dispute: { id: row.id, createdAt: row.created_at, submittedBy: row.user_name || row.user_email || '', submittedByEmail: row.user_email || '', ...metadata } });
     }
     if (action === 'save-models') {
       if (!canManageAudits(access)) return res.status(403).json({ error: 'Admin access is required to change the audit model chain.' });
