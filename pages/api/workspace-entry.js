@@ -3,13 +3,15 @@ import { authenticateRequest, logActivity, supabaseAdmin } from '../../lib/serve
 // Updating this release object as part of a deployment automatically shows the
 // real release notes once to every user, including Admins.
 const CURRENT_RELEASE = {
-  version: '2026.10.audit-history-v6.1',
+  version: '2026.10.audit-permissions-disputes-v7',
   title: 'What’s new',
   changes: [
-    'Audit history now identifies each batch by agent name and audit ID, with confirmed bulk deletion for finished batches.',
-    'HTML and CSV exports now use the agent name and audit ID in their filenames.',
-    'All audit job and result records, including legacy Master Admin records, are hidden from Activity by default behind their own optional checkbox.',
-    'Self-assignment remains a prohibited workflow violation that automatically sets Efficiency to 0/10.'
+    'Agents with My Audits access can now review only results matched to their own Intercom email, while leads retain audit and testing controls.',
+    'Agents and leads can dispute an audit; approved decisions become audit-only guidance and never affect customer chatbot answers.',
+    'Audit history now shows color-coded category and final scores, and live transcript images can be opened from the result modal.',
+    'Balanced workflow assignment is no longer mistaken for self-assignment, while confirmed self-assignment still sets Efficiency to 0/10.',
+    'Investigation-status mistakes and review opportunities now follow the clarified Process & Judgment rules.',
+    'Private answer transport fields are removed before an answer reaches the conversation.'
   ]
 };
 
