@@ -80,6 +80,10 @@ function hasOtherScope(text, target) {
 
 function cleanAnswer(raw) {
   let answer = String(raw || '')
+    // Private transport fields are parsed by the API below. If a provider puts
+    // the block inside its prose, remove the entire trailing block before any
+    // customer-facing formatting is applied.
+    .replace(/\n\s*(?:[-*•]\s*)?(?:\*{0,2})?(?:SOURCES?|CONFIDENCE|SEGMENTS?|COVERAGE|NOTICE[\s_-]*CONFLICT)(?:\*{0,2})?\s*[:：][\s\S]*$/i, '')
     // Normalize every exotic Unicode space (narrow/thin/no-break etc.) to a
     // plain space. Models often emit these around times and units ("6:00 AM",
     // "GMT+3"), which render cramped and paste badly when copied.
@@ -93,11 +97,11 @@ function cleanAnswer(raw) {
     .replace(/\\left|\\right/g, '').replace(/\\[,;!]/g, ' ').replace(/\\(?:quad|qquad)/g, '  ')
     .replace(/\\\[|\\\]|\\\(|\\\)/g, ' ').replace(/\\\\/g, ' ')
     .replace(/\\[a-zA-Z]+/g, '').replace(/[{}]/g, '')
-    .replace(/^\s*(?:\*\*)?SOURCES(?:\*\*)?\s*:.*$/gim, '')
-    .replace(/^\s*(?:\*\*)?CONFIDENCE(?:\*\*)?\s*:.*$/gim, '')
-    .replace(/^\s*(?:\*\*)?SEGMENTS?(?:\*\*)?\s*:.*$/gim, '')
-    .replace(/^\s*(?:\*\*)?COVERAGE(?:\*\*)?\s*:.*$/gim, '')
-    .replace(/^\s*(?:\*\*)?NOTICE_CONFLICT(?:\*\*)?\s*:.*$/gim, '')
+    .replace(/^\s*(?:[-*•]\s*)?(?:\*{0,2})?SOURCES?(?:\*{0,2})?\s*[:：].*$/gim, '')
+    .replace(/^\s*(?:[-*•]\s*)?(?:\*{0,2})?CONFIDENCE(?:\*{0,2})?\s*[:：].*$/gim, '')
+    .replace(/^\s*(?:[-*•]\s*)?(?:\*{0,2})?SEGMENTS?(?:\*{0,2})?\s*[:：].*$/gim, '')
+    .replace(/^\s*(?:[-*•]\s*)?(?:\*{0,2})?COVERAGE(?:\*{0,2})?\s*[:：].*$/gim, '')
+    .replace(/^\s*(?:[-*•]\s*)?(?:\*{0,2})?NOTICE[\s_-]*CONFLICT(?:\*{0,2})?\s*[:：].*$/gim, '')
     // Some providers wrap a multiline SOURCES value onto its own bullet. It is
     // transport metadata, not part of the customer-facing answer.
     .replace(/^\s*[-•]\s*\d+(?:\s*,\s*\d+)+\s*$/gm, '')
