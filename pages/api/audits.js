@@ -3,7 +3,7 @@ import {
 } from '../../lib/server';
 import {
   AUDIT_RUBRIC_VERSION, AUDIT_THRESHOLDS, auditConnections, auditCsv, auditHtml,
-  canManageAudits, canUseAudits, conversationTurns, deriveMetrics, fetchConversation,
+  canManageAudits, canReviewAuditDisputes, canUseAudits, conversationTurns, deriveMetrics, fetchConversation,
   fetchIntercomAdmins, findConversationCandidates, getAuditAccessConfig, getAuditPermission, getAuditSelfAccessConfig,
   getAuditAgentConfig, getAuditLevel2Config, getAuditModels, meaningfulAgentIds, parseConversationIds,
   redactConversation, restoreAuditTokens, retrieveAuditEvidence, runAuditModel, sampleCandidates,
@@ -67,6 +67,24 @@ async function loadDisputes(sb, resultIds = []) {
     byResult.set(resultId, { id: row.id, createdAt: row.created_at, submittedBy: row.user_name || row.user_email || '', submittedByEmail: row.user_email || '', ...(row.metadata || {}) });
   }
   return byResult;
+}
+
+async function loadAuditAdminData(sb) {
+  const disputeRows = checked(await sb.from('activity_logs').select('id,created_at,user_name,user_email,metadata').eq('event_type', 'conversation_audit_dispute').order('created_at', { ascending: false }).limit(1000), 'Could not load audit disputes');
+  const correctionRows = checked(await sb.from('activity_logs').select('id,created_at,user_name,user_email,metadata').eq('event_type', 'conversation_audit_correction').order('created_at', { ascending: false }).limit(1000), 'Could not load audit snippets');
+  const resultIds = [...new Set((disputeRows || []).map((row) => String(row.metadata?.resultId || '')).filter(Boolean))];
+  let results = [];
+  if (resultIds.length) results = checked(await sb.from('activity_logs').select('id,created_at,metadata').eq('event_type', 'conversation_audit_result').in('id', resultIds).limit(2000), 'Could not load disputed audit results');
+  const byId = new Map((results || []).map((row) => [String(row.id), publicResult(row)]));
+  return {
+    disputes: (disputeRows || []).map((row) => ({ id: row.id, createdAt: row.created_at, submittedBy: row.user_name || row.user_email || '', submittedByEmail: row.user_email || '', ...(row.metadata || {}), result: byId.get(String(row.metadata?.resultId || '')) || null })),
+    snippets: (correctionRows || []).map((row) => ({ id: row.id, createdAt: row.created_at, createdBy: row.user_name || row.user_email || '', active: row.metadata?.active !== false, title: row.metadata?.title || 'Approved audit guidance', instruction: row.metadata?.instruction || '', triggerTerms: row.metadata?.triggerTerms || '', evidence: row.metadata?.evidence || [], ...(row.metadata || {}) }))
+  };
+}
+
+function auditTriggerTerms(...values) {
+  const stop = new Set(['about','after','agent','audit','client','conversation','could','from','have','into','support','that','their','there','these','they','this','what','when','where','which','with','would','your']);
+  return [...new Set(values.join(' ').toLowerCase().match(/[a-z0-9][a-z0-9-]{3,}/g) || [])].filter((word) => !stop.has(word)).slice(0, 30).join(', ');
 }
 
 async function loadResults(sb, jobId) {
@@ -371,11 +389,13 @@ export default async function handler(req, res) {
         const visible = publicJob(row, { agentNames: [...filterNames, ...(namesByJob.get(id) || [])], scoreSummary: scores.length ? { quality, efficiency, process, final: Number(((quality + efficiency + process) / 3).toFixed(2)) } : null });
         return permission === 'self' ? { ...visible, total: scores.length, processed: scores.length, completed: scores.length, evaluations: scores.length, skipped: 0, failed: 0, currentConversationId: null, filters: {} } : visible;
       });
+      const canReviewDisputes = !access.external && canReviewAuditDisputes(access);
+      const auditAdmin = canReviewDisputes ? await loadAuditAdminData(sb) : { disputes: [], snippets: [] };
       return res.json({
-        access: { allowed: true, permission, canManage: !access.external && canManageAudits(access), canRun: access.external || ['manager','auditor'].includes(permission), email: access.email || '', config: !access.external && canManageAudits(access) ? await getAuditAccessConfig(sb) : undefined, selfConfig: !access.external && canManageAudits(access) ? await getAuditSelfAccessConfig(sb) : undefined },
+        access: { allowed: true, permission, canManage: !access.external && canManageAudits(access), canRun: access.external || ['manager','auditor'].includes(permission), canReviewDisputes, email: access.email || '', config: !access.external && canManageAudits(access) ? await getAuditAccessConfig(sb) : undefined, selfConfig: !access.external && canManageAudits(access) ? await getAuditSelfAccessConfig(sb) : undefined },
         agents: permission === 'self' ? [] : admins, enabledAgentIds: permission === 'self' ? [] : enabledAgentIds, level2AgentIds: permission === 'self' ? [] : level2AgentIds, intercomError, models: permission === 'self' ? [] : await getAuditModels(sb),
         connection: { intercomConfigured: !!keys.intercomToken, geminiKeyCount: (keys.geminiKeyPool || []).length, geminiKeyNames: (keys.geminiKeyPool || []).map((item) => item.name) },
-        thresholds: AUDIT_THRESHOLDS, rubricVersion: AUDIT_RUBRIC_VERSION, jobs: publicJobs,
+        thresholds: AUDIT_THRESHOLDS, rubricVersion: AUDIT_RUBRIC_VERSION, jobs: publicJobs, auditDisputes: auditAdmin.disputes, auditSnippets: auditAdmin.snippets,
         developerKeys: canManageAudits(access) ? await listExternalApiKeys(sb) : undefined,
         developerScopes: canManageAudits(access) ? EXTERNAL_SCOPES : undefined
       });
@@ -485,20 +505,54 @@ export default async function handler(req, res) {
     }
     if (action === 'review-dispute') {
       if (access.external) return res.status(403).json({ error: 'Audit dispute decisions require a signed-in auditor.' });
-      requireRunner(permission, access);
+      if (!canReviewAuditDisputes(access)) return res.status(403).json({ error: 'Only Faiyaz, Preya, or Master Admin can decide audit disputes.' });
       const disputeId = String(body.disputeId || ''); const decision = String(body.decision || '');
       if (!['approved','rejected'].includes(decision)) throw new Error('Choose approve or reject.');
       const row = checked(await sb.from('activity_logs').select('*').eq('id', disputeId).eq('event_type', 'conversation_audit_dispute').maybeSingle(), 'Could not load the dispute');
       if (!row) throw new Error('Audit dispute not found.');
+      if (row.metadata?.status !== 'pending') throw new Error('This dispute already has a decision.');
       const reviewerNote = String(body.reviewerNote || '').trim().slice(0, 4000);
       const correction = String(body.correction || '').trim().slice(0, 6000);
       if (decision === 'approved' && correction.length < 20) throw new Error('Add the corrected audit guidance before approving this dispute.');
       const metadata = { ...(row.metadata || {}), status: decision, reviewerNote, correction, reviewedAt: new Date().toISOString(), reviewedBy: access.name || access.email || '' };
-      checked(await sb.from('activity_logs').update({ metadata }).eq('id', disputeId), 'Could not save the dispute decision');
+      let evidence = [];
       if (decision === 'approved') {
-        await sb.from('activity_logs').insert({ actor_role: access.role, session_id: access.sessionId, user_name: access.name, user_email: access.email, auth_provider: access.authProvider, event_type: 'conversation_audit_correction', success: true, metadata: { disputeId, resultId: metadata.resultId, conversationId: metadata.conversationId, title: `Audit correction · ${metadata.agentName || metadata.conversationId || metadata.resultId}`, instruction: correction, approvedAt: metadata.reviewedAt } });
+        const resultRow = checked(await sb.from('activity_logs').select('id,metadata').eq('id', String(metadata.resultId || '')).eq('event_type', 'conversation_audit_result').maybeSingle(), 'Could not load the disputed result');
+        const result = resultRow ? publicResult(resultRow) : null;
+        const keys = await getKeys();
+        let transcript = `${result?.audit?.primaryIssue || ''}\n${result?.audit?.mainFinding || ''}\n${metadata.reason || ''}\n${correction}`;
+        if (keys.intercomToken && metadata.conversationId) {
+          const [conversation, admins] = await Promise.all([fetchConversation(keys.intercomToken, metadata.conversationId), fetchIntercomAdmins(keys.intercomToken)]);
+          transcript = conversationTurns(conversation, admins).map((turn) => `${turn.authorName}: ${turn.body}`).join('\n');
+        }
+        const checkedEvidence = await retrieveAuditEvidence(sb, `${transcript}\nDISPUTE: ${metadata.reason || ''}\nAPPROVED GUIDANCE: ${correction}`);
+        evidence = (checkedEvidence.evidence || []).filter((item) => ['FAQ','Notice'].includes(item.kind)).slice(0, 12).map((item) => ({ kind: item.kind, id: item.id, title: item.title, url: item.url || '' }));
+        metadata.evidenceCheckedAt = checkedEvidence.retrievedAt;
+        metadata.evidence = evidence;
       }
-      return res.json({ dispute: { id: row.id, createdAt: row.created_at, submittedBy: row.user_name || row.user_email || '', submittedByEmail: row.user_email || '', ...metadata } });
+      checked(await sb.from('activity_logs').update({ metadata }).eq('id', disputeId), 'Could not save the dispute decision');
+      let savedSnippet = null;
+      if (decision === 'approved') {
+        const snippetMetadata = { disputeId, resultId: metadata.resultId, conversationId: metadata.conversationId, title: `Audit correction · ${metadata.agentName || metadata.conversationId || metadata.resultId}`, instruction: correction, triggerTerms: auditTriggerTerms(metadata.reason, correction, metadata.agentName), active: true, evidence, evidenceCheckedAt: metadata.evidenceCheckedAt, approvedAt: metadata.reviewedAt };
+        const inserted = checked(await sb.from('activity_logs').insert({ actor_role: access.role, session_id: access.sessionId, user_name: access.name, user_email: access.email, auth_provider: access.authProvider, event_type: 'conversation_audit_correction', success: true, metadata: snippetMetadata }).select('id,created_at,user_name,user_email,metadata').single(), 'Could not save the approved audit snippet');
+        savedSnippet = { id: inserted.id, createdAt: inserted.created_at, createdBy: inserted.user_name || inserted.user_email || '', ...inserted.metadata };
+      }
+      return res.json({ dispute: { id: row.id, createdAt: row.created_at, submittedBy: row.user_name || row.user_email || '', submittedByEmail: row.user_email || '', ...metadata }, snippet: savedSnippet });
+    }
+    if (action === 'update-audit-snippet') {
+      if (!canReviewAuditDisputes(access)) return res.status(403).json({ error: 'Only Faiyaz, Preya, or Master Admin can edit audit snippets.' });
+      const id = String(body.id || ''); const current = checked(await sb.from('activity_logs').select('id,metadata').eq('id', id).eq('event_type', 'conversation_audit_correction').maybeSingle(), 'Could not load the audit snippet');
+      if (!current) throw new Error('Audit snippet not found.');
+      const metadata = { ...(current.metadata || {}), title: String(body.title ?? current.metadata?.title ?? '').trim().slice(0, 180), instruction: String(body.instruction ?? current.metadata?.instruction ?? '').trim().slice(0, 6000), triggerTerms: String(body.triggerTerms ?? current.metadata?.triggerTerms ?? '').trim().slice(0, 1200), active: body.active == null ? current.metadata?.active !== false : !!body.active, updatedAt: new Date().toISOString(), updatedBy: access.name || access.email || '' };
+      if (metadata.instruction.length < 20) throw new Error('Audit guidance must contain at least 20 characters.');
+      checked(await sb.from('activity_logs').update({ metadata }).eq('id', id), 'Could not update the audit snippet');
+      return res.json({ snippet: { id: current.id, ...metadata } });
+    }
+    if (action === 'delete-audit-snippet') {
+      if (!canReviewAuditDisputes(access)) return res.status(403).json({ error: 'Only Faiyaz, Preya, or Master Admin can delete audit snippets.' });
+      const id = String(body.id || '');
+      checked(await sb.from('activity_logs').delete().eq('id', id).eq('event_type', 'conversation_audit_correction'), 'Could not delete the audit snippet');
+      return res.json({ deleted: id });
     }
     if (action === 'save-models') {
       if (!canManageAudits(access)) return res.status(403).json({ error: 'Admin access is required to change the audit model chain.' });
