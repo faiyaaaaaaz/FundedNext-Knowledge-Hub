@@ -185,6 +185,21 @@ function coverageFromDraft(raw, expectedCount) {
   return statuses.length === expectedCount ? statuses : null;
 }
 
+function reconcileMultiQuestionCoverage(topics, statuses, answer) {
+  if (!Array.isArray(topics) || topics.length < 2 || !Array.isArray(statuses)) return statuses;
+  const answerText = String(answer || '').toLowerCase();
+  return topics.map((topic, index) => {
+    const status = statuses[index] || 'not_confirmed';
+    if (status !== 'answered') return status;
+    const anchors = keywords(topic?.question || topic).filter((term) => term.length >= 4);
+    if (!anchors.length) return status;
+    const hits = anchors.filter((term) => answerText.includes(term) || (term.length >= 6 && answerText.includes(term.slice(0, -1))));
+    // A model's private COVERAGE line is not proof. At least one meaningful
+    // concept from each question must appear in the customer-facing answer.
+    return hits.length ? status : 'not_confirmed';
+  });
+}
+
 function verifiedSourceGapAnswer(topics) {
   const labels = (topics || []).map((topic) => {
     const raw = conciseQuestionLabel(topic.question || topic)
@@ -1715,6 +1730,7 @@ export default async function handler(req, res) {
       const fallbackStatus = 'not_confirmed';
       coverageStatuses = topicPlan.map(() => fallbackStatus);
     }
+    coverageStatuses = reconcileMultiQuestionCoverage(topicPlan, coverageStatuses, answer);
     let questionCoverage = topicPlan.map((topic, index) => ({ question: topic.question, status: coverageStatuses[index] }));
     let answeredCount = questionCoverage.filter((item) => item.status === 'answered').length;
     let partialCount = questionCoverage.filter((item) => item.status === 'partial').length;
@@ -1828,7 +1844,7 @@ export default async function handler(req, res) {
       const { _aid: ignoredPolicyId, ...publicPolicySource } = rawPolicySource;
       let policyRef = sources.findIndex((source) => source.url === publicPolicySource.url && source.title === publicPolicySource.title) + 1;
       if (!policyRef) { sources.push(publicPolicySource); policyRef = sources.length; }
-      if (policyResult) {
+      if (policyResult && topicPlan.length === 1) {
         deterministicPolicyResolved = true;
         answer = policyResult.answer;
         segments = answer.split(/\n{2,}/).map((text) => ({ text, refs: [policyRef] }));
