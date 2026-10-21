@@ -73,6 +73,26 @@ function AuditLaunchLoader() {
   </main>;
 }
 
+function AuditBatchPreparation({ elapsed = 0, direct = false, requested = 0 }) {
+  const steps = direct ? [
+    ['Validating conversation IDs', 'Checking that each Intercom conversation can be opened.'],
+    ['Creating the saved batch', 'The audit will appear in history as soon as preparation finishes.']
+  ] : [
+    ['Finding eligible conversations', 'Bot-only chats and conversations without a meaningful agent reply are excluded.'],
+    ['Comparing recent candidates', 'The strongest samples are selected by the chosen agent’s own message count.'],
+    ['Creating the saved batch', 'Progress will be saved after every conversation.']
+  ];
+  const active = Math.min(steps.length - 1, Math.floor(elapsed / 8));
+  return <section className="audit-batch-preparation" role="status" aria-live="polite">
+    <div className="audit-loader-scene compact" aria-hidden="true"><span className="audit-loader-core"><Logo /></span><i className="loader-orbit orbit-one"><b>✓</b></i><i className="loader-orbit orbit-two"><b>QA</b></i><span className="audit-loader-scan" /></div>
+    <span className="audit-loader-eyebrow">Building a reliable sample</span>
+    <h2>{steps[active][0]}</h2><p>{steps[active][1]}</p>
+    <div className="batch-preparation-meta"><b>{elapsed}s</b><span>{direct ? `${requested} requested conversation${requested === 1 ? '' : 's'}` : `${requested} priority conversation${requested === 1 ? '' : 's'}`}</span></div>
+    <div className="audit-loader-steps">{steps.map(([label], index) => <span key={label} className={index === active ? 'active' : index < active ? 'complete' : ''}><i />{label}</span>)}</div>
+    <small>This preparation can take longer for wide date ranges because Intercom candidates are checked before the batch is saved.</small>
+  </section>;
+}
+
 function ConnectionLogo({ type, state }) {
   const common = { viewBox: '0 0 32 32', 'aria-hidden': true };
   return <span className={`connection-logo ${type} ${state}`}>{type === 'intercom' ? <svg {...common}><rect x="5" y="4" width="22" height="24" rx="6"/><path d="M10 10v8m4-8v9m4-9v9m4-9v8M9 22c4.5 3 9.5 3 14 0"/></svg> : type === 'gemini' ? <svg {...common}><path d="M16 3c1.6 7.4 5.6 11.4 13 13-7.4 1.6-11.4 5.6-13 13-1.6-7.4-5.6-11.4-13-13C10.4 14.4 14.4 10.4 16 3Z"/></svg> : <svg {...common}><path d="M5 7.5c5-1.2 8.6-.4 11 2.3 2.4-2.7 6-3.5 11-2.3v19c-4.8-1-8.5-.2-11 2.3-2.5-2.5-6.2-3.3-11-2.3Z"/><path d="M16 10v18"/></svg>}<i/></span>;
@@ -339,19 +359,19 @@ export default function Audits() {
 
   async function startAudit() {
     if (!directMode && !selectedAgents.length) return setError('Select at least one agent or enter specific conversation IDs.');
-    setError(''); setNotice(''); setRunning(true); stopRef.current = false; setResults([]);
+    setError(''); setNotice(''); setRunning(true); stopRef.current = false; setResults([]); setCurrentJob(null); setView('results');
     try {
       const size = customSample ? Number(customSample) : sampleSize;
       const result = await request('create-job', { conversationIds, agentIds: selectedAgents, from, to, sampleSize: size });
       setCurrentJob(result.job); setView('results');
       await runQueue(result.job.id);
       await bootstrap(session);
-    } catch (err) { setError(err.message); setRunning(false); }
+    } catch (err) { setError(err.message); setRunning(false); setView('control'); }
   }
 
   async function retryConversation(conversationId) {
     if (!conversationId || running) return;
-    setError(''); setNotice('Retrying this conversation in a fresh audit batch…'); setRunning(true); stopRef.current = false;
+    setError(''); setNotice('Retrying this conversation in a fresh audit batch…'); setRunning(true); stopRef.current = false; setCurrentJob(null); setResults([]); setView('results');
     try {
       const result = await request('create-job', { conversationIds: String(conversationId) });
       setCurrentJob(result.job); setResults([]); setView('results');
@@ -587,7 +607,7 @@ export default function Audits() {
             <div className="audit-kpis"><Metric label="Completed chats" value={currentJob.completed}/><Metric label="Agent evaluations" value={currentJob.evaluations}/><Metric label="Average quality" value={avg('quality')}/><Metric label="Average efficiency" value={avg('efficiency')}/><Metric label="Average final" value={avg('finalScore')} tone="accent"/><Metric label="Manual review" value={completedResults.filter((item) => item.audit?.manualReview).length}/></div>
             <section className="results-toolbar"><div><h2>Conversation evaluations</h2><p>{results.length} saved result{results.length === 1 ? '' : 's'} in this batch.</p></div><div><button onClick={() => download('csv')}>⇩ Summary CSV</button><button onClick={() => download('csv', true)}>⇩ Detailed CSV</button><button className="primary" onClick={() => download('html')}>⇩ HTML report</button></div></section>
             <div className="audit-result-list">{results.map((result) => <ResultCard key={result.id || `${result.conversationId}-${result.agentId}-${result.status}`} result={result} onCompare={openComparison} onRetry={data?.access?.canRun ? retryConversation : null}/>)}{!results.length && <div className="empty-results"><StatusOrb state={running ? 'checking' : 'offline'}/><h3>{running ? 'The first conversation is being prepared' : 'No results saved yet'}</h3><p>Live status and the first scored result will appear here automatically.</p></div>}</div>
-          </> : <div className="empty-results large"><span>▤</span><h2>No audit selected</h2><p>Start a new audit or open one from Audit history.</p><button onClick={() => setView('control')}>Open audit control</button></div>}
+          </> : running ? <AuditBatchPreparation elapsed={elapsed} direct={directMode} requested={directMode ? conversationIds.split(/[\s,]+/).filter(Boolean).length : Number(customSample || sampleSize)}/> : <div className="empty-results large"><span>▤</span><h2>No audit selected</h2><p>Start a new audit or open one from Audit history.</p><button onClick={() => setView('control')}>Open audit control</button></div>}
         </div>}
 
         {view === 'history' && <div className="audit-history"><section className="audit-card"><div className="card-heading"><div><span>Saved securely</span><h2>{data?.access?.permission === 'self' ? 'My Audits' : 'Recent audit batches'}</h2><p>{data?.access?.permission === 'self' ? 'Only results matched to your verified Intercom email appear here.' : 'Each batch stores structured scores, feedback, evidence references, and timing details. Raw Intercom transcripts and temporary identity mappings are not stored.'}</p></div><div className="history-heading-actions"><button onClick={() => bootstrap()}>Refresh</button>{data?.access?.canManage && <button className="history-delete" disabled={!selectedHistoryJobs.length || deletingHistory} onClick={deleteSelectedHistory}>{deletingHistory ? 'Deleting…' : `Delete selected${selectedHistoryJobs.length ? ` (${selectedHistoryJobs.length})` : ''}`}</button>}</div></div>{data?.access?.canManage && !!(data?.jobs || []).length && <div className="history-selection-bar"><label><input type="checkbox" checked={(data.jobs || []).filter((job) => !['queued','running','paused'].includes(job.status)).length > 0 && (data.jobs || []).filter((job) => !['queued','running','paused'].includes(job.status)).every((job) => selectedHistoryJobs.includes(String(job.id)))} onChange={(event) => setSelectedHistoryJobs(event.target.checked ? (data.jobs || []).filter((job) => !['queued','running','paused'].includes(job.status)).map((job) => String(job.id)) : [])}/> Select all finished batches</label><small>{selectedHistoryJobs.length ? `${selectedHistoryJobs.length} batch${selectedHistoryJobs.length === 1 ? '' : 'es'} selected · ${(data.jobs || []).filter((job) => selectedHistoryJobs.includes(String(job.id))).reduce((sum, job) => sum + Number(job.evaluations || 0), 0)} saved evaluations` : 'Select completed or cancelled batches for permanent deletion'}</small></div>}<div className="history-list">{(data?.jobs || []).map((job) => { const active = ['queued','running','paused'].includes(job.status); const selected = selectedHistoryJobs.includes(String(job.id)); return <article key={job.id} className={`history-row ${selected ? 'selected' : ''}`}><label className="history-select" title={active ? 'Cancel or complete this audit before deleting it' : `Select audit ${job.id}`}><input type="checkbox" disabled={active || !data?.access?.canManage} checked={selected} onChange={(event) => setSelectedHistoryJobs((current) => event.target.checked ? [...new Set([...current, String(job.id)])] : current.filter((id) => id !== String(job.id)))}/></label><button className="history-open" onClick={() => loadJob(job.id)}><span className={`history-state ${job.status}`}>{job.status}</span><span className="history-identity"><b>{auditAgentLabel(job)} · Audit #{job.id}</b><small>{formatDate(job.createdAt)} · Structured result data only</small></span>{job.scoreSummary && <span className="history-scores"><b className="quality">Q {job.scoreSummary.quality}</b><b className="efficiency">E {job.scoreSummary.efficiency}</b><b className="process">P {job.scoreSummary.process}</b><b className="final">Final {job.scoreSummary.final}</b></span>}<span className="history-count"><b>{job.processed}/{job.total}</b><small>{job.evaluations} evaluations</small></span><i className="history-arrow" aria-hidden="true">→</i></button></article>; })}{!data?.jobs?.length && <div className="empty-results"><h3>No audit history yet</h3><p>Your completed and resumable batches will appear here.</p></div>}</div></section></div>}
