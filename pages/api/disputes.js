@@ -13,6 +13,35 @@ function parseJson(content) {
   }
 }
 
+function referencedFaqs(...values) {
+  const references = [];
+  const seen = new Set();
+  for (const value of values) {
+    const text = String(value || '');
+    for (const match of text.matchAll(/https?:\/\/[^\s<>"']+\/articles\/(\d+)(?:-[^\s<>"']*)?/gi)) {
+      const url = match[0].replace(/[),.;!?]+$/, '');
+      const id = match[1];
+      if (seen.has(id)) continue;
+      seen.add(id); references.push({ id, url });
+    }
+  }
+  return references.slice(0, 8);
+}
+
+async function loadReferencedFaqEvidence(sb, references) {
+  const rows = [];
+  for (const reference of references) {
+    const response = await sb.from('chunks')
+      .select('id,article_id,article_title,article_url,content,chunk_index')
+      .ilike('article_url', `%/articles/${reference.id}%`)
+      .order('chunk_index', { ascending: true })
+      .limit(24);
+    if (response.error) throw response.error;
+    for (const row of response.data || []) rows.push({ ...row, similarity: 1, _explicitReference: true, _requestedUrl: reference.url });
+  }
+  return rows;
+}
+
 export default async function handler(req, res) {
   try {
     const access = await authenticateRequest(req);
@@ -107,6 +136,20 @@ export default async function handler(req, res) {
         return res.status(200).json({ dispute: data });
       }
 
+      if (action === 'reopen') {
+        if (dispute.status !== 'approved') return res.status(400).json({ error: 'Only an approved dispute without an active snippet can be returned to review.' });
+        const { data: snippets, error: snippetError } = await sb.from('ai_snippets').select('id').eq('source_dispute_id', dispute.id).limit(1);
+        if (snippetError) throw snippetError;
+        if ((snippets || []).length) return res.status(409).json({ error: 'This dispute has an active snippet. Delete that snippet first, then return the dispute to review.' });
+        const { data, error } = await sb.from('disputes').update({
+          status: 'pending', approval_reason: null, reviewed_at: null,
+          generated_title: null, generated_trigger_terms: null, generated_snippet: null, generated_at: null
+        }).eq('id', id).select().single();
+        if (error) throw error;
+        await logActivity({actorRole:access.role,userEmail:access.email,userName:access.name,sessionId:access.sessionId,eventType:'dispute_review',success:true,metadata:{disputeId:id,status:'pending',reason:'Approved dispute returned to review before snippet activation'}});
+        return res.status(200).json({ dispute: data });
+      }
+
       if (action === 'generate') {
         if (!['approved', 'snippet_generated'].includes(dispute.status)) return res.status(400).json({ error: 'Approve the dispute before generating a correction draft.' });
         const { openaiKey } = await getKeys();
@@ -121,6 +164,7 @@ export default async function handler(req, res) {
         ).join('\n\n');
         const product = ['cfd', 'futures', 'fnmarkets', 'both'].includes(recordedScope?.product) ? recordedScope.product : 'both';
         const model = String(recordedScope?.model || 'all');
+        const explicitFaqReferences = referencedFaqs(dispute.dispute_reason, dispute.approval_reason, ...passageAnnotations.map((item) => item.note));
         const evidenceQueries = [...new Set([
           dispute.question,
           `${dispute.question} ${dispute.dispute_reason || ''}`,
@@ -128,8 +172,12 @@ export default async function handler(req, res) {
           ...passageAnnotations.map((item) => `${item.quote || ''} ${item.note || ''}`),
           linkedSnippet ? `${linkedSnippet.title || ''} ${linkedSnippet.trigger_terms || ''} ${linkedSnippet.instruction || ''}` : ''
         ].map((item) => String(item || '').trim()).filter(Boolean))].slice(0, 8);
-        const vectors = await openaiEmbed(openaiKey, evidenceQueries);
+        const [vectors, explicitlyReferencedFaqs] = await Promise.all([
+          openaiEmbed(openaiKey, evidenceQueries),
+          loadReferencedFaqEvidence(sb, explicitFaqReferences)
+        ]);
         const faqById = new Map();
+        for (const item of explicitlyReferencedFaqs) faqById.set(String(item.id || `${item.article_id}:${item.chunk_index || ''}`), item);
         for (const vector of vectors) {
           const result = await sb.rpc('match_chunks', { query_embedding: vector, match_threshold: 0.12, match_count: 16 });
           if (result.error) throw result.error;
@@ -142,13 +190,14 @@ export default async function handler(req, res) {
         const questionUsesLocalizedScript = /[\u0600-\u06ff\u0750-\u077f\u3040-\u30ff\u3400-\u9fff\u0400-\u04ff]/.test(dispute.question || '');
         const scopedCandidates = [...faqById.values()].filter((item) => {
           const url = String(item.article_url || '');
-          const correctProduct = !recordedScope || recordedScope.product === 'both' || (recordedScope.product === 'futures' ? /helpfutures\.fundednext\.com/i.test(url) : /help\.fundednext\.com/i.test(url));
+          const correctProduct = item._explicitReference || !recordedScope || recordedScope.product === 'both' || (recordedScope.product === 'futures' ? /helpfutures\.fundednext\.com/i.test(url) : /help\.fundednext\.com/i.test(url));
           if (!correctProduct) return false;
           if (/^\[[A-Z]{2}\]/i.test(String(item.article_title || '').trim()) && !questionUsesLocalizedScript) return false;
+          if (item._explicitReference) return true;
           const namedModels = modelsMentioned(`${item.article_title || ''}\n${item.content || ''}`);
           if (model === 'all') return namedModels.length === 0;
           return !namedModels.length || namedModels.some((itemModel) => itemModel.slug === model);
-        }).sort((a, b) => Number(b.similarity || 0) - Number(a.similarity || 0));
+        }).sort((a, b) => Number(!!b._explicitReference) - Number(!!a._explicitReference) || Number(b.similarity || 0) - Number(a.similarity || 0));
         const perArticleCount = new Map();
         const scopedEvidence = scopedCandidates.filter((item) => {
           const key = String(item.article_id || item.id || '');
@@ -161,13 +210,13 @@ export default async function handler(req, res) {
         const noticeResult = await retrieveNotices(sb, { openaiKey, question: noticeSearch, product, model, limit: 6 });
         const noticeEvidence = (noticeResult.matches || []).slice(0, 6);
         const evidence = [
-          ...scopedEvidence.map((item, index) => `[FAQ ${index + 1}] ${item.article_title}\nURL: ${item.article_url || 'not recorded'}\n${item.content}`),
+          ...scopedEvidence.map((item, index) => `[${item._explicitReference ? 'EXACT FAQ REQUESTED BY REVIEWER' : `FAQ ${index + 1}`}] ${item.article_title}\nURL: ${item.article_url || item._requestedUrl || 'not recorded'}\n${item.content}`),
           ...noticeEvidence.map((item, index) => `[NOTICE ${index + 1}] ${item.meta?.title || item.article_title}\nPosted: ${item.meta?.posted_at || 'date not recorded'}\nURL: ${item.meta?.source_url || item.article_url || 'not recorded'}\n${item.meta?.answer_text || item.content}`)
         ].join('\n\n---\n\n');
         const capturedAt = new Date().toISOString();
         const correctionEvidence = scopedEvidence.slice(0, 16).map((item) => ({
           type: 'correction_evidence', kind: 'faq', id: item.article_id || item.id,
-          title: item.article_title || 'Untitled FAQ', url: item.article_url || '',
+          title: item.article_title || 'Untitled FAQ', url: item.article_url || item._requestedUrl || '', explicitlyRequested: !!item._explicitReference,
           excerpt: String(item.content || '').slice(0, 2400), capturedAt
         })).concat(noticeEvidence.map((item) => ({
           type: 'correction_evidence', kind: 'notice', id: item.article_id,
@@ -181,7 +230,7 @@ export default async function handler(req, res) {
           'You are creating a permanent corrective instruction for a support-answering AI. ' +
           'The disputed answer is the claim under review, not the default truth. First identify the exact correction asserted by the Agent dispute reason and Admin approval reason, including whether it concerns one account, multiple accounts, one phase, or later phases. ' +
           'Exact passage annotations identify the precise words the reviewer is discussing. Treat their quoted ranges as location context and their notes as concerns to investigate, not as authoritative policy facts. Address every annotation explicitly when deciding whether a correction is supported. ' +
-          'Re-check every supplied FAQ passage and Notice. The Agent/Admin correction is not authoritative unless the fresh evidence directly supports it. ' +
+          'Re-check every supplied FAQ passage and Notice. Evidence labelled EXACT FAQ REQUESTED BY REVIEWER came from a URL pasted into the dispute or approval note and must be addressed explicitly in review_note when it does not support the correction. The Agent/Admin correction is not authoritative unless the fresh evidence directly supports it. ' +
           'Never produce a correction that merely repeats the material claim being disputed. Never collapse "each EA must use a distinct strategy" into "only one EA or one strategy is allowed" unless the evidence explicitly says that. Preserve account, phase, EA, strategy, instrument, and copy-trading distinctions exactly. ' +
           'A relevant newer Notice overrides an older FAQ only when it applies to the same product, Account model, region, date, and condition. Never merge incompatible rules. ' +
           'If the correction is unsupported, conflicts with the evidence, or addresses a different scenario than the original question, do not draft a snippet. Return {"decision":"needs_review","review_note":"specific reason","title":"","trigger_terms":"","instruction":""}. ' +
@@ -194,6 +243,8 @@ export default async function handler(req, res) {
           `Agent dispute reason:\n${dispute.dispute_reason}\n\nAdmin approval reason:\n${dispute.approval_reason}\n\n` +
           `Exact passage annotations:\n${annotationContext || 'None'}\n\n` +
           `Currently active correction, if any:\n${linkedSnippet?.instruction || 'None'}\n\n` +
+          `Exact FAQ links requested by reviewer:\n${explicitFaqReferences.length ? explicitFaqReferences.map((item) => item.url).join('\n') : 'None'}\n` +
+          `Exact FAQ links loaded from saved knowledge:\n${explicitlyReferencedFaqs.length ? [...new Set(explicitlyReferencedFaqs.map((item) => item.article_url || item._requestedUrl))].join('\n') : 'None'}\n\n` +
           `Fresh FAQ and Notice evidence:\n${evidence || 'No matching FAQ or Notice evidence was found. Do not invent a correction.'}`;
         // Correction drafting is a low-volume, high-impact Admin action. Use the
         // stronger verifier directly instead of inheriting the fast answering
@@ -218,7 +269,7 @@ export default async function handler(req, res) {
           sources: [...(Array.isArray(dispute.sources) ? dispute.sources.filter((item) => item?.type !== 'correction_evidence') : []), ...correctionEvidence]
         }).eq('id', id).select().single();
         if (updateError) throw updateError;
-        await logActivity({actorRole:access.role,userEmail:access.email,userName:access.name,sessionId:access.sessionId,eventType:'snippet_regeneration',success:true,metadata:{disputeId:id,snippetId:linkedSnippet?.id || null,faqEvidenceCount:scopedEvidence.length,noticeEvidenceCount:noticeEvidence.length,activeSnippetPreserved:!!linkedSnippet}});
+        await logActivity({actorRole:access.role,userEmail:access.email,userName:access.name,sessionId:access.sessionId,eventType:'snippet_regeneration',success:true,metadata:{disputeId:id,snippetId:linkedSnippet?.id || null,faqEvidenceCount:scopedEvidence.length,explicitFaqReferenceCount:explicitFaqReferences.length,explicitFaqLoadedCount:explicitlyReferencedFaqs.length,noticeEvidenceCount:noticeEvidence.length,activeSnippetPreserved:!!linkedSnippet}});
         return res.status(200).json({ dispute: { ...updated, linked_snippet: linkedSnippet }, draft: true, replacement: !!linkedSnippet });
       }
 
