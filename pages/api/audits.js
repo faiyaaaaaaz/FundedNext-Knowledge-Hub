@@ -145,12 +145,13 @@ function intercomLink(conversation) {
 }
 
 async function insertResult(sb, access, metadata, success = true) {
+  const storedMetadata = { auditOrigin: access.external ? 'developer_api' : 'workspace_ui', ...metadata };
   const data = checked(await sb.from('activity_logs').insert({
     actor_role: access.role, session_id: access.sessionId, user_name: access.name, user_email: access.email,
     auth_provider: access.authProvider, event_type: 'conversation_audit_result', provider: metadata.provider || null,
     model: metadata.model || null, input_tokens: metadata.usage?.prompt_tokens ?? metadata.usage?.promptTokenCount ?? null,
     output_tokens: metadata.usage?.completion_tokens ?? metadata.usage?.candidatesTokenCount ?? null,
-    success, metadata
+    success, metadata: storedMetadata
   }).select('id,created_at,metadata').single(), 'Could not save the audit result');
   return publicResult(data);
 }
@@ -180,16 +181,18 @@ async function createJob(req, access, sb, body) {
     if (!requested.length) throw new Error('Select at least one enabled Intercom agent.');
     agentNames = requested.map((id) => liveAdmins.find((agent) => String(agent.id) === String(id))?.name).filter(Boolean);
     const requestedSize = Math.max(1, Math.min(Number(body.sampleSize) || 10, 100));
-    const candidates = await findConversationCandidates(keys.intercomToken, { agentIds: requested, from: body.from, to: body.to, maxPerAgent: Math.max(150, requestedSize * 4) });
+    const [candidates, previousRows] = await Promise.all([
+      findConversationCandidates(keys.intercomToken, { agentIds: requested, from: body.from, to: body.to, maxPerAgent: Math.max(150, requestedSize * 4) }),
+      checked(await sb.from('activity_logs').select('metadata').eq('event_type', 'conversation_audit_result').eq('success', true).limit(5000), 'Could not check previous audits')
+    ]);
     if (!candidates.length) throw new Error('Intercom returned no conversations for the selected agents and date range.');
-    const previousRows = checked(await sb.from('activity_logs').select('metadata').eq('event_type', 'conversation_audit_result').eq('success', true).limit(5000), 'Could not check previous audits');
     const previouslyAudited = new Set((previousRows || []).map((row) => {
       const conversationId = String(row.metadata?.conversationId || ''); const agentId = String(row.metadata?.agentId || '');
       return conversationId && agentId ? `${conversationId}:${agentId}` : conversationId;
     }).filter(Boolean));
     const available = candidates.filter((item) => !previouslyAudited.has(`${item.id}:${item.agentId}`) && !previouslyAudited.has(String(item.id)));
     const shuffled = sampleCandidates(available, available.length, seed);
-    const admins = await fetchIntercomAdmins(keys.intercomToken);
+    const admins = liveAdmins;
     const eligible = []; const comparisonPoolSize = Math.min(shuffled.length, Math.max(requestedSize * 4, 40));
     for (let offset = 0; offset < comparisonPoolSize; offset += 8) {
       const slice = shuffled.slice(offset, offset + 8);
@@ -210,7 +213,7 @@ async function createJob(req, access, sb, body) {
   const metadata = {
     status: 'queued', mode, stage: 'Ready to fetch conversations', total: queue.length, processed: 0, completed: 0,
     skipped: 0, failed: 0, evaluations: 0, queue, filters, directIds, seed, pauseRequested: false, cancelRequested: false,
-    rubricVersion: AUDIT_RUBRIC_VERSION, thresholds: AUDIT_THRESHOLDS, agentNames, updatedAt: new Date().toISOString()
+    rubricVersion: AUDIT_RUBRIC_VERSION, thresholds: AUDIT_THRESHOLDS, agentNames, auditOrigin: access.external ? 'developer_api' : 'workspace_ui', updatedAt: new Date().toISOString()
   };
   const id = await logActivity({ actorRole: access.role, sessionId: access.sessionId, userName: access.name, userEmail: access.email, authProvider: access.authProvider, eventType: 'conversation_audit_job', success: true, metadata }, { sb });
   if (!id) throw new Error('Could not create the audit job.');
