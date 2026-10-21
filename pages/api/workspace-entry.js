@@ -3,15 +3,14 @@ import { authenticateRequest, logActivity, supabaseAdmin } from '../../lib/serve
 // Updating this release object as part of a deployment automatically shows the
 // real release notes once to every user, including Admins.
 const CURRENT_RELEASE = {
-  version: '2026.10.audit-permissions-disputes-v7',
+  version: '2026.10.audit-evidence-activity-v8',
   title: 'What’s new',
   changes: [
-    'Agents with My Audits access can now review only results matched to their own Intercom email, while leads retain audit and testing controls.',
-    'Agents and leads can dispute an audit; approved decisions become audit-only guidance and never affect customer chatbot answers.',
-    'Audit history now shows color-coded category and final scores, and live transcript images can be opened from the result modal.',
-    'Balanced workflow assignment is no longer mistaken for self-assignment, while confirmed self-assignment still sets Efficiency to 0/10.',
-    'Investigation-status mistakes and review opportunities now follow the clarified Process & Judgment rules.',
-    'Private answer transport fields are removed before an answer reaches the conversation.'
+    'Dispute correction drafts now check an explicitly linked FAQ first, report whether it loaded, and let reviewers return a mistaken approval to Pending.',
+    'Double Up questions now reserve the canonical Add-On FAQ and retain rules that explicitly apply to all CFD accounts.',
+    'Manual audits appear in Activity again, while developer-key and legacy Master Admin audit traffic stays hidden by default.',
+    'Starting an audit now opens a staged preparation view with live elapsed time and clear selection remarks.',
+    'Audit batch creation reuses the Intercom agent directory and checks previous results alongside candidate discovery to reduce startup time.'
   ]
 };
 
