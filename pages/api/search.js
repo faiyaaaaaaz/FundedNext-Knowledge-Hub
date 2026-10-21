@@ -253,7 +253,8 @@ function ruleIntent(text) {
     minimumTrading: asksMinimumTradingRequirement(value),
     expertAdvisor: /\b(?:eas?|expert advisors?|automated trading(?: systems?)?|algorithmic trading|trading bots?)\b/.test(value),
     hedging: precision.hedging || precision.prohibitedOverview,
-    copyTrading: /\bcopy\s+trad(?:e|es|ing)\b/.test(value) || precision.friendCoordination
+    copyTrading: /\bcopy\s+trad(?:e|es|ing)\b/.test(value) || precision.friendCoordination,
+    doubleUp: /\bdouble\s*up\b|\b40\s*%\s*(?:add[ -]?on|extra|fee)\b/.test(value)
   };
 }
 
@@ -292,6 +293,10 @@ function directIntentScore(item, intent) {
     if (/\bcopy trading\b/.test(title)) score += 62;
     else if (explicitDifferentOwnerCopyRule(content)) score += 48;
   }
+  if (intent.doubleUp) {
+    if (/\b(?:double\s*up|add[ -]?on)\b/.test(title)) score += 62;
+    else if (/\bdouble\s*up\b/.test(content) && /\bsecond (?:challenge )?account\b|\bpass(?:ing|es)? the challenge\b/.test(content)) score += 48;
+  }
   return score;
 }
 
@@ -304,6 +309,7 @@ function hasDirectRuleEvidence(items, intent) {
     if (intent.expertAdvisor && directlyStatesExpertAdvisorRule(item)) return true;
     if (intent.hedging && explicitHedgingRule(`${item?.article_title || ''}\n${item?.content || ''}`)) return true;
     if (intent.copyTrading && explicitDifferentOwnerCopyRule(`${item?.article_title || ''}\n${item?.content || ''}`)) return true;
+    if (intent.doubleUp && /\bdouble\s*up\b/i.test(text) && /\bsecond (?:challenge )?account\b|\bpass(?:ing|es)? the challenge\b/i.test(text)) return true;
     return false;
   });
 }
@@ -763,6 +769,9 @@ export default async function handler(req, res) {
     if (requestedRuleIntent.copyTrading) {
       anchorQueries.push(scopedEnglishAnchor('article_title.ilike.%restricted%prohibited%,article_title.ilike.%copy trading%,content.ilike.%copy trading%,content.ilike.%friends%', 80));
     }
+    if (requestedRuleIntent.doubleUp) {
+      anchorQueries.push(scopedEnglishAnchor('article_title.ilike.%add-on%,article_title.ilike.%double up%,content.ilike.%Double Up Add-On%,content.ilike.%second Challenge Account%', 80));
+    }
     if (selectedModel) {
       const modelNeedle = normalizedEvidenceText(selectedModel.name).replace(/[^a-z0-9 -]/gi, ' ').replace(/\s+/g, ' ').trim();
       if (modelNeedle) anchorQueries.push(scopedEnglishAnchor(`article_title.ilike.%${modelNeedle}%,content.ilike.%${modelNeedle}%`));
@@ -926,7 +935,8 @@ export default async function handler(req, res) {
         const namedInSelectedProduct = mentioned.filter((model) => selectedProduct === 'both' || model.product === selectedProduct);
         const specificallyAssigned = override?.model && override.model !== 'all';
         const comparisonEvidence = allModelRuleOverview && namedInSelectedProduct.length >= 2;
-        if (!comparisonModels.length && !comparisonEvidence && (specificallyAssigned || namedInSelectedProduct.length)) {
+        const explicitlyProductWide = /\b(?:applicable|available)\s+(?:to|for|on)\s+all accounts\b|\ball account models\b/i.test(blob);
+        if (!comparisonModels.length && !comparisonEvidence && !explicitlyProductWide && (specificallyAssigned || namedInSelectedProduct.length)) {
           const named = specificallyAssigned ? override.model : namedInSelectedProduct.map((model) => model.slug).join(', ');
           rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: `Model-specific FAQ excluded until the customer selects or names an Account model (${named})`, similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
           return false;
