@@ -28,9 +28,11 @@ const checks = [
   [activityApi.includes("'conversation_audit_dispute','conversation_audit_correction'"), 'audit disputes and approved audit guidance stay in the audit-only activity filter'],
   [activityApi.indexOf('const requests =') < activityApi.indexOf('const rows ='), 'activity categories are filtered before the final row cap'],
   [adminPage.includes('Show other developer/API activity'), 'admin exposes the generic API toggle'],
-  [adminPage.includes('Show audit job/result records'), 'admin exposes the separate audit-record toggle'],
+  [adminPage.includes('Show developer/API audit records'), 'admin exposes the separate developer-audit toggle'],
+  [activityApi.includes("meta.auditOrigin === 'developer_api'") && activityApi.includes('master-admin@workspace.local'), 'activity filtering distinguishes developer audits from manual workspace audits'],
+  [auditApi.includes("auditOrigin: access.external ? 'developer_api' : 'workspace_ui'"), 'new audit records store their origin explicitly'],
   [adminPage.includes('setActivityIncludeApiAudits(false)'), 'clearing filters hides API audit records again'],
-  [releaseEntry.includes("version: '2026.10.audit-permissions-disputes-v7'"), 'release notes identify the audit permission and dispute release']
+  [releaseEntry.includes("version: '2026.10.audit-evidence-activity-v8'"), 'release notes identify the audit evidence and activity release']
 ];
 
 for (const [condition, message] of checks) assert.ok(condition, message);
