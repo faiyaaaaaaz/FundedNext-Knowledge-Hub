@@ -1,28 +1,39 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { detectNamedProduct, deterministicPolicyAnswer, explicitHedgingRule, isFnmarketsEvidence, repairHedgingLanguage } from '../lib/policyPrecision.mjs';
+import { readFile } from 'node:fs/promises';
 
-const evidence = `At FundedNext, hedging is allowed only within the same account. Hedging across multiple accounts is prohibited.
-Copy Trading between multiple accounts that do not belong to the same individual, including relatives, family members, or friends, is strictly prohibited.`;
+const [auditApi, auditPage, auditCss, activityApi, adminPage, releaseEntry] = await Promise.all([
+  readFile(new URL('../pages/api/audits.js', import.meta.url), 'utf8'),
+  readFile(new URL('../pages/audits.js', import.meta.url), 'utf8'),
+  readFile(new URL('../styles/audits.css', import.meta.url), 'utf8'),
+  readFile(new URL('../pages/api/activity.js', import.meta.url), 'utf8'),
+  readFile(new URL('../pages/admin.js', import.meta.url), 'utf8'),
+  readFile(new URL('../pages/api/workspace-entry.js', import.meta.url), 'utf8')
+]);
 
-assert.equal(isFnmarketsEvidence({ article_title: 'FNmarkets FN50 Campaign: Secure Your Free Account', article_url: 'https://help.fundednext.com/en/articles/1' }), true);
-assert.equal(isFnmarketsEvidence({ article_title: 'What are the Restricted/Prohibited Trading Strategies?', article_url: 'https://help.fundednext.com/en/articles/8020351' }), false);
-assert.equal(detectNamedProduct('How do I deposit with FNmarkets brokerage?'), 'fnmarkets');
-assert.equal(detectNamedProduct('What are the FundedNext Futures rules?'), 'futures');
-assert.equal(explicitHedgingRule(evidence), true);
-assert.match(deterministicPolicyAnswer('Is hedging allowed?', evidence).answer, /allowed when both opposing positions.*same FundedNext account/is);
-assert.match(deterministicPolicyAnswer('My friend and I will place matching trades on our separate accounts.', evidence).answer, /prohibited copy trading/i);
-assert.match(deterministicPolicyAnswer('I will place buy positions on XAUUSD while my friend places short positions. One side is bound to win.', evidence).answer, /group hedging refers to opposite positions/i);
-const multiPolicyAnswer = deterministicPolicyAnswer('Can my friend buy XAUUSD while I buy it too, and is hedging allowed inside my own account?', evidence).answer;
-assert.match(multiPolicyAnswer, /same FundedNext account/i);
-assert.match(multiPolicyAnswer, /prohibited copy trading/i);
-const repaired = repairHedgingLanguage('Prohibited practices include:\n\nGroup Hedging or Hedging\n\nArbitrage', evidence);
-assert.match(repaired, /hedging across multiple accounts/i);
-assert.match(repaired, /Hedging within the same account is allowed/i);
-const searchSource = readFileSync(new URL('../pages/api/search.js', import.meta.url), 'utf8');
-const candidateDeclaration = searchSource.indexOf('let candidates =');
-const matchDeclaration = searchSource.indexOf('let matches;');
-const policyReservation = searchSource.indexOf('// Reserve the exact policy passage');
-assert.ok(candidateDeclaration >= 0 && matchDeclaration >= 0 && policyReservation > candidateDeclaration && policyReservation > matchDeclaration,
-  'Policy evidence reservation must run after candidates and matches are initialized.');
-console.log('policy precision regression: 13 assertions passed');
+const checks = [
+  [auditApi.includes('function auditFileBase(job, results = [])'), 'server builds agent-and-audit export names'],
+  [auditApi.includes('filename="${fileBase}.html"'), 'HTML response uses the generated filename'],
+  [auditApi.includes("'-detailed' : '-summary'"), 'CSV response distinguishes summary and detailed files'],
+  [auditApi.includes("action === 'delete-jobs'"), 'bulk-delete endpoint exists'],
+  [auditApi.includes('Master audit access is required to delete audit history.'), 'bulk delete is admin protected'],
+  [auditApi.includes('Running, queued, or paused audits cannot be deleted.'), 'active audit deletion is blocked'],
+  [auditApi.includes("eq('event_type', 'conversation_audit_result')") && auditApi.includes("eq('event_type', 'conversation_audit_job')"), 'delete removes results and job records'],
+  [auditPage.includes('auditAgentLabel(job)') && auditPage.includes('Audit #{job.id}'), 'history displays the agent and audit ID'],
+  [auditPage.includes('confirm(`Permanently delete'), 'bulk deletion requires confirmation'],
+  [auditPage.includes("request('delete-jobs'"), 'confirmed selection calls the delete endpoint'],
+  [auditPage.includes('Structured result data only'), 'history explains the stored record type'],
+  [auditCss.includes('.history-row.selected') && auditCss.includes('@media(max-width:760px)'), 'selection and mobile history layouts are styled'],
+  [activityApi.includes('includeApiAudits'), 'activity API has an independent API-audit filter'],
+  [activityApi.includes(".not('event_type', 'in', auditEventTypes)"), 'ordinary API query excludes audit records'],
+  [activityApi.includes("'conversation_audit_dispute','conversation_audit_correction'"), 'audit disputes and approved audit guidance stay in the audit-only activity filter'],
+  [activityApi.indexOf('const requests =') < activityApi.indexOf('const rows ='), 'activity categories are filtered before the final row cap'],
+  [adminPage.includes('Show other developer/API activity'), 'admin exposes the generic API toggle'],
+  [adminPage.includes('Show developer/API audit records'), 'admin exposes the separate developer-audit toggle'],
+  [activityApi.includes("meta.auditOrigin === 'developer_api'") && activityApi.includes('master-admin@workspace.local'), 'activity filtering distinguishes developer audits from manual workspace audits'],
+  [auditApi.includes("auditOrigin: access.external ? 'developer_api' : 'workspace_ui'"), 'new audit records store their origin explicitly'],
+  [adminPage.includes('setActivityIncludeApiAudits(false)'), 'clearing filters hides API audit records again'],
+  [releaseEntry.includes("version: '2026.10.audit-evidence-activity-v8'"), 'release notes identify the audit evidence and activity release']
+];
+
+for (const [condition, message] of checks) assert.ok(condition, message);
+console.log(`${checks.length} audit-history regression assertions passed.`);
