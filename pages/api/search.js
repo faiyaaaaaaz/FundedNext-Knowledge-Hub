@@ -10,6 +10,10 @@ import { retrieveNotices, noticesAccess } from '../../lib/notices';
 import { shouldUseLlmClarifier } from '../../lib/query-planning.mjs';
 import { authenticateExternalApiKey } from '../../lib/externalAccess';
 import {
+  buildEmbeddingPlan, evidenceBudgetForTopics, focusedEvidenceExcerpt,
+  asksForPrivateAccountState, repairPrivateAccountStateClaims
+} from '../../lib/evidenceReliability.mjs';
+import {
   PRODUCT_SCOPES, detectNamedProduct, deterministicPolicyAnswer,
   explicitDifferentOwnerCopyRule, explicitHedgingRule, isFnmarketsEvidence,
   policyPrecisionIntent, repairHedgingLanguage
@@ -42,6 +46,7 @@ const CORE_GUARDRAILS =
   '- If the user says monthly loss but evidence describes maximum or overall loss, explain the terminology distinction using that evidence and ask whether they mean maximum overall loss. Do not invent a monthly limit or silently equate monthly with maximum.\n' +
   '- Name the specific unresolved question when requesting clarification; never use a standalone vague sentence such as This specific detail needs to be confirmed.\n' +
   '- Never guess or generalize with typically, generally, usually, or likely.\n' +
+  '- Public FAQ, Notice, and correction evidence can explain policy but cannot prove a customer\'s live account status, warning outcome, compliance, eligibility, or whether action is required. State that boundary and direct the customer to the warning instructions or Support for an account-record review.\n' +
   '- Use plain text only. Do not use Markdown, bold text, italics, headings, asterisks, underscores, or decorative symbols.\n' +
   '- Keep paragraphs short and separated by one blank line. Use simple numbered steps only when a sequence is genuinely needed.\n' +
   '- For a multi-part question, answer every part supported by direct evidence and say only that the specific unsupported part needs checking.\n' +
@@ -655,10 +660,13 @@ export default async function handler(req, res) {
     const accountDependent = !selectedModel && questionModels.length === 0 &&
       (/\b(?:daily loss|maximum loss|mll|drawdown|profit target|minimum trading days?|consistency rule|trading cycle|first performance reward|first payout|reward cycle|reset|merge|scal(?:e|ing)|scale[ -]?up|grow(?:ing)? (?:the |my |an? )?account|news trading|ea trading|expert advisor|risk limit)\b/i.test(probe) || modelSensitiveTradePermission);
     const asksAcrossModels = /\b(all|each|every|compare|comparison|different models?|by model)\b/i.test(question);
+    const asksAcrossProducts = selectedProduct === 'both' &&
+      /\b(?:cfd|mt4|mt5|metatrader|stellar)\b/i.test(question) &&
+      /\b(?:futures|tradovate|ninjatrader)\b/i.test(question);
     // The Account choice determines the answer even when the helper has split
     // a customer message into several parts. Previously that split suppressed
     // clarification and allowed one model's rule to answer an All-model query.
-    if (accountDependent && !asksAcrossModels && !req.body?.clarification) {
+    if (accountDependent && !asksAcrossModels && !asksAcrossProducts && !req.body?.clarification) {
       return res.status(200).json({
         needsClarification: true,
         originalQuestion: question,
@@ -807,17 +815,15 @@ export default async function handler(req, res) {
     // ---- Multi-vector semantic recall ---------------------------------------
     // Embed the original + clarified question + each interpretation phrase, then
     // union their vector matches so every plausible meaning contributes evidence.
-    const embedTexts = [...new Set([
-      question, clearQuestion,
-      ...(selectedModel ? [
-        `${question} ${selectedModel.name}`,
-        `${selectedModel.name} exceptions restrictions not allowed eligibility policy`
-      ] : []),
-      ...(clarity?.queries || []),
-      ...topicPlan.flatMap((topic) => [topic.question, ...(topic.queries || [])]),
-      ...umbrellaExpansions,
-      ...concepts.expansions
-    ].map((t) => String(t || '').trim()).filter(Boolean))].slice(0, 20);
+    const embedTexts = buildEmbeddingPlan({
+      question,
+      clearQuestion,
+      selectedModelName: selectedModel?.name || '',
+      clarityQueries: clarity?.queries || [],
+      topics: topicPlan,
+      expansions: [...umbrellaExpansions, ...concepts.expansions]
+    });
+    const answerEvidenceLimit = evidenceBudgetForTopics(topicPlan.length);
     const interpretationLog = {
       original: question,
       cleaned: clearQuestion,
@@ -1052,6 +1058,8 @@ export default async function handler(req, res) {
       const candidateById = new Map(candidates.map((item) => [String(item.id), item]));
       const seen = new Set();
       const picked = [];
+      const topicAssignments = new Map();
+      const rankedTopics = [];
       for (const topic of topicPlan) {
         const topicTexts = [topic.question, ...(topic.queries || [])].map((t) => String(t || '').trim());
         const ids = [];
@@ -1061,15 +1069,33 @@ export default async function handler(req, res) {
         }
         const topicCandidates = [...new Set(ids)].map((id) => candidateById.get(id)).filter(Boolean)
           .sort((a, b) => b._rank - a._rank);
-        for (const item of topicCandidates.slice(0, 2)) {
-          if (!seen.has(String(item.id))) { seen.add(String(item.id)); picked.push(item); }
+        rankedTopics.push(topicCandidates);
+        for (const item of topicCandidates) {
+          const key = String(item.id);
+          const assigned = topicAssignments.get(key) || [];
+          if (!assigned.includes(topic.question)) assigned.push(topic.question);
+          topicAssignments.set(key, assigned);
         }
       }
+      // First reserve one distinct passage for every question that has one.
+      // Later questions must never disappear merely because earlier topics
+      // returned several high-similarity chunks.
+      for (const topicCandidates of rankedTopics) {
+        if (picked.length >= answerEvidenceLimit) break;
+        const item = topicCandidates.find((candidate) => !seen.has(String(candidate.id)));
+        if (item) { seen.add(String(item.id)); picked.push(item); }
+      }
+      // Then add a second passage per topic where budget remains.
+      for (const topicCandidates of rankedTopics) {
+        if (picked.length >= answerEvidenceLimit) break;
+        const item = topicCandidates.find((candidate) => !seen.has(String(candidate.id)));
+        if (item) { seen.add(String(item.id)); picked.push(item); }
+      }
       for (const item of candidates) {
-        if (picked.length >= 16) break;
+        if (picked.length >= answerEvidenceLimit) break;
         if (!seen.has(String(item.id))) { seen.add(String(item.id)); picked.push(item); }
       }
-      matches = picked;
+      matches = picked.map((item) => ({ ...item, _topicQuestions: topicAssignments.get(String(item.id)) || [] }));
     } else if (isAmbiguous && candidates.length) {
       const CYCLE_KW = ['cycle', 'first payout', 'eligible', 'eligibility', 'trading days', 'every 14', 'every 5', '14 days', '5 days', 'biweekly', 'bi-weekly', 'profit split', 'how often', 'minimum trading'];
       const PROCESS_KW = ['24 hour', '24-hour', 'brand promise', 'processed', 'processing', 'compensation', 'initiated', 'within 24'];
@@ -1092,9 +1118,9 @@ export default async function handler(req, res) {
       for (const it of candidates) { if (picked.length >= 12) break; if (!seen.has(it.id)) { picked.push(it); seen.add(it.id); } }
       // Present the reserved evidence in overall rank order for a clean prompt.
       const order = new Map(candidates.map((it, i) => [it.id, i]));
-      matches = picked.sort((a, b) => order.get(a.id) - order.get(b.id)).slice(0, 12);
+      matches = picked.sort((a, b) => order.get(a.id) - order.get(b.id)).slice(0, answerEvidenceLimit);
     } else {
-      matches = candidates.slice(0, 8);
+      matches = candidates.slice(0, answerEvidenceLimit);
     }
     // The article title can identify the correct Account scope while a different
     // chunk from that article contains the actual EA permission/prohibition.
@@ -1109,7 +1135,7 @@ export default async function handler(req, res) {
           if (seen.has(key)) return false;
           seen.add(key);
           return true;
-        }).slice(0, 12);
+        }).slice(0, answerEvidenceLimit);
       }
     }
     // Reserve the exact policy passage only after ranked candidates and the
@@ -1128,7 +1154,7 @@ export default async function handler(req, res) {
           if (seen.has(key)) return false;
           seen.add(key);
           return true;
-        }).slice(0, 12);
+        }).slice(0, answerEvidenceLimit);
       }
     }
     // Preserve evidence for each explicitly requested model in a comparison.
@@ -1137,8 +1163,8 @@ export default async function handler(req, res) {
       for (const model of comparisonModels) {
         candidates.filter(item => modelsMentioned(item.article_title || '', scopeCatalog.models).some(m => m.slug === model.slug)).slice(0, 3).forEach(item => balanced.set(String(item.id), item));
       }
-      for (const item of matches) { if (balanced.size >= 16) break; balanced.set(String(item.id), item); }
-      matches = [...balanced.values()];
+      for (const item of matches) { if (balanced.size >= answerEvidenceLimit) break; balanced.set(String(item.id), item); }
+      matches = [...balanced.values()].slice(0, answerEvidenceLimit);
     }
     // Keep at most two passages from one article. Repeated chunks from a single
     // FAQ were crowding exact evidence from other relevant articles and making
@@ -1190,7 +1216,7 @@ export default async function handler(req, res) {
         id: `calc-${i}`, article_id: `calc:${r.calcType}`, article_title: r.title,
         article_url: '', content: r.text, similarity: 1
       }));
-      matches = [...calcEvidence, ...matches].slice(0, 14);
+      matches = [...calcEvidence, ...matches].slice(0, Math.max(14, answerEvidenceLimit));
     }
 
     // ---- NOTICES LAYER (higher authority than FAQ) -------------------------
@@ -1219,7 +1245,7 @@ export default async function handler(req, res) {
             _rank: 40 + (Number(m.similarity || 0) * 8),
             _scoped: m.meta?.model === selectedModel?.slug
           }));
-          matches = [...noticeEvidence, ...matches].slice(0, 16);
+          matches = [...noticeEvidence, ...matches].slice(0, answerEvidenceLimit);
         }
     } catch (e) { /* notices are best-effort */ }
 
@@ -1237,7 +1263,7 @@ export default async function handler(req, res) {
     // A single-part question does not need the same evidence budget as a broad
     // multi-part comparison. This reduces answer latency and token use while
     // preserving the larger budget where it is useful.
-    matches = matches.slice(0, topicPlan.length > 1 ? 10 : 7);
+    matches = matches.slice(0, answerEvidenceLimit);
 
     const supportMaterials = await supportMaterialsPromise;
     if (supportMaterials.error) throw supportMaterials.error;
@@ -1291,7 +1317,7 @@ export default async function handler(req, res) {
           _scoped: true
         }, ...reviewedSources];
       });
-      matches = [...correctionEvidence, ...matches].slice(0, topicPlan.length > 1 ? 10 : 7);
+      matches = [...correctionEvidence, ...matches].slice(0, answerEvidenceLimit);
     }
     // Snippet use belongs on the query record itself. Creating one standalone
     // activity row per snippet flooded the general activity log and obscured
@@ -1302,6 +1328,7 @@ export default async function handler(req, res) {
       instruction: String(snippet.instruction || '').slice(0, 4000), instructionHash: sha256(String(snippet.instruction || '')), matchScore: Number(snippet._score || 0),
       injection: 'included_for_evidence_checked_review', influence: 'not_determinable_from_model_output'
     }));
+    const contextCharsPerSource = Math.max(800, Math.min(1800, Math.floor(18000 / Math.max(1, matches.length))));
     const context = matches.map((item, index) => {
       const nm = noticeMetaByAid[item.article_id];
       const correction = String(item.article_id || '').startsWith('snippet:');
@@ -1314,7 +1341,8 @@ export default async function handler(req, res) {
         ? `REGIONAL SCOPE - applies only to ${(item._regionScope.labels || item._regionScope.regions).join(', ')} clients (Help Center path: ${(item._regionScope.collectionPath || []).join(' > ')}):\n`
         : '';
       const tag = sourceTag + regionalTag;
-      return `[${index + 1}] ${tag}${item.article_title}\nURL: ${item.article_url}\n${String(item.content || '').slice(0, 1800)}`;
+      const excerptQuery = item._topicQuestions?.length ? item._topicQuestions.join(' ') : (clearQuestion || question);
+      return `[${index + 1}] ${tag}${item.article_title}\nURL: ${item.article_url}\n${focusedEvidenceExcerpt(item.content, excerptQuery, contextCharsPerSource)}`;
     }).join('\n\n---\n\n');
     const reviewSnippets = snippets.filter((snippet) => !approvedCorrectionIds.has(String(snippet.id)));
     const snippetText = reviewSnippets.length
@@ -1413,10 +1441,12 @@ export default async function handler(req, res) {
       })[0];
       addRecovery(best);
     }
-    for (const item of matches) { if (recoveryById.size >= 5) break; addRecovery(item); }
+    const recoveryTarget = Math.min(12, Math.max(5, Math.ceil(topicPlan.length / 2)));
+    for (const item of matches) { if (recoveryById.size >= recoveryTarget) break; addRecovery(item); }
     const recoveryMatches = [...recoveryById.values()];
+    const recoveryCharsPerSource = Math.max(900, Math.min(1800, Math.floor(14000 / Math.max(1, recoveryMatches.length))));
     const recoveryContext = recoveryMatches.map((item) =>
-      `[${matches.indexOf(item) + 1}] ${item.article_title}\nURL: ${item.article_url}\n${String(item.content || '').slice(0, 1800)}`
+      `[${matches.indexOf(item) + 1}] ${item.article_title}\nURL: ${item.article_url}\n${focusedEvidenceExcerpt(item.content, item._topicQuestions?.join(' ') || clearQuestion || question, recoveryCharsPerSource)}`
     ).join('\n\n---\n\n');
     const recoveryMessages = [
       { role: 'system', content: system },
@@ -1590,7 +1620,7 @@ export default async function handler(req, res) {
     // multi-part question has evidence. Genuine no-evidence cases are not retried.
     const refusalDraft = cleanAnswer(raw) === SAFE_UNCONFIRMED || (cleanAnswer(raw).length < 300 && /(?:unable|cannot|can't|could not).{0,65}(?:confirm|answer)|allow me some time|please.*time.*verify/i.test(cleanAnswer(raw)));
     const directRuleEvidenceAvailable = hasDirectRuleEvidence(matches, requestedRuleIntent);
-    if (refusalDraft && matches.length && (directRuleEvidenceAvailable || (topicPlan.length > 1 && !allDraftTopicsUnconfirmed))) {
+    if (refusalDraft && matches.length && (directRuleEvidenceAvailable || topicPlan.length > 1)) {
       partialAnswerRetryAttempted = true;
       const retrySystem = system +
         '\n\nREQUIRED PARTIAL-ANSWER RECOVERY: The first draft refused despite relevant evidence. ' +
@@ -1735,12 +1765,18 @@ export default async function handler(req, res) {
     let confidence = Math.min(modelConfidence, evidenceCap);
     let confidenceLabel = confidence >= 85 ? 'High confidence' : confidence >= 65 ? 'Review suggested' : 'Needs verification';
     let answer = cleanAnswer(applyBrandingReplacements(cleanAnswer(raw), brandRules));
+    answer = repairPrivateAccountStateClaims(answer, topicPlan);
     let coverageStatuses = String(coverageLine?.[1] || '').toLowerCase().split(',').map((item) => item.trim().replace(/[ -]+/g, '_')).filter((item) => VALID_COVERAGE.has(item));
     if (coverageStatuses.length !== topicPlan.length) {
       const fallbackStatus = 'not_confirmed';
       coverageStatuses = topicPlan.map(() => fallbackStatus);
     }
     coverageStatuses = reconcileMultiQuestionCoverage(topicPlan, coverageStatuses, answer);
+    // General knowledge can answer the policy portion of a personal-status
+    // question, but it cannot verify the customer's live account record.
+    coverageStatuses = coverageStatuses.map((status, index) =>
+      asksForPrivateAccountState(topicPlan[index]?.question) && status === 'answered' ? 'partial' : status
+    );
     let questionCoverage = topicPlan.map((topic, index) => ({ question: topic.question, status: coverageStatuses[index] }));
     let answeredCount = questionCoverage.filter((item) => item.status === 'answered').length;
     let partialCount = questionCoverage.filter((item) => item.status === 'partial').length;
