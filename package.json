@@ -9,7 +9,9 @@
     "test:policy": "node scripts/policy-precision-regression.mjs",
     "test:audit-feedback": "node scripts/audit-feedback-regression.mjs",
     "test:audit-history": "node scripts/audit-history-regression.mjs",
-    "test:audit-disputes": "node scripts/audit-dispute-regression.mjs"
+    "test:audit-disputes": "node scripts/audit-dispute-regression.mjs",
+    "test:reliability": "node scripts/evidence-reliability-regression.mjs",
+    "test:reliability-performance": "node scripts/evidence-reliability-performance.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
