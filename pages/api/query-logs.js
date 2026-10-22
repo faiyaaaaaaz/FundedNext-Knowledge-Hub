@@ -20,6 +20,15 @@ function baseQuery(filters) {
   if (filters.email) query = query.ilike('user_email', `%${filters.email}%`);
   if (filters.name) query = query.ilike('user_name', `%${filters.name}%`);
   if (filters.provider) query = query.eq('provider', filters.provider);
+  if (filters.model) query = query.ilike('model', `%${filters.model}%`);
+  if (filters.scope) query = query.eq('metadata->>selectedProduct', filters.scope);
+  if (filters.feedback === 'any') query = query.not('metadata->>feedback', 'is', null);
+  if (filters.feedback === 'none') query = query.is('metadata->>feedback', null);
+  if (['helpful', 'great'].includes(filters.feedback)) query = query.eq('metadata->>feedback', filters.feedback);
+  if (filters.search) {
+    const safe = filters.search.replace(/[^\p{L}\p{N}\s@-]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+    if (safe) query = query.or(`metadata->>question.ilike.%${safe}%,metadata->>answer.ilike.%${safe}%,metadata->>questionPreview.ilike.%${safe}%,metadata->>answerPreview.ilike.%${safe}%`);
+  }
   return query;
 }
 
@@ -80,6 +89,19 @@ async function fetchAll(filters, ids = null, review = false) {
     if (!data || data.length < pageSize) break;
   }
   return rows.map(row => mapRow(row, review)).filter((row) => matches(row, filters));
+}
+
+async function fetchPage(filters, page = 1, pageSize = 25) {
+  const safePage = Math.max(1, Math.min(100000, Number(page) || 1));
+  const safePageSize = Math.max(10, Math.min(50, Number(pageSize) || 25));
+  const offset = (safePage - 1) * safePageSize;
+  const { data, error } = await baseQuery(filters).range(offset, offset + safePageSize);
+  if (error) throw error;
+  const rows = (data || []).map((row) => mapRow(row)).filter((row) => matches(row, filters));
+  return {
+    logs: rows.slice(0, safePageSize), page: safePage, pageSize: safePageSize,
+    hasMore: (data || []).length > safePageSize
+  };
 }
 
 function failedOrIncomplete(row) {
@@ -189,7 +211,7 @@ export default async function handler(req, res) {
       res.setHeader('Content-Disposition', 'attachment; filename="fundednext-review.json"');
       return res.status(200).json(report);
     }
-    if (req.method === 'GET') return res.status(200).json({ logs: await fetchAll(filtersFrom(req.query)), capped: false });
+    if (req.method === 'GET') return res.status(200).json(await fetchPage(filtersFrom(req.query), req.query.page, req.query.pageSize));
     if (req.method === 'DELETE') {
       if (req.body?.confirm !== 'PERMANENT_DELETE') return res.status(400).json({ error: 'Permanent deletion was not confirmed.' });
       const ids = req.body?.mode === 'filter'
