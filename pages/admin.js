@@ -12,6 +12,30 @@ const GEMINI_MODELS = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini
 const EMPTY_TERM = { category: 'Account Type', rule_type: 'exact', match_term: '', required_term: '', notes: '', active: true };
 const ACTIVITY_PAGE_SIZE = 12;
 
+async function fetchWithRetry(url, options = {}, attempts = 2) {
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 25000);
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      if (response.status >= 500 && attempt + 1 < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, 450));
+        continue;
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 >= attempts) break;
+      await new Promise((resolve) => setTimeout(resolve, 450));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  if (lastError?.name === 'AbortError') throw new Error('The log request took too long. Narrow the date range and try again.');
+  throw new Error('The log request could not reach the server. Please retry; if it continues, check the Vercel deployment logs.');
+}
+
 function Logo({ className = '' }) {
   return (
     <svg className={`fn-logo ${className}`} viewBox="12 15 41 32" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -142,7 +166,8 @@ function ActivityLogCard({ log, expanded, onToggle }) {
       <span className={`activity-result ${log.success ? 'good' : 'bad'}`}>{log.success ? 'Successful' : 'Failed'}</span>
       <span className="activity-expand">{expanded ? 'Hide details −' : 'View all details +'}</span>
     </button>
-    {expanded && <div className="activity-log-details">
+    {expanded && metadata._compact && <div className="activity-log-details"><div className="empty-admin">Loading full activity details…</div></div>}
+    {expanded && !metadata._compact && <div className="activity-log-details">
       <div className="activity-detail-grid">
         <span><small>Event ID</small><b>{log.id || '—'}</b></span>
         <span><small>Role</small><b>{log.actor_role || '—'}</b></span>
@@ -376,6 +401,7 @@ export default function Admin() {
   const [activityIncludeApi, setActivityIncludeApi] = useState(false);
   const [activityIncludeApiAudits, setActivityIncludeApiAudits] = useState(false);
   const [activityDefaultLoading, setActivityDefaultLoading] = useState(false);
+  const [activityBusy, setActivityBusy] = useState(false);
   const [tourReport, setTourReport] = useState(null);
   const [tourBusy, setTourBusy] = useState(false);
   const [activityPage, setActivityPage] = useState(1);
@@ -384,6 +410,7 @@ export default function Admin() {
   const [queryFilters, setQueryFilters] = useState({ from: '', to: '', name: '', email: '', provider: '', model: '', scope: '', feedback: '', search: '' });
   const [expandedQueryLog, setExpandedQueryLog] = useState(null);
   const [queryLogsBusy, setQueryLogsBusy] = useState(false);
+  const [queryLogPage, setQueryLogPage] = useState(1);
   const [exportingReport, setExportingReport] = useState(false);
   const [selectedQueryLogs, setSelectedQueryLogs] = useState([]);
   const [deletingQueryLogs, setDeletingQueryLogs] = useState(false);
@@ -991,6 +1018,7 @@ export default function Admin() {
     const search = opts.search ?? activitySearch;
     const includeApi = opts.includeApi ?? activityIncludeApi;
     const includeApiAudits = opts.includeApiAudits ?? activityIncludeApiAudits;
+    setActivityBusy(true); setError('');
     try {
       const query = new URLSearchParams();
       if (String(email).trim()) query.set('email', String(email).trim());
@@ -1003,10 +1031,24 @@ export default function Admin() {
       if (search) query.set('search', search);
       if (includeApi) query.set('includeApi', '1');
       if (includeApiAudits) query.set('includeApiAudits', '1');
-      const response = await fetch(`/api/activity?${query}`, { headers: headers() });
+      const response = await fetchWithRetry(`/api/activity?${query}`, { headers: headers() });
       if (handleAuthLoss(response)) return;
       const data = await response.json(); if (!response.ok) throw new Error(data.error);
       setActivity(data); setActivityPage(1);
+    } catch (e) { setError(e.message); }
+    finally { setActivityBusy(false); }
+  }
+
+  async function toggleActivityLog(log) {
+    if (expandedActivityLog === log.id) return setExpandedActivityLog(null);
+    setExpandedActivityLog(log.id);
+    if (!log.metadata?._compact) return;
+    try {
+      const response = await fetchWithRetry(`/api/activity?action=detail&id=${encodeURIComponent(log.id)}`, { headers: headers() });
+      if (handleAuthLoss(response)) return;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not load the activity details.');
+      setActivity((current) => current ? { ...current, logs: current.logs.map((item) => item.id === log.id ? data.log : item) } : current);
     } catch (e) { setError(e.message); }
   }
 
@@ -1097,16 +1139,17 @@ export default function Admin() {
     finally { setExportingReport(false); }
   }
 
-  async function loadQueryLogs(filters = queryFilters) {
+  async function loadQueryLogs(filters = queryFilters, page = 1) {
     setQueryLogsBusy(true); setError('');
     try {
       const query = new URLSearchParams();
       Object.entries(filters).forEach(([key, value]) => String(value || '').trim() && query.set(key, String(value).trim()));
-      const response = await fetch(`/api/query-logs?${query}`, { headers: headers() });
+      query.set('page', String(page)); query.set('pageSize', '25');
+      const response = await fetchWithRetry(`/api/query-logs?${query}`, { headers: headers() });
       if (handleAuthLoss(response)) return;
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not load query and answer logs.');
-      setQueryLogs(data); setExpandedQueryLog(null); setSelectedQueryLogs([]);
+      setQueryLogs(data); setQueryLogPage(data.page || page); setExpandedQueryLog(null); setSelectedQueryLogs([]);
     } catch (e) { setError(e.message); }
     finally { setQueryLogsBusy(false); }
   }
@@ -1348,7 +1391,7 @@ export default function Admin() {
 
         {tab === 'reports' && <div className="settings-stack"><section className="settings-card diagnostic-download-card"><div className="settings-head"><div><h2>Combined admin diagnostics</h2><p>One compact compressed download combines the current Notice knowledge, every query-and-answer evaluation record, and all question-level snippet-use traces.</p></div><button className="btn btn-primary compact-download" disabled={diagnosticsDownloading} onClick={() => downloadGzip('/api/reports', 'fundednext-admin-diagnostics.json.gz', setDiagnosticsDownloading)}>{diagnosticsDownloading ? 'Preparing…' : '⇩ Download combined report'}</button></div><div className="diagnostic-download-grid"><div><b>Query evaluation</b><small>All confidence levels, failures, evidence trails, and approved disputes; high-confidence records stay compact.</small></div><div><b>Notice knowledge</b><small>Current and historical Notice records exactly as stored in the knowledge base.</small></div><div><b>Snippet diagnostics</b><small>Usage totals plus each question, scope, instruction version, and query trace.</small></div></div><p className="field-help">The file is gzip-compressed JSON for efficient diagnostics. It contains workspace data, so store it only in approved internal locations.</p></section></div>}
 
-        {tab === 'activity' && <div className="settings-stack"><section className="settings-card activity-filters"><div className="settings-head"><div><h2>Filter activity</h2><p>Combine categories, exclude noisy entries, then save this view as your default. Dates are interpreted in GMT+6.</p></div><DateRangeFilter from={activityFrom} to={activityTo} onApply={applyDateRange} /></div><div className="query-filter-grid"><label>Person or email<input type="search" value={activityEmail} onChange={(e) => setActivityEmail(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && loadActivity()} placeholder="name@nextventures.io" /></label><label>Search stored details<input type="search" value={activitySearch} onChange={(e) => setActivitySearch(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && loadActivity()} placeholder="Question, model, event…" /></label><label>Include categories<input value={activityTypes} onChange={(e) => setActivityTypes(e.target.value)} placeholder="query,login" /></label><label>Exclude categories<input value={activityExcludeTypes} onChange={(e) => setActivityExcludeTypes(e.target.value)} placeholder="snippet_usage" /></label><label>Roles<select value={activityRoles} onChange={(e) => setActivityRoles(e.target.value)}><option value="">All roles</option><option value="agent">Agents</option><option value="admin">Admins</option></select></label><label>Result<select value={activityStatus} onChange={(e) => setActivityStatus(e.target.value)}><option value="">Successful and failed</option><option value="success">Successful only</option><option value="failed">Failed only</option></select></label><label className="check-row activity-api-toggle"><input type="checkbox" checked={activityIncludeApi} onChange={(e) => setActivityIncludeApi(e.target.checked)} /> Show other developer/API activity</label><label className="check-row activity-api-toggle"><input type="checkbox" checked={activityIncludeApiAudits} onChange={(e) => setActivityIncludeApiAudits(e.target.checked)} /> Show developer/API audit records</label><div className="query-filter-actions"><button className="btn btn-secondary" onClick={clearActivityFilters}>Clear</button><button className="btn btn-primary" onClick={() => loadActivity()}>Apply</button></div></div><div className="row" style={{marginTop:12}}><button className="btn btn-secondary" disabled={activityDefaultLoading} onClick={loadActivityDefault}>{activityDefaultLoading?'Loading…':'Use saved default'}</button><button className="btn btn-secondary" onClick={saveActivityDefault}>Save this as my default</button><button className="btn btn-secondary" onClick={repairActivityAttribution}>Repair recoverable legacy users</button></div><p className="field-help">Developer/API traffic and developer-key audit records are hidden independently by default. Audits started manually in the audit workspace remain visible. The audit checkbox also reveals legacy Master Admin API audit records. Check only the category you need. These exclusions are applied before the 1,000-row database limit, so automated traffic cannot crowd ordinary user activity out of the results. Snippet-use events remain excluded by default.</p></section>{activity && <><div className="activity-kpis">{[['Users', activity.summary.users], ['Queries', activity.summary.queries], ['Question words', activity.summary.questionWords.toLocaleString()], ['Input tokens', activity.summary.inputTokens.toLocaleString()], ['Output tokens', activity.summary.outputTokens.toLocaleString()], ['Estimated cost', `$${activity.summary.estimatedCost.toFixed(4)}`]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><section className="settings-card"><div className="settings-head"><div><h2>Activity results</h2><p className="activity-count">{activityLogs.length} event{activityLogs.length === 1 ? '' : 's'} match the current filters.</p></div></div><div className="activity-log-list">{pageLogs.map((log) => <ActivityLogCard key={log.id} log={log} expanded={expandedActivityLog === log.id} onToggle={() => setExpandedActivityLog(expandedActivityLog === log.id ? null : log.id)} />)}{!pageLogs.length && <div className="empty-admin">No activity for this filter.</div>}</div>{totalPages > 1 && <div className="pager"><button disabled={activityPage === 1} onClick={() => setActivityPage((p) => Math.max(1, p - 1))}>‹ Prev</button>{pageNumbers.map((p, i) => p === '…' ? <span key={`e${i}`} className="pager-info">…</span> : <button key={p} className={p === activityPage ? 'current' : ''} onClick={() => setActivityPage(p)}>{p}</button>)}<button disabled={activityPage === totalPages} onClick={() => setActivityPage((p) => Math.min(totalPages, p + 1))}>Next ›</button></div>}</section></>}</div>}
+        {tab === 'activity' && <div className="settings-stack"><section className="settings-card activity-filters"><div className="settings-head"><div><h2>Filter activity</h2><p>Combine categories, exclude noisy entries, then save this view as your default. Dates are interpreted in GMT+6.</p></div><DateRangeFilter from={activityFrom} to={activityTo} onApply={applyDateRange} /></div><div className="query-filter-grid"><label>Person or email<input type="search" value={activityEmail} onChange={(e) => setActivityEmail(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && loadActivity()} placeholder="name@nextventures.io" /></label><label>Search stored details<input type="search" value={activitySearch} onChange={(e) => setActivitySearch(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && loadActivity()} placeholder="Question, model, event…" /></label><label>Include categories<input value={activityTypes} onChange={(e) => setActivityTypes(e.target.value)} placeholder="query,login" /></label><label>Exclude categories<input value={activityExcludeTypes} onChange={(e) => setActivityExcludeTypes(e.target.value)} placeholder="snippet_usage" /></label><label>Roles<select value={activityRoles} onChange={(e) => setActivityRoles(e.target.value)}><option value="">All roles</option><option value="agent">Agents</option><option value="admin">Admins</option></select></label><label>Result<select value={activityStatus} onChange={(e) => setActivityStatus(e.target.value)}><option value="">Successful and failed</option><option value="success">Successful only</option><option value="failed">Failed only</option></select></label><label className="check-row activity-api-toggle"><input type="checkbox" checked={activityIncludeApi} onChange={(e) => setActivityIncludeApi(e.target.checked)} /> Show other developer/API activity</label><label className="check-row activity-api-toggle"><input type="checkbox" checked={activityIncludeApiAudits} onChange={(e) => setActivityIncludeApiAudits(e.target.checked)} /> Show developer/API audit records</label><div className="query-filter-actions"><button className="btn btn-secondary" disabled={activityBusy} onClick={clearActivityFilters}>Clear</button><button className="btn btn-primary" disabled={activityBusy} onClick={() => loadActivity()}>{activityBusy ? 'Loading…' : 'Apply'}</button></div></div><div className="row" style={{marginTop:12}}><button className="btn btn-secondary" disabled={activityDefaultLoading || activityBusy} onClick={loadActivityDefault}>{activityDefaultLoading?'Loading…':'Use saved default'}</button><button className="btn btn-secondary" onClick={saveActivityDefault}>Save this as my default</button><button className="btn btn-secondary" onClick={repairActivityAttribution}>Repair recoverable legacy users</button></div><p className="field-help">Developer/API traffic and developer-key audit records are hidden independently by default. Audits started manually in the audit workspace remain visible. The audit checkbox also reveals legacy Master Admin API audit records. Check only the category you need. Newest matching activity is loaded as a compact list; use a date or person filter for older records. Snippet-use events remain excluded by default.</p></section>{activity && <><div className="activity-kpis">{[['Users', activity.summary.users], ['Queries', activity.summary.queries], ['Question words', activity.summary.questionWords.toLocaleString()], ['Input tokens', activity.summary.inputTokens.toLocaleString()], ['Output tokens', activity.summary.outputTokens.toLocaleString()], ['Estimated cost', `$${activity.summary.estimatedCost.toFixed(4)}`]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><section className="settings-card"><div className="settings-head"><div><h2>Activity results</h2><p className="activity-count">{activityLogs.length} newest event{activityLogs.length === 1 ? '' : 's'} match the current filters.{activity.capped ? ' Narrow the date range to inspect older matches.' : ''}</p></div><button className="btn btn-secondary" disabled={activityBusy} onClick={() => loadActivity()}>{activityBusy ? 'Refreshing…' : 'Refresh'}</button></div><div className="activity-log-list">{pageLogs.map((log) => <ActivityLogCard key={log.id} log={log} expanded={expandedActivityLog === log.id} onToggle={() => toggleActivityLog(log)} />)}{!pageLogs.length && <div className="empty-admin">No activity for this filter.</div>}</div>{totalPages > 1 && <div className="pager"><button disabled={activityPage === 1} onClick={() => setActivityPage((p) => Math.max(1, p - 1))}>‹ Prev</button>{pageNumbers.map((p, i) => p === '…' ? <span key={`e${i}`} className="pager-info">…</span> : <button key={p} className={p === activityPage ? 'current' : ''} onClick={() => setActivityPage(p)}>{p}</button>)}<button disabled={activityPage === totalPages} onClick={() => setActivityPage((p) => Math.min(totalPages, p + 1))}>Next ›</button></div>}</section></>}</div>}
 
         {tab === 'querylogs' && <div className="settings-stack query-log-page">
           <section className="settings-card answer-feedback-panel"><div className="settings-head"><div><h2>Answer feedback received</h2><p>Optional ratings connected to the exact recorded question and answer.</p></div><button className="btn btn-secondary" disabled={queryLogsBusy} onClick={() => loadQueryLogs()}>{queryLogsBusy ? 'Refreshing…' : 'Refresh feedback'}</button></div><div className="answer-feedback-list">{(queryLogs?.logs || []).filter((log) => log.feedback).map((log) => <button type="button" key={`feedback-${log.id}`} className={`answer-feedback-record ${log.feedback}`} onClick={() => openQueryLog(log.id)}><span className="answer-feedback-rating">{log.feedback === 'great' ? '★ Great answer' : '♥ Helpful'}</span><span className="answer-feedback-question"><b>{log.question || 'Question text unavailable'}</b><small>{log.answer || 'Answer text unavailable'}</small></span><span className="answer-feedback-person"><b>{log.userName || log.feedbackBy || 'Unknown agent'}</b><small>{formatDate(log.feedbackAt || log.createdAt)}</small></span><i>View answer →</i></button>)}{!queryLogsBusy && !(queryLogs?.logs || []).some((log) => log.feedback) && <div className="empty-admin">No rated answers match the current filters.</div>}</div></section>
@@ -1366,8 +1409,8 @@ export default function Admin() {
             </div>
           </section>
           <section className="settings-card">
-            <div className="settings-head"><div><h2>Recorded queries and answers</h2><p>{queryLogs?.logs?.length || 0} result{queryLogs?.logs?.length === 1 ? '' : 's'} · newest first</p></div></div>
-            <div className="query-log-bulk"><button className="btn btn-secondary" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={selectReviewCandidates}>Mark priority review items</button><button className="btn btn-secondary" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs((queryLogs?.logs || []).map((log) => log.id))}>Select all filtered</button><button className="btn btn-secondary" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs([])}>Clear selection</button><span>{selectedQueryLogs.length} focus item{selectedQueryLogs.length === 1 ? '' : 's'} · all confidence levels included · compact compressed download</span><button className="btn btn-primary" disabled={exportingReport || deletingQueryLogs} onClick={downloadQueryReport}>{exportingReport ? 'Compressing report…' : 'Download compact report (.json.gz)'}</button><button className="btn query-delete" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => deleteQueryLogs('ids')}>Delete selected permanently</button><button className="btn query-delete" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => deleteQueryLogs('filter')}>Delete all filtered permanently</button></div>
+            <div className="settings-head"><div><h2>Recorded queries and answers</h2><p>{queryLogs?.logs?.length || 0} result{queryLogs?.logs?.length === 1 ? '' : 's'} on page {queryLogPage} · newest first</p></div></div>
+            <div className="query-log-bulk"><button className="btn btn-secondary" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={selectReviewCandidates}>Mark priority review items</button><button className="btn btn-secondary" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs((queryLogs?.logs || []).map((log) => log.id))}>Select this page</button><button className="btn btn-secondary" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => setSelectedQueryLogs([])}>Clear selection</button><span>{selectedQueryLogs.length} focus item{selectedQueryLogs.length === 1 ? '' : 's'} · all confidence levels included · compact compressed download</span><button className="btn btn-primary" disabled={exportingReport || deletingQueryLogs} onClick={downloadQueryReport}>{exportingReport ? 'Compressing report…' : 'Download compact report (.json.gz)'}</button><button className="btn query-delete" disabled={!selectedQueryLogs.length || deletingQueryLogs} onClick={() => deleteQueryLogs('ids')}>Delete selected permanently</button><button className="btn query-delete" disabled={!queryLogs?.logs?.length || deletingQueryLogs} onClick={() => deleteQueryLogs('filter')}>Delete all filtered permanently</button></div>
             <div className="query-log-list">{(queryLogs?.logs || []).map((log) => {
               const expanded = expandedQueryLog === log.id;
               const selected = selectedQueryLogs.includes(log.id);
@@ -1406,6 +1449,7 @@ export default function Admin() {
                 </div>}
               </article>;
             })}{!queryLogsBusy && !(queryLogs?.logs || []).length && <div className="empty-admin tall">No recorded queries match these filters.</div>}</div>
+            {(queryLogPage > 1 || queryLogs?.hasMore) && <div className="pager"><button disabled={queryLogsBusy || queryLogPage === 1} onClick={() => loadQueryLogs(queryFilters, Math.max(1, queryLogPage - 1))}>‹ Newer</button><span className="pager-info">Page {queryLogPage}</span><button disabled={queryLogsBusy || !queryLogs?.hasMore} onClick={() => loadQueryLogs(queryFilters, queryLogPage + 1)}>Older ›</button></div>}
           </section>
         </div>}
 
@@ -1632,3 +1676,4 @@ export default function Admin() {
     </main>
   );
 }
+
