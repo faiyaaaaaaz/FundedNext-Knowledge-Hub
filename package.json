@@ -11,7 +11,8 @@
     "test:audit-history": "node scripts/audit-history-regression.mjs",
     "test:audit-disputes": "node scripts/audit-dispute-regression.mjs",
     "test:reliability": "node scripts/evidence-reliability-regression.mjs",
-    "test:reliability-performance": "node scripts/evidence-reliability-performance.mjs"
+    "test:reliability-performance": "node scripts/evidence-reliability-performance.mjs",
+    "test:admin-logs": "node scripts/admin-log-performance-regression.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
