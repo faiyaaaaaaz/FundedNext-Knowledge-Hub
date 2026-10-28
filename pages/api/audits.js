@@ -88,6 +88,13 @@ function auditTriggerTerms(...values) {
   return [...new Set(values.join(' ').toLowerCase().match(/[a-z0-9][a-z0-9-]{3,}/g) || [])].filter((word) => !stop.has(word)).slice(0, 30).join(', ');
 }
 
+function disputeScoreDirection(reason) {
+  const value = String(reason || '').toLowerCase();
+  if (/more marks? (?:should|must).{0,25}(?:reduc|deduct)|deduct.{0,25}more|score.{0,20}(?:too high|should be lower)/.test(value)) return 'increase_deduction';
+  if (/(?:marks?|points?) (?:should|must) not.{0,20}(?:reduc|deduct)|no deduction|score.{0,20}(?:too low|should be higher)|wrongly deducted/.test(value)) return 'remove_deduction';
+  return 'reassess';
+}
+
 async function loadResults(sb, jobId) {
   const rows = checked(await sb.from('activity_logs').select('id,created_at,metadata').eq('event_type', 'conversation_audit_result').contains('metadata', { jobId: String(jobId) }).order('created_at', { ascending: true }).order('id', { ascending: true }), 'Could not load audit results');
   const disputes = await loadDisputes(sb, (rows || []).map((row) => String(row.id)));
@@ -227,8 +234,9 @@ async function processNext(access, sb, jobId) {
       if (result.status !== 'fulfilled') return;
       const candidate = slice[index]; const turns = conversationTurns(result.value, admins);
       if (!meaningfulAgentIds(turns).includes(String(candidate.agentId))) return;
-      const agentMessageCount = turns.filter((turn) => turn.kind === 'agent' && turn.authorId === String(candidate.agentId) && turn.body).length;
-      selection.eligible.push({ ...candidate, agentMessageCount });
+      const agentReplies = turns.filter((turn) => turn.kind === 'agent' && turn.authorId === String(candidate.agentId) && turn.body);
+      const agentMessageCount = agentReplies.length;
+      selection.eligible.push({ ...candidate, agentMessageCount, agentReplyTimes: agentReplies.map((turn) => turn.at).filter(Number.isFinite) });
     });
     selection.checked = Math.min(selection.available, start + slice.length);
     const exhausted = selection.checked >= selection.available;
@@ -238,7 +246,19 @@ async function processNext(access, sb, jobId) {
       return { job: publicJob(row), done: false };
     }
     selection.eligible.sort((a, b) => b.agentMessageCount - a.agentMessageCount || Number(b.createdAt || 0) - Number(a.createdAt || 0));
-    queue = selection.eligible.slice(0, selection.requested).map((item) => ({ id: item.id, targetAgentId: item.agentId, agentMessageCount: item.agentMessageCount, attempts: 0 }));
+    const replyTimelineByAgent = new Map();
+    const rememberReply = (agentId, at) => {
+      const numeric = Number(at || 0); if (!numeric) return;
+      const key = String(agentId || ''); if (!replyTimelineByAgent.has(key)) replyTimelineByAgent.set(key, new Set());
+      replyTimelineByAgent.get(key).add(numeric);
+    };
+    for (const candidate of selection.candidates) rememberReply(candidate.agentId, candidate.lastAdminReplyAt);
+    for (const candidate of selection.eligible) for (const at of candidate.agentReplyTimes || []) rememberReply(candidate.agentId, at);
+    queue = selection.eligible.slice(0, selection.requested).map((item) => {
+      const firstReplyAt = Math.min(...(item.agentReplyTimes || []).filter(Number.isFinite));
+      const timeline = [...(replyTimelineByAgent.get(String(item.agentId)) || [])].filter((at) => at < firstReplyAt).sort((a, b) => a - b);
+      return { id: item.id, targetAgentId: item.agentId, agentMessageCount: item.agentMessageCount, previousAgentReplyAt: timeline.at(-1) || null, attempts: 0 };
+    });
     if (!queue.length) {
       row = await updateJob(sb, row, { selection, status: 'failed', stage: 'No eligible conversations found', error: 'No conversations with meaningful human-agent participation were found in this selection.', total: 0 });
       return { job: publicJob(row), done: true };
@@ -273,7 +293,7 @@ async function processNext(access, sb, jobId) {
     const produced = []; const level2AgentIds = await getAuditLevel2Config(sb);
     for (const targetId of targetIds) {
       const agent = admins.find((candidate) => candidate.id === targetId) || { id: targetId, name: turns.find((turn) => turn.authorId === targetId)?.authorName || `Agent ${targetId}` };
-      const metrics = deriveMetrics(conversation, turns, targetId, { supportLevel: level2AgentIds.includes(String(targetId)) ? 'level2' : 'standard', thresholds: meta.thresholds });
+      const metrics = deriveMetrics(conversation, turns, targetId, { supportLevel: level2AgentIds.includes(String(targetId)) ? 'level2' : 'standard', thresholds: meta.thresholds, previousAgentReplyAt: item.previousAgentReplyAt });
       row = await updateJob(sb, row, { stage: `Scoring ${agent.name} with evidence`, currentConversationId: item.id });
       const model = await runAuditModel({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgent: { token: redacted.agentTokens[targetId] || '[TARGET_AGENT]', conversationAt: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '' } }, sb);
       const restoredAudit = restoreAuditTokens(model.audit, redacted.tokenReplacements);
@@ -538,7 +558,8 @@ export default async function handler(req, res) {
       const reviewerNote = String(body.reviewerNote || '').trim().slice(0, 4000);
       const correction = String(body.correction || '').trim().slice(0, 6000);
       if (decision === 'approved' && correction.length < 20) throw new Error('Add the corrected audit guidance before approving this dispute.');
-      const metadata = { ...(row.metadata || {}), status: decision, reviewerNote, correction, reviewedAt: new Date().toISOString(), reviewedBy: access.name || access.email || '' };
+      const scoreDirection = disputeScoreDirection(row.metadata?.reason);
+      const metadata = { ...(row.metadata || {}), status: decision, reviewerNote, correction, scoreDirection, reviewedAt: new Date().toISOString(), reviewedBy: access.name || access.email || '' };
       let evidence = [];
       if (decision === 'approved') {
         const resultRow = checked(await sb.from('activity_logs').select('id,metadata').eq('id', String(metadata.resultId || '')).eq('event_type', 'conversation_audit_result').maybeSingle(), 'Could not load the disputed result');
@@ -557,7 +578,12 @@ export default async function handler(req, res) {
       checked(await sb.from('activity_logs').update({ metadata }).eq('id', disputeId), 'Could not save the dispute decision');
       let savedSnippet = null;
       if (decision === 'approved') {
-        const snippetMetadata = { disputeId, resultId: metadata.resultId, conversationId: metadata.conversationId, title: `Audit correction · ${metadata.agentName || metadata.conversationId || metadata.resultId}`, instruction: correction, triggerTerms: auditTriggerTerms(metadata.reason, correction, metadata.agentName), active: true, evidence, evidenceCheckedAt: metadata.evidenceCheckedAt, approvedAt: metadata.reviewedAt };
+        const directionInstruction = scoreDirection === 'increase_deduction'
+          ? 'The approved dispute found that the earlier audit was too lenient. Re-read the complete conversation and apply the relevant matrix at a lower score when the same proven fault appears.'
+          : scoreDirection === 'remove_deduction'
+            ? 'The approved dispute found that the earlier deduction was not justified. Re-read the complete conversation and do not repeat that deduction unless the transcript and evidence prove the fault.'
+            : 'Re-read the complete conversation before applying this guidance; do not judge the isolated disputed sentence without its full context.';
+        const snippetMetadata = { disputeId, resultId: metadata.resultId, conversationId: metadata.conversationId, title: `Audit correction · ${metadata.agentName || metadata.conversationId || metadata.resultId}`, instruction: `${directionInstruction}\n\nApproved guidance: ${correction}`, scoreDirection, triggerTerms: auditTriggerTerms(metadata.reason, correction, metadata.agentName), active: true, evidence, evidenceCheckedAt: metadata.evidenceCheckedAt, approvedAt: metadata.reviewedAt };
         const inserted = checked(await sb.from('activity_logs').insert({ actor_role: access.role, session_id: access.sessionId, user_name: access.name, user_email: access.email, auth_provider: access.authProvider, event_type: 'conversation_audit_correction', success: true, metadata: snippetMetadata }).select('id,created_at,user_name,user_email,metadata').single(), 'Could not save the approved audit snippet');
         savedSnippet = { id: inserted.id, createdAt: inserted.created_at, createdBy: inserted.user_name || inserted.user_email || '', ...inserted.metadata };
       }
