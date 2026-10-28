@@ -2,7 +2,7 @@ import {
   authenticateRequest, getKeys, logActivity, supabaseAdmin
 } from '../../lib/server';
 import {
-  AUDIT_RUBRIC_VERSION, auditConnections, auditCsv, auditHtml,
+  AUDIT_RUBRIC_VERSION, auditConnections, auditCsv, auditHtml, auditInputFingerprint,
   buildAgentWorkloadLedger, canManageAudits, canReviewAuditDisputes, canUseAudits, conversationTurns, deriveMetrics, fetchConversation,
   fetchIntercomAdmins, findConversationCandidates, getAuditAccessConfig, getAuditPermission, getAuditSelfAccessConfig,
   getAuditAgentConfig, getAuditLevel2Config, getAuditModels, getAuditThresholdConfig, meaningfulAgentIds, parseConversationIds,
@@ -97,8 +97,20 @@ function disputeScoreDirection(reason) {
 
 async function loadResults(sb, jobId) {
   const rows = checked(await sb.from('activity_logs').select('id,created_at,metadata').eq('event_type', 'conversation_audit_result').contains('metadata', { jobId: String(jobId) }).order('created_at', { ascending: true }).order('id', { ascending: true }), 'Could not load audit results');
-  const disputes = await loadDisputes(sb, (rows || []).map((row) => String(row.id)));
-  return (rows || []).map((row) => ({ ...publicResult(row), dispute: disputes.get(String(row.id)) || null }));
+  // Historical races may have saved two completed evaluations for the same
+  // conversation/agent. Always expose one canonical result so users never see
+  // contradictory scores. Failed/skipped records remain visible unless a later
+  // completed result exists for the same identity.
+  const canonical = new Map();
+  for (const row of rows || []) {
+    const meta = row.metadata || {};
+    const key = `${meta.conversationId || 'unknown'}:${meta.agentId || 'none'}`;
+    const prior = canonical.get(key);
+    if (!prior || (prior.metadata?.status !== 'completed' && meta.status === 'completed')) canonical.set(key, row);
+  }
+  const uniqueRows = [...canonical.values()];
+  const disputes = await loadDisputes(sb, uniqueRows.map((row) => String(row.id)));
+  return uniqueRows.map((row) => ({ ...publicResult(row), dispute: disputes.get(String(row.id)) || null }));
 }
 
 function resultOwnedBy(result, email, agentIds = []) {
@@ -147,6 +159,22 @@ async function updateJob(sb, row, patch) {
   return data;
 }
 
+async function claimJobIndex(sb, row, index, conversationId) {
+  const expectedUpdatedAt = String(row?.metadata?.updatedAt || '');
+  if (!expectedUpdatedAt) return null;
+  const metadata = {
+    ...(row.metadata || {}), status: 'running', processingIndex: Number(index),
+    processingConversationId: String(conversationId), processingClaim: cryptoRandom(),
+    stage: 'Fetching the complete Intercom conversation', currentConversationId: String(conversationId),
+    error: '', updatedAt: new Date().toISOString()
+  };
+  const result = await sb.from('activity_logs').update({ metadata })
+    .eq('id', row.id).eq('event_type', 'conversation_audit_job')
+    .eq('metadata->>updatedAt', expectedUpdatedAt).select('*').maybeSingle();
+  if (result.error) throw new Error(`Could not claim the next audit conversation: ${result.error.message}`);
+  return result.data || null;
+}
+
 function intercomLink(conversation) {
   return conversation?.links?.conversation_web || conversation?.links?.conversation || conversation?.conversation_web_url ||
     `https://app.intercom.com/a/inbox/_/inbox/search?query=${encodeURIComponent(conversation?.id || '')}`;
@@ -175,7 +203,20 @@ async function prepareWorkloadAnchors(token, queue, admins, level2AgentIds) {
       }
     });
   }
-  return buildAgentWorkloadLedger(records);
+  const ledger = buildAgentWorkloadLedger(records);
+  // The selected queue is only a sample, so the immediately preceding handled
+  // conversation can sit outside it. Candidate discovery preserves that trace;
+  // use it for the first episode when the queue-local ledger has no predecessor.
+  for (const item of queue) {
+    if (!item.previousAgentReplyAt || !item.previousConversationId || !item.targetAgentId) continue;
+    const record = records.find((entry) => entry.conversationId === String(item.id) && entry.agentId === String(item.targetAgentId));
+    const firstCycle = [...(record?.cycles || [])].sort((a, b) => Number(a.replyAt || 0) - Number(b.replyAt || 0))[0];
+    if (!firstCycle?.replyId) continue;
+    const key = `${item.id}:${item.targetAgentId}:${firstCycle.replyId}`;
+    if (!ledger[key] || ledger[key].previousConversationId) continue;
+    ledger[key] = { ...ledger[key], previousReplyAt: Number(item.previousAgentReplyAt), previousConversationId: String(item.previousConversationId), previousConversationLink: item.previousConversationLink || '' };
+  }
+  return ledger;
 }
 
 async function insertResult(sb, access, metadata, success = true) {
@@ -188,6 +229,15 @@ async function insertResult(sb, access, metadata, success = true) {
     success, metadata: storedMetadata
   }).select('id,created_at,metadata').single(), 'Could not save the audit result');
   return publicResult(data);
+}
+
+async function cachedAuditResult(sb, fingerprint) {
+  if (!fingerprint) return null;
+  const data = checked(await sb.from('activity_logs').select('id,created_at,metadata')
+    .eq('event_type', 'conversation_audit_result').eq('success', true)
+    .contains('metadata', { status: 'completed', auditInputFingerprint: fingerprint })
+    .order('created_at', { ascending: false }).limit(1).maybeSingle(), 'Could not check deterministic audit cache');
+  return data ? publicResult(data) : null;
 }
 
 async function createJob(req, access, sb, body) {
@@ -262,7 +312,8 @@ async function processNext(access, sb, jobId) {
       if (!meaningfulAgentIds(turns).includes(String(candidate.agentId))) return;
       const agentReplies = turns.filter((turn) => turn.kind === 'agent' && turn.authorId === String(candidate.agentId) && turn.body);
       const agentMessageCount = agentReplies.length;
-      selection.eligible.push({ ...candidate, agentMessageCount, agentReplyTimes: agentReplies.map((turn) => turn.at).filter(Number.isFinite) });
+      const identity = `${candidate.id}:${candidate.agentId}`;
+      if (!selection.eligible.some((item) => `${item.id}:${item.agentId}` === identity)) selection.eligible.push({ ...candidate, agentMessageCount, agentReplyTimes: agentReplies.map((turn) => turn.at).filter(Number.isFinite) });
     });
     selection.checked = Math.min(selection.available, start + slice.length);
     const exhausted = selection.checked >= selection.available;
@@ -273,18 +324,20 @@ async function processNext(access, sb, jobId) {
     }
     selection.eligible.sort((a, b) => b.agentMessageCount - a.agentMessageCount || Number(b.createdAt || 0) - Number(a.createdAt || 0));
     const replyTimelineByAgent = new Map();
-    const rememberReply = (agentId, at) => {
+    const rememberReply = (agentId, at, conversationId) => {
       const numeric = Number(at || 0); if (!numeric) return;
-      const key = String(agentId || ''); if (!replyTimelineByAgent.has(key)) replyTimelineByAgent.set(key, new Set());
-      replyTimelineByAgent.get(key).add(numeric);
+      const key = String(agentId || ''); if (!replyTimelineByAgent.has(key)) replyTimelineByAgent.set(key, new Map());
+      replyTimelineByAgent.get(key).set(`${numeric}:${conversationId}`, { at: numeric, conversationId: String(conversationId || '') });
     };
-    for (const candidate of selection.candidates) rememberReply(candidate.agentId, candidate.lastAdminReplyAt);
-    for (const candidate of selection.eligible) for (const at of candidate.agentReplyTimes || []) rememberReply(candidate.agentId, at);
+    for (const candidate of selection.candidates) rememberReply(candidate.agentId, candidate.lastAdminReplyAt, candidate.id);
+    for (const candidate of selection.eligible) for (const at of candidate.agentReplyTimes || []) rememberReply(candidate.agentId, at, candidate.id);
     queue = selection.eligible.slice(0, selection.requested).map((item) => {
       const firstReplyAt = Math.min(...(item.agentReplyTimes || []).filter(Number.isFinite));
-      const timeline = [...(replyTimelineByAgent.get(String(item.agentId)) || [])].filter((at) => at < firstReplyAt).sort((a, b) => a - b);
-      return { id: item.id, targetAgentId: item.agentId, agentMessageCount: item.agentMessageCount, previousAgentReplyAt: timeline.at(-1) || null, attempts: 0 };
+      const timeline = [...(replyTimelineByAgent.get(String(item.agentId))?.values() || [])].filter((entry) => entry.at < firstReplyAt && entry.conversationId !== String(item.id)).sort((a, b) => a.at - b.at);
+      const previous = timeline.at(-1) || null;
+      return { id: item.id, targetAgentId: item.agentId, agentMessageCount: item.agentMessageCount, previousAgentReplyAt: previous?.at || null, previousConversationId: previous?.conversationId || null, previousConversationLink: previous?.conversationId ? `https://app.intercom.com/a/inbox/_/inbox/search?query=${encodeURIComponent(previous.conversationId)}` : '', attempts: 0 };
     });
+    queue = [...new Map(queue.map((entry) => [`${entry.id}:${entry.targetAgentId}`, entry])).values()];
     if (!queue.length) {
       row = await updateJob(sb, row, { selection, status: 'failed', stage: 'No eligible conversations found', error: 'No conversations with meaningful human-agent participation were found in this selection.', total: 0 });
       return { job: publicJob(row), done: true };
@@ -298,7 +351,12 @@ async function processNext(access, sb, jobId) {
     return { job: publicJob(row), done: true };
   }
   const item = queue[index];
-  row = await updateJob(sb, row, { status: 'running', stage: 'Fetching the complete Intercom conversation', currentConversationId: item.id, error: '' });
+  const claimed = await claimJobIndex(sb, row, index, item.id);
+  if (!claimed) {
+    const latest = await loadJob(sb, jobId);
+    return { job: publicJob(latest), done: false, retryAfterMs: 1200, retrying: true, claimBusy: true };
+  }
+  row = claimed; meta = row.metadata || meta;
   const keys = await getKeys();
   try {
     const admins = await fetchIntercomAdmins(keys.intercomToken);
@@ -316,7 +374,7 @@ async function processNext(access, sb, jobId) {
     if (!targetIds.length) {
       const reason = meaningful.length ? 'The selected agent did not provide a meaningful support response.' : 'No human agent provided a meaningful support response.';
       await insertResult(sb, access, { jobId: String(jobId), status: 'skipped', conversationId: String(item.id), conversationDate: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '', skipReason: reason, intercomLink: intercomLink(conversation), rubricVersion: AUDIT_RUBRIC_VERSION });
-      row = await updateJob(sb, row, { processed: index + 1, skipped: Number(meta.skipped || 0) + 1, stage: 'Excluded a bot-only or non-participating conversation', currentConversationId: null });
+      row = await updateJob(sb, row, { processed: index + 1, skipped: Number(meta.skipped || 0) + 1, stage: 'Excluded a bot-only or non-participating conversation', currentConversationId: null, processingIndex: null, processingConversationId: null, processingClaim: null });
       if (index + 1 >= queue.length) row = await updateJob(sb, row, { status: 'completed', stage: 'Audit completed' });
       return { job: publicJob(row), processed: { conversationId: item.id, status: 'skipped', reason } };
     }
@@ -330,15 +388,20 @@ async function processNext(access, sb, jobId) {
       const prefix = `${item.id}:${targetId}:`; const ahtAnchors = {};
       for (const [key, value] of Object.entries(meta.workloadAnchors || {})) if (key.startsWith(prefix)) ahtAnchors[key.slice(prefix.length)] = value;
       const metrics = deriveMetrics(conversation, turns, targetId, { supportLevel: level2AgentIds.includes(String(targetId)) ? 'level2' : 'standard', thresholds: meta.thresholds, ahtAnchors });
+      const auditFingerprint = auditInputFingerprint({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgentId: targetId });
       row = await updateJob(sb, row, { stage: `Scoring ${agent.name} with evidence`, currentConversationId: item.id });
-      const model = await runAuditModel({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgent: { token: redacted.agentTokens[targetId] || '[TARGET_AGENT]', conversationAt: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '' } }, sb);
-      const restoredAudit = restoreAuditTokens(model.audit, redacted.tokenReplacements);
+      const cached = await cachedAuditResult(sb, auditFingerprint);
+      const model = cached ? null : await runAuditModel({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgent: { token: redacted.agentTokens[targetId] || '[TARGET_AGENT]', conversationAt: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '' } }, sb);
+      const restoredAudit = cached?.audit || restoreAuditTokens(model.audit, redacted.tokenReplacements);
       const result = await insertResult(sb, access, {
         jobId: String(jobId), status: 'completed', conversationId: String(item.id), conversationDate: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '',
         agentId: targetId, agentName: agent.name, agentEmail: agent.email || '', intercomLink: intercomLink(conversation), audit: restoredAudit, metrics,
         evidence: knowledge.evidence.map(({ kind, id, title, url, postedAt }) => ({ kind, id, title, url, postedAt })), evidenceRetrievedAt: knowledge.retrievedAt,
-        redactionCount: redacted.redactionCount, rubricVersion: AUDIT_RUBRIC_VERSION, provider: 'gemini', model: model.model,
-        keyName: model.keyName, keyFingerprint: model.keyFingerprint, routeAttempts: model.attempts, usage: model.usage
+        redactionCount: redacted.redactionCount, rubricVersion: AUDIT_RUBRIC_VERSION, auditInputFingerprint: auditFingerprint,
+        reusedDeterministicResult: !!cached, reusedFromResultId: cached?.id || null,
+        provider: cached?.provider || 'gemini', model: cached?.model || model?.model,
+        keyName: cached?.keyName || model?.keyName, keyFingerprint: cached?.keyFingerprint || model?.keyFingerprint,
+        routeAttempts: cached ? [] : model?.attempts, usage: cached ? {} : model?.usage
       });
       produced.push(result);
     }
@@ -349,7 +412,7 @@ async function processNext(access, sb, jobId) {
       processed: nextProcessed, completed: Number(meta.completed || 0) + 1, evaluations: Number(meta.evaluations || 0) + produced.length,
       agentNames: [...new Set([...(latestControl.agentNames || meta.agentNames || []), ...produced.map((result) => result.agentName).filter(Boolean)])],
       stage: controlledStatus === 'cancelled' ? 'Audit cancelled — completed results remain saved' : controlledStatus === 'paused' ? 'Paused safely — progress is saved' : nextProcessed >= queue.length ? 'Audit completed' : 'Saved securely — moving to the next conversation',
-      status: controlledStatus, currentConversationId: null
+      status: controlledStatus, currentConversationId: null, processingIndex: null, processingConversationId: null, processingClaim: null
     });
     // The replacement map was scoped to this request and becomes unreachable here.
     redacted.ephemeralMap.clear();
@@ -379,7 +442,7 @@ async function processNext(access, sb, jobId) {
     const routeSummary = routeAttempts.length ? ` ${routeAttempts.length} provider routes were attempted; details are saved for diagnosis.` : '';
     await insertResult(sb, access, { jobId: String(jobId), status: 'failed', conversationId: String(item.id), error: `${error.message}${routeSummary}`, routeAttempts, rubricVersion: AUDIT_RUBRIC_VERSION }, false);
     const nextProcessed = index + 1;
-    row = await updateJob(sb, row, { queue, processed: nextProcessed, failed: Number(meta.failed || 0) + 1, status: nextProcessed >= queue.length ? 'completed' : 'running', stage: nextProcessed >= queue.length ? 'Audit completed with failures' : 'Failure recorded — continuing safely', error: error.message, currentConversationId: null });
+    row = await updateJob(sb, row, { queue, processed: nextProcessed, failed: Number(meta.failed || 0) + 1, status: nextProcessed >= queue.length ? 'completed' : 'running', stage: nextProcessed >= queue.length ? 'Audit completed with failures' : 'Failure recorded — continuing safely', error: error.message, currentConversationId: null, processingIndex: null, processingConversationId: null, processingClaim: null });
     return { job: publicJob(row), processed: { conversationId: item.id, status: 'failed', error: error.message } };
   }
 }
@@ -425,6 +488,29 @@ export default async function handler(req, res) {
       if (!results.length && permission === 'self') return res.status(403).json({ error: 'This audit does not contain a result assigned to your email.' });
       if (permission === 'self') job = { ...job, total: results.length, processed: results.length, completed: results.filter((item) => item.status === 'completed').length, evaluations: results.length, skipped: 0, failed: 0, currentConversationId: null, filters: {}, agentNames: [...new Set(results.map((item) => item.agentName).filter(Boolean))] };
       return res.json({ job, results });
+    }
+
+    if (req.method === 'GET' && action === 'recent-jobs') {
+      const limit = Math.max(1, Math.min(Number(req.query.limit) || 20, 50));
+      const agent = String(req.query.agent || '').trim();
+      let jobIds = null;
+      if (agent) {
+        const matching = checked(await sb.from('activity_logs').select('metadata')
+          .eq('event_type', 'conversation_audit_result').ilike('metadata->>agentName', `%${agent.replace(/[%_]/g, '')}%`)
+          .order('created_at', { ascending: false }).limit(500), 'Could not locate recent agent audits');
+        jobIds = [...new Set((matching || []).map((row) => String(row.metadata?.jobId || '')).filter(Boolean))];
+        if (!jobIds.length) return res.json({ jobs: [] });
+      }
+      let query = sb.from('activity_logs').select('*').eq('event_type', 'conversation_audit_job').order('created_at', { ascending: false }).limit(limit);
+      if (jobIds) query = query.in('id', jobIds);
+      const rows = checked(await query, 'Could not load recent audit jobs');
+      const jobs = [];
+      for (const row of rows || []) {
+        let results = await loadResults(sb, row.id);
+        if (agent) results = results.filter((result) => String(result.agentName || '').toLowerCase().includes(agent.toLowerCase()));
+        jobs.push({ job: publicJob(row, { agentNames: results.map((result) => result.agentName) }), results });
+      }
+      return res.json({ jobs });
     }
 
     if (req.method === 'GET' && action === 'bootstrap') {
