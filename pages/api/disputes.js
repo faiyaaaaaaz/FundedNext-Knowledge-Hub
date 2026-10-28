@@ -105,7 +105,7 @@ export default async function handler(req, res) {
     }
 
     if (req.method === 'PATCH') {
-      const { id, action, approvalReason } = req.body || {};
+      const { id, action, approvalReason, correction } = req.body || {};
       if (!id) return res.status(400).json({ error: 'Dispute ID is required.' });
       const { data: dispute, error: readError } = await sb.from('disputes').select('*').eq('id', id).single();
       if (readError || !dispute) throw readError || new Error('Dispute not found.');
@@ -113,13 +113,16 @@ export default async function handler(req, res) {
       if (action === 'approve' || action === 'reject') {
         const reason = String(approvalReason || '').trim();
         if (reason.length < 5) return res.status(400).json({ error: 'Please enter your review reason.' });
+        const correctedPolicy = String(correction || '').trim();
+        if (action === 'approve' && correctedPolicy.length < 20) return res.status(400).json({ error: 'State the corrected answer or policy before approving. “The bot should have answered” is not enough to create a reliable snippet.' });
+        const storedReason = action === 'approve' ? `${reason}\n\nApproved correction:\n${correctedPolicy}` : reason;
         const { data, error } = await sb.from('disputes').update({
           status: action === 'approve' ? 'approved' : 'rejected',
-          approval_reason: reason,
+          approval_reason: storedReason,
           reviewed_at: new Date().toISOString()
         }).eq('id', id).select().single();
         if (error) throw error;
-        await logActivity({actorRole:access.role,userEmail:access.email,userName:access.name,sessionId:access.sessionId,eventType:'dispute_review',success:true,metadata:{disputeId:id,status:data.status,reason}});
+        await logActivity({actorRole:access.role,userEmail:access.email,userName:access.name,sessionId:access.sessionId,eventType:'dispute_review',success:true,metadata:{disputeId:id,status:data.status,reason:storedReason}});
         return res.status(200).json({ dispute: data });
       }
 
