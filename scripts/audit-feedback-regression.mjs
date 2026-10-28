@@ -43,6 +43,10 @@ assert.match(auditSource, /balanced\[ _-\]\*assignment/, 'balanced assignment me
 assert.match(auditSource, /inappropriateBotWarningCount/, 'investigation-status warning violations are measured');
 assert.match(auditSource, /Deduct exactly one Process point per listed warning/, 'auto-closing warning penalty is explicit');
 assert.match(auditSource, /Review requests belong to Process & Judgment, not Quality/, 'review request cannot reduce Quality');
+assert.match(auditSource, /level2_inferred_assignment_reply_intervals/, 'Level 2 AHT survives Intercom assignment events that omit the assignee ID');
+assert.match(auditSource, /genericAssignment \|\| \(priorMessage/, 'Level 2 AHT uses a deterministic assignment or preceding-message fallback');
+assert.match(auditSource, /level2: Object\.freeze\(\{ frtSeconds: 30, artSeconds: 90, ahtSeconds: 300 \}\)/, 'Level 2 defaults to a five-minute AHT target');
+assert.match(auditSource, /audit_efficiency_thresholds_v1/, 'efficiency targets are saved configuration instead of code-only constants');
 
 const level1 = (overrides = {}) => ({
   supportLevel: 'standard', frtSeconds: 30, frtHit: true, ahtSeconds: 1200, ahtHit: true,
@@ -66,5 +70,8 @@ const pageSource = readFileSync(new URL('../pages/audits.js', import.meta.url), 
 assert.match(pageSource, /ART breach \$\{index \+ 1\}/);
 assert.match(pageSource, /cycle\.breached/);
 assert.match(pageSource, /Self-assignment violation/);
+assert.match(pageSource, /second: '2-digit'/, 'audit timestamps include seconds');
+assert.match(pageSource, /readableEvent/, 'Intercom event markers are presented as readable timeline entries');
+assert.match(pageSource, /L2 timing anchor/, 'recovered Level 2 AHT timing is visible to leads in the transcript');
 
-console.log('audit feedback regression: 35 assertions passed');
+console.log('audit feedback regression: 42 assertions passed');
