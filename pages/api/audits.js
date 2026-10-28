@@ -2,12 +2,12 @@ import {
   authenticateRequest, getKeys, logActivity, supabaseAdmin
 } from '../../lib/server';
 import {
-  AUDIT_RUBRIC_VERSION, AUDIT_THRESHOLDS, auditConnections, auditCsv, auditHtml,
+  AUDIT_RUBRIC_VERSION, auditConnections, auditCsv, auditHtml,
   canManageAudits, canReviewAuditDisputes, canUseAudits, conversationTurns, deriveMetrics, fetchConversation,
   fetchIntercomAdmins, findConversationCandidates, getAuditAccessConfig, getAuditPermission, getAuditSelfAccessConfig,
-  getAuditAgentConfig, getAuditLevel2Config, getAuditModels, meaningfulAgentIds, parseConversationIds,
+  getAuditAgentConfig, getAuditLevel2Config, getAuditModels, getAuditThresholdConfig, meaningfulAgentIds, parseConversationIds,
   redactConversation, restoreAuditTokens, retrieveAuditEvidence, runAuditModel, sampleCandidates,
-  saveAuditAccessConfig, saveAuditAgentConfig, saveAuditLevel2Config, saveAuditModels, saveAuditSelfAccessConfig
+  saveAuditAccessConfig, saveAuditAgentConfig, saveAuditLevel2Config, saveAuditModels, saveAuditSelfAccessConfig, saveAuditThresholdConfig
 } from '../../lib/audits';
 import {
   authenticateExternalApiKey, createExternalApiKey, hasExternalScope,
@@ -33,7 +33,8 @@ function publicJob(row, enrichment = {}) {
     pauseRequested: !!meta.pauseRequested, cancelRequested: !!meta.cancelRequested,
     filters: meta.filters || {}, seed: meta.seed || '', rubricVersion: meta.rubricVersion || AUDIT_RUBRIC_VERSION,
     updatedAt: meta.updatedAt || row?.created_at, error: meta.error || '', directIds: meta.directIds || [], agentNames,
-    scoreSummary: enrichment.scoreSummary || meta.scoreSummary || null
+    scoreSummary: enrichment.scoreSummary || meta.scoreSummary || null,
+    selection: meta.selection ? { checked: Number(meta.selection.checked || 0), available: Number(meta.selection.available || 0), requested: Number(meta.selection.requested || 0) } : null
   };
 }
 
@@ -168,7 +169,7 @@ async function createJob(req, access, sb, body) {
     if (invalidIds.length) throw new Error(`Check these conversation IDs: ${invalidIds.slice(0, 5).join(', ')}${invalidIds.length > 5 ? '…' : ''}`);
   }
   const seed = String(body.seed || cryptoRandom());
-  let queue = []; let mode = 'sample'; let agentNames = [];
+  let queue = []; let mode = 'sample'; let agentNames = []; let selection = null;
   if (directInput) {
     mode = 'direct'; queue = directIds.map((id) => ({ id, targetAgentId: null, attempts: 0 }));
   } else {
@@ -192,28 +193,15 @@ async function createJob(req, access, sb, body) {
     }).filter(Boolean));
     const available = candidates.filter((item) => !previouslyAudited.has(`${item.id}:${item.agentId}`) && !previouslyAudited.has(String(item.id)));
     const shuffled = sampleCandidates(available, available.length, seed);
-    const admins = liveAdmins;
-    const eligible = []; const comparisonPoolSize = Math.min(shuffled.length, Math.max(requestedSize * 4, 40));
-    for (let offset = 0; offset < comparisonPoolSize; offset += 8) {
-      const slice = shuffled.slice(offset, offset + 8);
-      const fetched = await Promise.allSettled(slice.map((candidate) => fetchConversation(keys.intercomToken, candidate.id)));
-      fetched.forEach((result, index) => {
-        if (result.status !== 'fulfilled') return;
-        const candidate = slice[index]; const turns = conversationTurns(result.value, admins);
-        if (!meaningfulAgentIds(turns).includes(String(candidate.agentId))) return;
-        const agentMessageCount = turns.filter((turn) => turn.kind === 'agent' && turn.authorId === String(candidate.agentId) && turn.body).length;
-        eligible.push({ ...candidate, agentMessageCount });
-      });
-    }
-    if (!eligible.length) throw new Error('No conversations with meaningful human-agent participation were found in this selection.');
-    eligible.sort((a, b) => b.agentMessageCount - a.agentMessageCount || Number(b.createdAt || 0) - Number(a.createdAt || 0));
-    queue = eligible.slice(0, requestedSize).map((item) => ({ id: item.id, targetAgentId: item.agentId, agentMessageCount: item.agentMessageCount, attempts: 0 }));
+    const comparisonPoolSize = Math.min(shuffled.length, Math.max(requestedSize * 4, 40));
+    selection = { candidates: shuffled.slice(0, comparisonPoolSize), checked: 0, available: comparisonPoolSize, requested: requestedSize, eligible: [] };
   }
   const filters = mode === 'direct' ? { conversationIds: directIds } : { agentIds: body.agentIds || [], from: body.from || '', to: body.to || '', sampleSize: Math.max(1, Math.min(Number(body.sampleSize) || 10, 100)), selectionStrategy: 'highest_target_agent_message_count' };
+  const thresholds = await getAuditThresholdConfig(sb);
   const metadata = {
-    status: 'queued', mode, stage: 'Ready to fetch conversations', total: queue.length, processed: 0, completed: 0,
+    status: 'queued', mode, stage: selection ? 'Finding eligible conversations' : 'Ready to fetch conversations', total: selection ? selection.requested : queue.length, processed: 0, completed: 0,
     skipped: 0, failed: 0, evaluations: 0, queue, filters, directIds, seed, pauseRequested: false, cancelRequested: false,
-    rubricVersion: AUDIT_RUBRIC_VERSION, thresholds: AUDIT_THRESHOLDS, agentNames, auditOrigin: access.external ? 'developer_api' : 'workspace_ui', updatedAt: new Date().toISOString()
+    rubricVersion: AUDIT_RUBRIC_VERSION, thresholds, selection, agentNames, auditOrigin: access.external ? 'developer_api' : 'workspace_ui', updatedAt: new Date().toISOString()
   };
   const id = await logActivity({ actorRole: access.role, sessionId: access.sessionId, userName: access.name, userEmail: access.email, authProvider: access.authProvider, eventType: 'conversation_audit_job', success: true, metadata }, { sb });
   if (!id) throw new Error('Could not create the audit job.');
@@ -228,7 +216,36 @@ async function processNext(access, sb, jobId) {
   let row = await loadJob(sb, jobId); let meta = row.metadata || {};
   if (meta.status === 'completed' || meta.status === 'cancelled') return { job: publicJob(row), results: await loadResults(sb, jobId), done: true };
   if (meta.pauseRequested) return { job: publicJob(await updateJob(sb, row, { status: 'paused', stage: 'Paused safely — progress is saved', currentConversationId: null })), done: true, paused: true };
-  const queue = Array.isArray(meta.queue) ? meta.queue : [];
+  let queue = Array.isArray(meta.queue) ? meta.queue : [];
+  if (meta.mode === 'sample' && meta.selection && Number(meta.selection.checked || 0) < Number(meta.selection.available || 0)) {
+    const keys = await getKeys();
+    const selection = { ...meta.selection, candidates: Array.isArray(meta.selection.candidates) ? meta.selection.candidates : [], eligible: Array.isArray(meta.selection.eligible) ? meta.selection.eligible : [] };
+    const start = Number(selection.checked || 0); const slice = selection.candidates.slice(start, start + 8);
+    row = await updateJob(sb, row, { status: 'running', stage: `Checking eligible conversations · ${start}/${selection.available}`, currentConversationId: null, error: '' });
+    const [admins, fetched] = await Promise.all([fetchIntercomAdmins(keys.intercomToken), Promise.allSettled(slice.map((candidate) => fetchConversation(keys.intercomToken, candidate.id)))]);
+    fetched.forEach((result, index) => {
+      if (result.status !== 'fulfilled') return;
+      const candidate = slice[index]; const turns = conversationTurns(result.value, admins);
+      if (!meaningfulAgentIds(turns).includes(String(candidate.agentId))) return;
+      const agentMessageCount = turns.filter((turn) => turn.kind === 'agent' && turn.authorId === String(candidate.agentId) && turn.body).length;
+      selection.eligible.push({ ...candidate, agentMessageCount });
+    });
+    selection.checked = Math.min(selection.available, start + slice.length);
+    const exhausted = selection.checked >= selection.available;
+    const enough = selection.eligible.length >= selection.requested && selection.checked >= Math.min(selection.available, selection.requested * 2);
+    if (!exhausted && !enough) {
+      row = await updateJob(sb, row, { selection, stage: `Finding eligible conversations · checked ${selection.checked} of ${selection.available}` });
+      return { job: publicJob(row), done: false };
+    }
+    selection.eligible.sort((a, b) => b.agentMessageCount - a.agentMessageCount || Number(b.createdAt || 0) - Number(a.createdAt || 0));
+    queue = selection.eligible.slice(0, selection.requested).map((item) => ({ id: item.id, targetAgentId: item.agentId, agentMessageCount: item.agentMessageCount, attempts: 0 }));
+    if (!queue.length) {
+      row = await updateJob(sb, row, { selection, status: 'failed', stage: 'No eligible conversations found', error: 'No conversations with meaningful human-agent participation were found in this selection.', total: 0 });
+      return { job: publicJob(row), done: true };
+    }
+    row = await updateJob(sb, row, { selection, queue, total: queue.length, stage: `Sample ready · ${queue.length} conversations selected` });
+    meta = row.metadata || {}; queue = meta.queue || [];
+  }
   const index = Number(meta.processed || 0);
   if (index >= queue.length) {
     row = await updateJob(sb, row, { status: 'completed', stage: 'Audit completed', currentConversationId: null });
@@ -256,7 +273,7 @@ async function processNext(access, sb, jobId) {
     const produced = []; const level2AgentIds = await getAuditLevel2Config(sb);
     for (const targetId of targetIds) {
       const agent = admins.find((candidate) => candidate.id === targetId) || { id: targetId, name: turns.find((turn) => turn.authorId === targetId)?.authorName || `Agent ${targetId}` };
-      const metrics = deriveMetrics(conversation, turns, targetId, { supportLevel: level2AgentIds.includes(String(targetId)) ? 'level2' : 'standard' });
+      const metrics = deriveMetrics(conversation, turns, targetId, { supportLevel: level2AgentIds.includes(String(targetId)) ? 'level2' : 'standard', thresholds: meta.thresholds });
       row = await updateJob(sb, row, { stage: `Scoring ${agent.name} with evidence`, currentConversationId: item.id });
       const model = await runAuditModel({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgent: { token: redacted.agentTokens[targetId] || '[TARGET_AGENT]', conversationAt: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '' } }, sb);
       const restoredAudit = restoreAuditTokens(model.audit, redacted.tokenReplacements);
@@ -398,7 +415,7 @@ export default async function handler(req, res) {
         access: { allowed: true, permission, canManage: !access.external && canManageAudits(access), canRun: access.external || ['manager','auditor'].includes(permission), canReviewDisputes, email: access.email || '', config: !access.external && canManageAudits(access) ? await getAuditAccessConfig(sb) : undefined, selfConfig: !access.external && canManageAudits(access) ? await getAuditSelfAccessConfig(sb) : undefined },
         agents: permission === 'self' ? [] : admins, enabledAgentIds: permission === 'self' ? [] : enabledAgentIds, level2AgentIds: permission === 'self' ? [] : level2AgentIds, intercomError, models: permission === 'self' ? [] : await getAuditModels(sb),
         connection: { intercomConfigured: !!keys.intercomToken, geminiKeyCount: (keys.geminiKeyPool || []).length, geminiKeyNames: (keys.geminiKeyPool || []).map((item) => item.name) },
-        thresholds: AUDIT_THRESHOLDS, rubricVersion: AUDIT_RUBRIC_VERSION, jobs: publicJobs, auditDisputes: auditAdmin.disputes, auditSnippets: auditAdmin.snippets,
+        thresholds: await getAuditThresholdConfig(sb), rubricVersion: AUDIT_RUBRIC_VERSION, jobs: publicJobs, auditDisputes: auditAdmin.disputes, auditSnippets: auditAdmin.snippets,
         developerKeys: canManageAudits(access) ? await listExternalApiKeys(sb) : undefined,
         developerScopes: canManageAudits(access) ? EXTERNAL_SCOPES : undefined
       });
@@ -490,6 +507,10 @@ export default async function handler(req, res) {
     if (action === 'save-self-access') {
       if (!canManageAudits(access)) return res.status(403).json({ error: 'Admin access is required to change My Audits access.' });
       return res.json({ access: await saveAuditSelfAccessConfig(body.emails, sb) });
+    }
+    if (action === 'save-thresholds') {
+      if (!canManageAudits(access)) return res.status(403).json({ error: 'Only Master Admin or Faiyaz can change efficiency thresholds.' });
+      return res.json({ thresholds: await saveAuditThresholdConfig(body.thresholds, sb) });
     }
     if (action === 'submit-dispute') {
       if (access.external) return res.status(403).json({ error: 'Audit disputes require a signed-in workspace account.' });
