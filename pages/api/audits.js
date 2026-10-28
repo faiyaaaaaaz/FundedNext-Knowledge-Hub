@@ -3,7 +3,7 @@ import {
 } from '../../lib/server';
 import {
   AUDIT_RUBRIC_VERSION, auditConnections, auditCsv, auditHtml,
-  canManageAudits, canReviewAuditDisputes, canUseAudits, conversationTurns, deriveMetrics, fetchConversation,
+  buildAgentWorkloadLedger, canManageAudits, canReviewAuditDisputes, canUseAudits, conversationTurns, deriveMetrics, fetchConversation,
   fetchIntercomAdmins, findConversationCandidates, getAuditAccessConfig, getAuditPermission, getAuditSelfAccessConfig,
   getAuditAgentConfig, getAuditLevel2Config, getAuditModels, getAuditThresholdConfig, meaningfulAgentIds, parseConversationIds,
   redactConversation, restoreAuditTokens, retrieveAuditEvidence, runAuditModel, sampleCandidates,
@@ -152,6 +152,32 @@ function intercomLink(conversation) {
     `https://app.intercom.com/a/inbox/_/inbox/search?query=${encodeURIComponent(conversation?.id || '')}`;
 }
 
+function primaryMeaningfulAgentId(turns, meaningfulIds = []) {
+  const allowed = new Set(meaningfulIds.map(String));
+  return [...turns].reverse().find((turn) => turn.kind === 'agent' && allowed.has(String(turn.authorId || '')) && String(turn.body || '').trim())?.authorId || meaningfulIds.at(-1) || null;
+}
+
+async function prepareWorkloadAnchors(token, queue, admins, level2AgentIds) {
+  const records = [];
+  for (let offset = 0; offset < queue.length; offset += 12) {
+    const slice = queue.slice(offset, offset + 12);
+    const fetched = await Promise.allSettled(slice.map((item) => fetchConversation(token, item.id)));
+    fetched.forEach((entry, index) => {
+      if (entry.status !== 'fulfilled') return;
+      const item = slice[index]; const conversation = entry.value; const turns = conversationTurns(conversation, admins);
+      const meaningful = meaningfulAgentIds(turns);
+      const targetIds = item.targetAgentId
+        ? meaningful.filter((id) => id === String(item.targetAgentId))
+        : [primaryMeaningfulAgentId(turns, meaningful)].filter(Boolean);
+      for (const targetId of targetIds) {
+        const metrics = deriveMetrics(conversation, turns, targetId, { supportLevel: level2AgentIds.includes(String(targetId)) ? 'level2' : 'standard' });
+        records.push({ conversationId: String(item.id), agentId: String(targetId), intercomLink: intercomLink(conversation), cycles: metrics.ahtCycles || [] });
+      }
+    });
+  }
+  return buildAgentWorkloadLedger(records);
+}
+
 async function insertResult(sb, access, metadata, success = true) {
   const storedMetadata = { auditOrigin: access.external ? 'developer_api' : 'workspace_ui', ...metadata };
   const data = checked(await sb.from('activity_logs').insert({
@@ -275,10 +301,18 @@ async function processNext(access, sb, jobId) {
   row = await updateJob(sb, row, { status: 'running', stage: 'Fetching the complete Intercom conversation', currentConversationId: item.id, error: '' });
   const keys = await getKeys();
   try {
-    const [conversation, admins] = await Promise.all([fetchConversation(keys.intercomToken, item.id), fetchIntercomAdmins(keys.intercomToken)]);
+    const admins = await fetchIntercomAdmins(keys.intercomToken);
+    const level2AgentIds = await getAuditLevel2Config(sb);
+    if (!meta.workloadAnchorsPrepared) {
+      row = await updateJob(sb, row, { stage: 'Building the non-overlapping AHT ledger', currentConversationId: null });
+      const workloadAnchors = await prepareWorkloadAnchors(keys.intercomToken, queue, admins, level2AgentIds);
+      row = await updateJob(sb, row, { workloadAnchors, workloadAnchorsPrepared: true, stage: 'AHT ledger ready — fetching the conversation', currentConversationId: item.id });
+      meta = row.metadata || meta;
+    }
+    const conversation = await fetchConversation(keys.intercomToken, item.id);
     const turns = conversationTurns(conversation, admins);
     const meaningful = meaningfulAgentIds(turns);
-    const targetIds = item.targetAgentId ? meaningful.filter((id) => id === String(item.targetAgentId)) : meaningful;
+    const targetIds = item.targetAgentId ? meaningful.filter((id) => id === String(item.targetAgentId)) : [primaryMeaningfulAgentId(turns, meaningful)].filter(Boolean);
     if (!targetIds.length) {
       const reason = meaningful.length ? 'The selected agent did not provide a meaningful support response.' : 'No human agent provided a meaningful support response.';
       await insertResult(sb, access, { jobId: String(jobId), status: 'skipped', conversationId: String(item.id), conversationDate: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '', skipReason: reason, intercomLink: intercomLink(conversation), rubricVersion: AUDIT_RUBRIC_VERSION });
@@ -290,10 +324,12 @@ async function processNext(access, sb, jobId) {
     const redacted = redactConversation(turns, conversation, admins);
     row = await updateJob(sb, row, { stage: 'Matching current FAQs, Notices and approved corrections' });
     const knowledge = await retrieveAuditEvidence(sb, redacted.transcript);
-    const produced = []; const level2AgentIds = await getAuditLevel2Config(sb);
+    const produced = [];
     for (const targetId of targetIds) {
       const agent = admins.find((candidate) => candidate.id === targetId) || { id: targetId, name: turns.find((turn) => turn.authorId === targetId)?.authorName || `Agent ${targetId}` };
-      const metrics = deriveMetrics(conversation, turns, targetId, { supportLevel: level2AgentIds.includes(String(targetId)) ? 'level2' : 'standard', thresholds: meta.thresholds, previousAgentReplyAt: item.previousAgentReplyAt });
+      const prefix = `${item.id}:${targetId}:`; const ahtAnchors = {};
+      for (const [key, value] of Object.entries(meta.workloadAnchors || {})) if (key.startsWith(prefix)) ahtAnchors[key.slice(prefix.length)] = value;
+      const metrics = deriveMetrics(conversation, turns, targetId, { supportLevel: level2AgentIds.includes(String(targetId)) ? 'level2' : 'standard', thresholds: meta.thresholds, ahtAnchors });
       row = await updateJob(sb, row, { stage: `Scoring ${agent.name} with evidence`, currentConversationId: item.id });
       const model = await runAuditModel({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgent: { token: redacted.agentTokens[targetId] || '[TARGET_AGENT]', conversationAt: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '' } }, sb);
       const restoredAudit = restoreAuditTokens(model.audit, redacted.tokenReplacements);
