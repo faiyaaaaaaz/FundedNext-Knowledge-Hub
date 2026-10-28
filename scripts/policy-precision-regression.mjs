@@ -9,7 +9,8 @@ assert.equal(isFnmarketsEvidence({ article_title: 'FNmarkets FN50 Campaign: Secu
 assert.equal(isFnmarketsEvidence({ article_title: 'What are the Restricted/Prohibited Trading Strategies?', article_url: 'https://help.fundednext.com/en/articles/8020351' }), false);
 assert.equal(detectNamedProduct('How do I deposit with FNmarkets brokerage?'), 'fnmarkets');
 assert.equal(detectNamedProduct('What are the FundedNext Futures rules?'), 'futures');
-assert.equal(detectNamedProduct('Can I use FNL:004 Labs with Duplikium?'), 'futures');
+assert.equal(detectNamedProduct('Can I use FNL:004 Labs with Duplikium?'), 'cfd');
+assert.equal(detectNamedProduct('Futures Labs'), 'cfd');
 assert.equal(explicitHedgingRule(evidence), true);
 assert.match(deterministicPolicyAnswer('Is hedging allowed?', evidence).answer, /allowed when both opposing positions.*same FundedNext account/is);
 assert.match(deterministicPolicyAnswer('My friend and I will place matching trades on our separate accounts.', evidence).answer, /prohibited copy trading/i);
