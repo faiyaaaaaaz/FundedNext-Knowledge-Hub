@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { auditReportTranscript, humanEfficiencyComment, scoreEfficiency } from '../lib/auditFeedback.mjs';
+import { auditReportTranscript, buildAgentWorkloadLedger, humanEfficiencyComment, scoreEfficiency } from '../lib/auditFeedback.mjs';
 
 const metrics = {
   supportLevel: 'standard', ahtSeconds: 2193, ahtMessageCount: 3, ahtHit: false, ahtTarget: 1200,
@@ -48,9 +48,21 @@ assert.match(auditSource, /level2_inferred_assignment_reply_intervals/, 'Level 2
 assert.match(auditSource, /genericAssignment \|\| \(priorMessage/, 'Level 2 AHT uses a deterministic assignment or preceding-message fallback');
 assert.match(auditSource, /level2: Object\.freeze\(\{ frtSeconds: 30, artSeconds: 90, ahtSeconds: 300 \}\)/, 'Level 2 defaults to a five-minute AHT target');
 assert.match(auditSource, /audit_efficiency_thresholds_v1/, 'efficiency targets are saved configuration instead of code-only constants');
-assert.match(auditSource, /previous_agent_reply_across_conversations/, 'AHT starts from the immediately preceding agent reply across conversations');
+assert.match(auditSource, /non_overlapping_agent_workload_episode_ledger/, 'AHT uses the non-overlapping workload ledger');
 assert.match(auditSource, /wrapUpSeconds/, 'AHT preserves post-reply time through snooze or manual close');
-assert.match(auditSource, /agent_workload_previous_reply_to_handling_end/, 'saved metrics disclose the workload-based AHT method');
+assert.match(auditSource, /L2 Exceptional Cases/, 'approved Level 2 self-assignment queues are exempt');
+assert.match(auditSource, /note\|internal/, 'internal notes are excluded from client-visible replies');
+assert.match(auditSource, /clarificationFollowUp/, 'a prompt follow-up question does not require investigation status');
+
+const ledger = buildAgentWorkloadLedger([
+  { conversationId: 'A', agentId: 'agent', intercomLink: 'https://example/A', cycles: [{ replyId: 'A1', readyAt: 100, replyAt: 210, endAt: 219 }] },
+  { conversationId: 'B', agentId: 'agent', intercomLink: 'https://example/B', cycles: [{ replyId: 'B1', readyAt: 180, replyAt: 250, endAt: 266 }] },
+  { conversationId: 'A', agentId: 'agent', intercomLink: 'https://example/A', cycles: [{ replyId: 'A2', readyAt: 500, replyAt: 540, endAt: 550 }] }
+]);
+assert.equal(ledger['A:agent:A1'].startAt, 100, 'first work episode starts when it becomes actionable');
+assert.equal(ledger['B:agent:B1'].startAt, 219, 'overlapping work resumes after the preceding handled action');
+assert.equal(ledger['B:agent:B1'].previousConversationId, 'A', 'preceding conversation stays traceable');
+assert.equal(ledger['A:agent:A2'].startAt, 500, 'idle time before a returning client is excluded');
 
 const level1 = (overrides = {}) => ({
   supportLevel: 'standard', frtSeconds: 30, frtHit: true, ahtSeconds: 1200, ahtHit: true,
@@ -79,4 +91,4 @@ assert.match(pageSource, /second: '2-digit'/, 'audit timestamps include seconds'
 assert.match(pageSource, /readableEvent/, 'Intercom event markers are presented as readable timeline entries');
 assert.match(pageSource, /L2 timing anchor/, 'recovered Level 2 AHT timing is visible to leads in the transcript');
 
-console.log('audit feedback regression: 42 assertions passed');
+console.log('audit feedback regression: 49 assertions passed');
