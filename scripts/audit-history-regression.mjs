@@ -31,6 +31,8 @@ const checks = [
   [adminPage.includes('Show developer/API audit records'), 'admin exposes the separate developer-audit toggle'],
   [activityApi.includes("meta.auditOrigin === 'developer_api'") && activityApi.includes('master-admin@workspace.local'), 'activity filtering distinguishes developer audits from manual workspace audits'],
   [auditApi.includes("auditOrigin: access.external ? 'developer_api' : 'workspace_ui'"), 'new audit records store their origin explicitly'],
+  [auditApi.includes("'Finding eligible conversations'") && auditApi.includes('selection.checked'), 'sample preparation is resumable and reports candidate progress'],
+  [auditApi.includes("action === 'save-thresholds'"), 'editable efficiency thresholds have a protected save endpoint'],
   [adminPage.includes('setActivityIncludeApiAudits(false)'), 'clearing filters hides API audit records again'],
   [releaseEntry.includes("version: '2026.10.audit-evidence-activity-v8'"), 'release notes identify the audit evidence and activity release']
 ];
