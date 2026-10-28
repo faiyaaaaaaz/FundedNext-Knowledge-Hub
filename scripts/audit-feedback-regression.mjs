@@ -41,26 +41,31 @@ assert.match(auditSource, /selfAssignmentEventId/);
 assert.match(auditSource, /!turn\.assignmentAutomated/, 'automated or balanced assignment cannot trigger self-assignment');
 assert.match(auditSource, /balanced\[ _-\]\*assignment/, 'balanced assignment metadata is recognized explicitly');
 assert.match(auditSource, /inappropriateBotWarningCount/, 'investigation-status warning violations are measured');
-assert.match(auditSource, /Deduct exactly one Process point per listed warning/, 'auto-closing warning penalty is explicit');
+assert.match(auditSource, /within three minutes/, 'investigation-status timing is explicit');
+assert.match(auditSource, /investigationOffDelays/, 'chat-holding violations are measured');
 assert.match(auditSource, /Review requests belong to Process & Judgment, not Quality/, 'review request cannot reduce Quality');
 assert.match(auditSource, /level2_inferred_assignment_reply_intervals/, 'Level 2 AHT survives Intercom assignment events that omit the assignee ID');
 assert.match(auditSource, /genericAssignment \|\| \(priorMessage/, 'Level 2 AHT uses a deterministic assignment or preceding-message fallback');
 assert.match(auditSource, /level2: Object\.freeze\(\{ frtSeconds: 30, artSeconds: 90, ahtSeconds: 300 \}\)/, 'Level 2 defaults to a five-minute AHT target');
 assert.match(auditSource, /audit_efficiency_thresholds_v1/, 'efficiency targets are saved configuration instead of code-only constants');
+assert.match(auditSource, /previous_agent_reply_across_conversations/, 'AHT starts from the immediately preceding agent reply across conversations');
+assert.match(auditSource, /wrapUpSeconds/, 'AHT preserves post-reply time through snooze or manual close');
+assert.match(auditSource, /agent_workload_previous_reply_to_handling_end/, 'saved metrics disclose the workload-based AHT method');
 
 const level1 = (overrides = {}) => ({
   supportLevel: 'standard', frtSeconds: 30, frtHit: true, ahtSeconds: 1200, ahtHit: true,
   artBreaches: 0, responseTimes: [90], slaStatus: 'hit', ...overrides
 });
-assert.equal(scoreEfficiency(level1()), 8, 'meeting all Level 1 thresholds is the benchmark 8');
-assert.equal(scoreEfficiency(level1({ frtSeconds: 31, frtHit: false })), 2, 'FRT miss alone sets the score to 2');
-assert.equal(scoreEfficiency(level1({ frtSeconds: 31, frtHit: false, artBreaches: 1, responseTimes: [91] })), 0, 'FRT plus ART miss sets the score to 0');
-assert.equal(scoreEfficiency(level1({ frtSeconds: 31, frtHit: false, ahtSeconds: 1201, ahtHit: false })), 0, 'FRT plus AHT miss sets the score to 0');
-assert.equal(scoreEfficiency(level1({ ahtSeconds: 1201, ahtHit: false })), 8, 'AHT miss alone retains the benchmark score when FRT and ART pass');
-assert.equal(scoreEfficiency(level1({ frtSeconds: 29, ahtSeconds: 1199, responseTimes: [89] })), 9, 'beating every target earns more than 8');
+assert.equal(scoreEfficiency(level1()), 9, 'meeting the target boundary maps to Level 1 score 9');
+assert.equal(scoreEfficiency(level1({ frtSeconds: 31, frtHit: false })), 5, 'FRT miss with otherwise controlled handling maps to score 5');
+assert.equal(scoreEfficiency(level1({ frtSeconds: 31, frtHit: false, artBreaches: 1, responseTimes: [91] })), 4, 'FRT plus a badly missed ART maps to score 4');
+assert.equal(scoreEfficiency(level1({ frtSeconds: 31, frtHit: false, artBreaches: 2, responseTimes: [91, 120] })), 2, 'FRT plus multiple ART misses maps to score 2');
+assert.equal(scoreEfficiency(level1({ frtSeconds: 31, frtHit: false, ahtSeconds: 1201, ahtHit: false })), 5, 'minor AHT overage does not create a critical score');
+assert.equal(scoreEfficiency(level1({ ahtSeconds: 1201, ahtHit: false })), 8, 'slight AHT overage maps to score 8');
+assert.equal(scoreEfficiency(level1({ frtSeconds: 29, ahtSeconds: 1199, responseTimes: [89] })), 10, 'all Level 1 targets strictly beaten maps to score 10');
 assert.equal(scoreEfficiency(level1({ frtSeconds: 15, ahtSeconds: 600, responseTimes: [45] })), 10, 'exceptional half-target timing earns 10');
-assert.equal(scoreEfficiency(level1({ artBreaches: 1, responseTimes: [91] })), 6, 'one ART-only miss is a limited deduction');
-assert.equal(scoreEfficiency(level1({ artBreaches: 2, responseTimes: [91, 120] })), 4, 'repeated ART-only misses receive a larger deduction');
+assert.equal(scoreEfficiency(level1({ artBreaches: 1, responseTimes: [45,45,45,45,45,45,45,45,45,91] })), 9, '90% ART maintenance maps to score 9 when AHT is within target');
+assert.equal(scoreEfficiency(level1({ artBreaches: 2, responseTimes: [45,45,45,45,45,45,45,45,91,120] })), 9, '80% ART maintenance remains in the approved score-9 band');
 assert.equal(scoreEfficiency(level1({ selfAssigned: true })), 0, 'self-assignment overrides every timing result and sets Efficiency to 0');
 const selfAssignedFeedback = humanEfficiencyComment(level1({ selfAssigned: true, ahtMessageCount: 2 }));
 assert.match(selfAssignedFeedback, /^The agent assigned this conversation to themselves\./);
