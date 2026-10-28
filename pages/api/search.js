@@ -206,18 +206,19 @@ function reconcileMultiQuestionCoverage(topics, statuses, answer) {
 }
 
 function verifiedSourceGapAnswer(topics) {
-  const labels = (topics || []).map((topic) => {
-    const raw = conciseQuestionLabel(topic.question || topic)
-      .replace(/\s+User clarification:\s*/i, ' — ')
-      .trim();
-    if (!raw) return '';
-    const label = raw.charAt(0).toUpperCase() + raw.slice(1);
-    return /[.?!]$/.test(label) ? label : `${label}.`;
-  }).filter(Boolean);
-  if (labels.length <= 1) {
-    return `I could not confirm this specific detail from the current verified sources: ${labels[0] || 'the requested information'}`;
-  }
-  return `I could not confirm these specific details from the current verified sources:\n\n${labels.map((label, index) => `${index + 1}. ${label}`).join('\n')}`;
+  const count = Math.max(1, (topics || []).length);
+  return count === 1
+    ? 'I could not verify this detail from the currently selected FAQ and Notice evidence. Check the Product and Account model selectors, or submit a dispute so the missing knowledge can be reviewed.'
+    : `I could not verify ${count} parts of this request from the currently selected FAQ and Notice evidence. Check the Product and Account model selectors, or submit a dispute so the missing knowledge can be reviewed.`;
+}
+
+function answerEchoesQuestion(answer, question) {
+  const words = (value) => String(value || '').toLowerCase().replace(/user clarification:[\s\S]*$/i, '').match(/[a-z0-9]{3,}/g) || [];
+  const questionWords = words(question); const answerWords = words(answer);
+  if (questionWords.length < 12 || answerWords.length < 8) return false;
+  const questionSet = new Set(questionWords); const overlap = answerWords.filter((word) => questionSet.has(word)).length / answerWords.length;
+  const novel = answerWords.filter((word) => !questionSet.has(word)).length;
+  return overlap >= .82 && novel < Math.max(8, Math.floor(answerWords.length * .15));
 }
 
 function asksMinimumTradingRequirement(text) {
@@ -683,10 +684,11 @@ export default async function handler(req, res) {
     // Question marks provide a stable, non-AI way to preserve every part of a
     // pasted customer message. Prefer these explicit parts over an occasionally
     // incomplete helper-model split.
-    const statedParts = explicitQuestionParts(question);
+    const originalForTopics = String(question).replace(/\n+User clarification:[\s\S]*$/i, '').trim();
+    const statedParts = explicitQuestionParts(originalForTopics);
     const topicPlan = statedParts.length > 1
       ? statedParts.map((part) => ({ question: part, queries: [] }))
-      : (clarity?.topics?.length ? clarity.topics : [{ question: clearQuestion, queries: clarity?.queries || [] }]);
+      : (clarity?.topics?.length ? clarity.topics : [{ question: originalForTopics || clearQuestion, queries: clarity?.queries || [] }]);
     const isAmbiguous = !!clarity?.ambiguous || distinctMeanings.length >= 2 || payoutUmbrella || topicPlan.length > 1;
 
     // Prompt rules/snippets and the separate official-notice index do not
@@ -1614,6 +1616,17 @@ export default async function handler(req, res) {
     }
 
     let raw = completion.content;
+    if (answerEchoesQuestion(cleanAnswer(raw), question) && matches.length) {
+      const echoMessages = [
+        { role: 'system', content: system + '\n\nECHO RECOVERY: The previous draft repeated the customer question instead of answering it. Write a direct customer-facing answer using only the evidence. Do not restate or quote the question. Preserve SOURCES, CONFIDENCE, SEGMENTS, COVERAGE, and NOTICE_CONFLICT metadata.' },
+        { role: 'user', content: `${askedText}\n\nEvidence:\n${recoveryContext || context}` }
+      ];
+      try {
+        const retried = await runAnswerRecovery(echoMessages);
+        if (!answerEchoesQuestion(cleanAnswer(retried.content), question)) { completion = retried; raw = retried.content; }
+        else raw = SAFE_UNCONFIRMED;
+      } catch { raw = SAFE_UNCONFIRMED; }
+    }
     let draftCoverage = coverageFromDraft(raw, topicPlan.length);
     let allDraftTopicsUnconfirmed = !!draftCoverage?.length && draftCoverage.every((status) => status === 'not_confirmed');
     // Correct the occasional whole-answer refusal when at least part of a
@@ -1860,7 +1873,7 @@ export default async function handler(req, res) {
     // focused statement instead of making the customer infer what was skipped.
     if (answer !== SAFE_UNCONFIRMED && notConfirmedCount) {
       const unresolved = questionCoverage.filter((item) => item.status === 'not_confirmed')
-        .map((item) => `I could not confirm this part from the current verified sources: ${conciseQuestionLabel(item.question)}`);
+        .map((item, index) => `Part ${index + 1} still needs verification from an applicable FAQ or Notice. I have not guessed at that detail.`);
       if (unresolved.length) {
         answer = `${answer}\n\n${unresolved.join('\n\n')}`;
         segments = [...(segments || []), ...unresolved.map((text) => ({ text, refs: [] }))];
