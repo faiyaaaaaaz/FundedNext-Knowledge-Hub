@@ -251,6 +251,16 @@ async function createJob(req, access, sb, body) {
     const invalidIds = rawIds.filter((id) => !directIds.includes(id));
     if (invalidIds.length) throw new Error(`Check these conversation IDs: ${invalidIds.slice(0, 5).join(', ')}${invalidIds.length > 5 ? '…' : ''}`);
   }
+  if (!canManageAudits(access) && !body.acknowledgeDailyWarning) {
+    const ids = [...new Set((Array.isArray(body.agentIds) ? body.agentIds : []).map(String))];
+    const multi = !directInput && ids.length > 1; const limit = multi ? 40 : 60;
+    const size = directInput ? directIds.length : Math.max(1, Math.min(Math.floor(Number(body.sampleSize) || 10), 100)) * (multi && body.perAgent === true ? ids.length : 1);
+    const now = new Date(); const dhakaDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+    const dayStart = new Date(`${dhakaDate}T00:00:00+06:00`).toISOString();
+    const rows = checked(await sb.from('activity_logs').select('metadata').eq('event_type', 'conversation_audit_job').eq('user_email', access.email || '').gte('created_at', dayStart), 'Could not check the daily audit allowance');
+    const used = (rows || []).filter((row) => { const f = row.metadata?.filters || {}; return ((f.agentIds || []).length > 1) === multi; }).reduce((sum, row) => sum + Number(row.metadata?.selection?.requested ?? row.metadata?.total ?? 0), 0);
+    if (used + size > limit) { const error = new Error(`Daily ${multi ? 'multi-agent' : 'single-agent'} warning: ${used} conversations were requested today; this batch adds ${size}, exceeding the ${limit} conversation guideline. Counts include requested batches, even if later cancelled.`); error.status = 409; error.code = 'DAILY_AUDIT_WARNING'; throw error; }
+  }
   const seed = String(body.seed || cryptoRandom());
   let queue = []; let mode = 'sample'; let agentNames = []; let selection = null;
   if (directInput) {
@@ -796,6 +806,6 @@ export default async function handler(req, res) {
     }
     return res.status(400).json({ error: 'Unknown audit action.' });
   } catch (error) {
-    return res.status(error.status || 500).json({ error: error.message || 'Audit request failed.' });
+    return res.status(error.status || 500).json({ error: error.message || 'Audit request failed.', code: error.code || undefined });
   }
 }
