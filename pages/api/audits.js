@@ -686,27 +686,32 @@ export default async function handler(req, res) {
     }
     if (action === 'edit-ai-score') {
       if (access.external || !canReviewAuditDisputes(access)) return res.status(403).json({ error: 'Only Faiyaz, Preya, or Master Admin can edit scores.' });
-      const resultId = String(body.resultId || ''); const reason = String(body.reason || '').trim().slice(0, 4000);
-      const scores = Object.fromEntries(['quality','efficiency','complexity'].map((key) => [key, Number(body.scores?.[key])]));
-      if (reason.length < 10 || Object.values(scores).some((n) => !Number.isInteger(n) || n < 0 || n > 10)) throw new Error('Enter an explanation of at least 10 characters and whole scores from 0 to 10.');
+      const resultId = String(body.resultId || ''); const metric = String(body.metric || ''); const reason = String(body.reason || '').trim().slice(0, 4000);
+      const score = Number(body.score); const originalScore = Number(body.originalScore);
+      if (!['quality','efficiency','complexity'].includes(metric) || body.score === '' || body.score == null || !Number.isInteger(score) || score < 0 || score > 10 || !Number.isInteger(originalScore) || reason.length < 10) throw new Error('Choose one metric, a whole score from 0 to 10, and an explanation of at least 10 characters.');
       const row = checked(await sb.from('activity_logs').select('*').eq('id', resultId).eq('event_type', 'conversation_audit_result').maybeSingle(), 'Could not load audit result');
-      if (!row || row.metadata?.status !== 'completed') throw new Error('Completed audit result not found.');
-      const current = row.metadata; const keys = await getKeys();
-      const [conversation, admins] = await Promise.all([fetchConversation(keys.intercomToken, current.conversationId), fetchIntercomAdmins(keys.intercomToken)]);
+      if (!row || row.metadata?.status !== 'completed' || !row.metadata?.audit) throw new Error('Completed audit result not found.');
+      const current = row.metadata; const oldAudit = current.audit;
+      if (Number(oldAudit[metric]) !== originalScore) throw new Error('This score changed since you opened the form. Refresh the result and try again.');
+      if (score === originalScore) throw new Error('Choose a score different from the current score.');
+      const keys = await getKeys(); const [conversation, admins] = await Promise.all([fetchConversation(keys.intercomToken, current.conversationId), fetchIntercomAdmins(keys.intercomToken)]);
       const turns = conversationTurns(conversation, admins); const redacted = redactConversation(turns, conversation, admins);
-      const knowledge = await retrieveAuditEvidence(sb, `${redacted.transcript}\nADMIN CORRECTION: ${reason}`);
-      const review = await runAuditModel({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics: current.metrics || {}, targetAgent: { token: redacted.agentTokens[current.agentId] || '[TARGET_AGENT]', conversationAt: current.conversationDate }, handoffContext: `An authorized reviewer corrected the scores to ${JSON.stringify(scores)}. Their explanation: ${reason}. Review the complete transcript and evidence and explain the correction.` }, sb);
+      if (redacted.transcript.length >= 60000) throw new Error('This conversation is too long for a complete automated review. The score was not changed.');
+      const knowledge = await retrieveAuditEvidence(sb, `${redacted.transcript}\nADMIN ${metric.toUpperCase()} CORRECTION: ${reason}`);
+      const review = await runAuditModel({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics: current.metrics || {}, targetAgent: { token: redacted.agentTokens[current.agentId] || '[TARGET_AGENT]', conversationAt: current.conversationDate }, handoffContext: `An authorized reviewer changed only ${metric} from ${originalScore} to ${score}. Explanation: ${reason}. Review the complete conversation and current evidence in relation to this correction.` }, sb);
       const reviewed = restoreAuditTokens(review.audit, redacted.tokenReplacements);
       const evidence = (knowledge.evidence || []).filter((item) => ['FAQ','Notice'].includes(item.kind)).slice(0,12).map(({kind,id,title,url}) => ({kind,id,title,url:url || ''}));
-      const correction = { resultId, conversationId: current.conversationId, title: `Score correction · ${current.agentName || current.conversationId}`, instruction: `For similar cases, consider this authorized correction in the context of the entire transcript and current evidence: ${reason}`, triggerTerms: auditTriggerTerms(current.audit?.primaryIssue, reason), active: evidence.length > 0, evidence, approvedAt: new Date().toISOString(), scores };
+      const now = new Date().toISOString(); const reviewer = access.email || access.name || '';
+      const correction = { resultId, conversationId: current.conversationId, metric, oldScore: originalScore, score, title: `${metric} score correction · ${current.agentName || current.conversationId}`, instruction: `When reviewing ${metric} in a similar case, consider this authorized correction in the context of the entire transcript and current evidence: ${reason}`, triggerTerms: auditTriggerTerms(oldAudit.primaryIssue, reason), active: evidence.length > 0, evidence, approvedAt: now };
       const inserted = checked(await sb.from('activity_logs').insert({ actor_role: access.role, session_id: access.sessionId, user_name: access.name, user_email: access.email, auth_provider: access.authProvider, event_type: 'conversation_audit_correction', success: true, metadata: correction }).select('id').single(), 'Could not save correction snippet');
-      const changed = ['quality','efficiency','complexity'].filter((key) => Number(current.audit?.[key]) !== scores[key]);
-      const categoryFor = (key) => key === 'complexity' ? 'process' : key;
-      const deductions = (reviewed.deductions || []).filter((item) => !changed.some((key) => categoryFor(key) === item.category));
-      for (const key of changed) if (scores[key] < 10) deductions.push({ category: categoryFor(key), pointsDeducted: 10 - scores[key], reason: `Authorized score correction: ${reason}`, transcriptExample: '', betterAction: 'Review the full conversation and the reviewer explanation.' });
-      const audit = { ...reviewed, ...scores, deductions, finalScore: Number(((scores.quality + scores.efficiency + scores.complexity) / 3).toFixed(2)), scoreCorrection: { reason, reviewer: access.email || access.name, at: correction.approvedAt, previousAudit: current.audit, snippetId: inserted.id } };
-      for (const key of changed) audit[key === 'complexity' ? 'complexityComment' : `${key}Comment`] = `Authorized correction to ${scores[key]}/10: ${reason}`;
-      try { checked(await sb.from('activity_logs').update({ metadata: { ...current, audit, auditInputFingerprint: null } }).eq('id', resultId), 'Could not save corrected result'); }
+      const category = metric === 'complexity' ? 'process' : metric;
+      const deductions = (oldAudit.deductions || []).filter((item) => item.category !== category);
+      if (score < 10) deductions.push({ category, pointsDeducted: 10 - score, reason: `Authorized ${metric} correction: ${reason}`, transcriptExample: '', betterAction: 'Review the full conversation and the reviewer explanation.' });
+      const scoreCorrections = { ...(oldAudit.scoreCorrections || {}), [metric]: { reason, reviewer, at: now, previousScore: originalScore, snippetId: inserted.id, reviewFinding: reviewed.mainFinding || '' } };
+      const audit = { ...oldAudit, [metric]: score, deductions, scoreCorrections };
+      audit[metric === 'complexity' ? 'complexityComment' : `${metric}Comment`] = `Authorized correction to ${score}/10: ${reason}`;
+      audit.finalScore = Number(((Number(audit.quality) + Number(audit.efficiency) + Number(audit.complexity)) / 3).toFixed(2));
+      try { const saved = checked(await sb.from('activity_logs').update({ metadata: { ...current, audit, auditInputFingerprint: null } }).eq('id', resultId).eq('metadata', JSON.stringify(current)).select('id').maybeSingle(), 'Could not save corrected result'); if (!saved) throw new Error('The audit changed during review. Refresh and submit again.'); }
       catch (error) { await sb.from('activity_logs').delete().eq('id', inserted.id).eq('event_type', 'conversation_audit_correction'); throw error; }
       redacted.ephemeralMap.clear(); redacted.tokenReplacements.clear();
       return res.json({ result: { id: row.id, createdAt: row.created_at, ...current, audit }, snippetActive: correction.active });
