@@ -264,7 +264,10 @@ async function createJob(req, access, sb, body) {
     const requested = [...new Set((body.agentIds || []).map(String))].filter((id) => enabledIds.includes(id));
     if (!requested.length) throw new Error('Select at least one enabled Intercom agent.');
     agentNames = requested.map((id) => liveAdmins.find((agent) => String(agent.id) === String(id))?.name).filter(Boolean);
-    const requestedSize = Math.max(1, Math.min(Number(body.sampleSize) || 10, 100));
+    const perAgent = requested.length > 1 && body.perAgent === true;
+    const quota = Math.max(1, Math.min(Math.floor(Number(body.sampleSize) || 10), 100));
+    const requestedSize = perAgent ? quota * requested.length : quota;
+    if (requestedSize > 100) throw new Error('The total sample cannot exceed 100 conversations.');
     const [candidates, previousRows] = await Promise.all([
       findConversationCandidates(keys.intercomToken, { agentIds: requested, from: body.from, to: body.to, maxPerAgent: Math.max(150, requestedSize * 4) }),
       checked(await sb.from('activity_logs').select('metadata').eq('event_type', 'conversation_audit_result').eq('success', true).limit(5000), 'Could not check previous audits')
@@ -276,10 +279,10 @@ async function createJob(req, access, sb, body) {
     }).filter(Boolean));
     const available = candidates.filter((item) => !previouslyAudited.has(`${item.id}:${item.agentId}`) && !previouslyAudited.has(String(item.id)));
     const shuffled = sampleCandidates(available, available.length, seed);
-    const comparisonPoolSize = Math.min(shuffled.length, Math.max(requestedSize * 4, 40));
-    selection = { candidates: shuffled.slice(0, comparisonPoolSize), checked: 0, available: comparisonPoolSize, requested: requestedSize, eligible: [] };
+    const pool = perAgent ? requested.flatMap((id) => shuffled.filter((item) => String(item.agentId) === id).slice(0, Math.max(quota * 4, 40))) : shuffled.slice(0, Math.max(requestedSize * 4, 40));
+    selection = { candidates: pool, checked: 0, available: pool.length, requested: requestedSize, eligible: [], quotas: perAgent ? Object.fromEntries(requested.map((id) => [id, quota])) : null };
   }
-  const filters = mode === 'direct' ? { conversationIds: directIds } : { agentIds: body.agentIds || [], from: body.from || '', to: body.to || '', sampleSize: Math.max(1, Math.min(Number(body.sampleSize) || 10, 100)), selectionStrategy: 'highest_target_agent_message_count' };
+  const filters = mode === 'direct' ? { conversationIds: directIds } : { agentIds: body.agentIds || [], from: body.from || '', to: body.to || '', sampleSize: Math.max(1, Math.min(Number(body.sampleSize) || 10, 100)), perAgent: body.perAgent === true, selectionStrategy: 'highest_target_agent_message_count' };
   const thresholds = await getAuditThresholdConfig(sb);
   const metadata = {
     status: 'queued', mode, stage: selection ? 'Finding eligible conversations' : 'Ready to fetch conversations', total: selection ? selection.requested : queue.length, processed: 0, completed: 0,
@@ -317,7 +320,7 @@ async function processNext(access, sb, jobId) {
     });
     selection.checked = Math.min(selection.available, start + slice.length);
     const exhausted = selection.checked >= selection.available;
-    const enough = selection.eligible.length >= selection.requested && selection.checked >= Math.min(selection.available, selection.requested * 2);
+    const enough = !selection.quotas && selection.eligible.length >= selection.requested && selection.checked >= Math.min(selection.available, selection.requested * 2);
     if (!exhausted && !enough) {
       row = await updateJob(sb, row, { selection, stage: `Finding eligible conversations · checked ${selection.checked} of ${selection.available}` });
       return { job: publicJob(row), done: false };
@@ -331,7 +334,19 @@ async function processNext(access, sb, jobId) {
     };
     for (const candidate of selection.candidates) rememberReply(candidate.agentId, candidate.lastAdminReplyAt, candidate.id);
     for (const candidate of selection.eligible) for (const at of candidate.agentReplyTimes || []) rememberReply(candidate.agentId, at, candidate.id);
-    queue = selection.eligible.slice(0, selection.requested).map((item) => {
+    let selected = selection.eligible.slice(0, selection.requested);
+    if (selection.quotas) {
+      selected = []; const used = new Set();
+      for (const [agentId, quota] of Object.entries(selection.quotas)) {
+        const matches = selection.eligible.filter((item) => String(item.agentId) === agentId && !used.has(String(item.id))).slice(0, quota);
+        if (matches.length < quota) {
+          row = await updateJob(sb, row, { selection, status: 'failed', stage: 'Insufficient eligible conversations', error: `Agent ${agentId} has only ${matches.length} unique eligible conversations; ${quota} requested. Choose a smaller sample or broader dates.`, total: 0 });
+          return { job: publicJob(row), done: true };
+        }
+        for (const item of matches) { used.add(String(item.id)); selected.push(item); }
+      }
+    }
+    queue = selected.map((item) => {
       const firstReplyAt = Math.min(...(item.agentReplyTimes || []).filter(Number.isFinite));
       const timeline = [...(replyTimelineByAgent.get(String(item.agentId))?.values() || [])].filter((entry) => entry.at < firstReplyAt && entry.conversationId !== String(item.id)).sort((a, b) => a.at - b.at);
       const previous = timeline.at(-1) || null;
@@ -668,6 +683,33 @@ export default async function handler(req, res) {
       const metadata = { resultId, jobId: String(result.jobId || ''), conversationId: String(result.conversationId || ''), agentId: String(result.agentId || ''), agentEmail: result.agentEmail || '', agentName: result.agentName || '', reason, status: 'pending', submittedAt: new Date().toISOString() };
       const created = checked(await sb.from('activity_logs').insert({ actor_role: access.role, session_id: access.sessionId, user_name: access.name, user_email: access.email, auth_provider: access.authProvider, event_type: 'conversation_audit_dispute', success: true, metadata }).select('id,created_at,user_name,user_email,metadata').single(), 'Could not submit the audit dispute');
       return res.json({ dispute: { id: created.id, createdAt: created.created_at, submittedBy: created.user_name || created.user_email || '', submittedByEmail: created.user_email || '', ...created.metadata } });
+    }
+    if (action === 'edit-ai-score') {
+      if (access.external || !canReviewAuditDisputes(access)) return res.status(403).json({ error: 'Only Faiyaz, Preya, or Master Admin can edit scores.' });
+      const resultId = String(body.resultId || ''); const reason = String(body.reason || '').trim().slice(0, 4000);
+      const scores = Object.fromEntries(['quality','efficiency','complexity'].map((key) => [key, Number(body.scores?.[key])]));
+      if (reason.length < 10 || Object.values(scores).some((n) => !Number.isInteger(n) || n < 0 || n > 10)) throw new Error('Enter an explanation of at least 10 characters and whole scores from 0 to 10.');
+      const row = checked(await sb.from('activity_logs').select('*').eq('id', resultId).eq('event_type', 'conversation_audit_result').maybeSingle(), 'Could not load audit result');
+      if (!row || row.metadata?.status !== 'completed') throw new Error('Completed audit result not found.');
+      const current = row.metadata; const keys = await getKeys();
+      const [conversation, admins] = await Promise.all([fetchConversation(keys.intercomToken, current.conversationId), fetchIntercomAdmins(keys.intercomToken)]);
+      const turns = conversationTurns(conversation, admins); const redacted = redactConversation(turns, conversation, admins);
+      const knowledge = await retrieveAuditEvidence(sb, `${redacted.transcript}\nADMIN CORRECTION: ${reason}`);
+      const review = await runAuditModel({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics: current.metrics || {}, targetAgent: { token: redacted.agentTokens[current.agentId] || '[TARGET_AGENT]', conversationAt: current.conversationDate }, handoffContext: `An authorized reviewer corrected the scores to ${JSON.stringify(scores)}. Their explanation: ${reason}. Review the complete transcript and evidence and explain the correction.` }, sb);
+      const reviewed = restoreAuditTokens(review.audit, redacted.tokenReplacements);
+      const evidence = (knowledge.evidence || []).filter((item) => ['FAQ','Notice'].includes(item.kind)).slice(0,12).map(({kind,id,title,url}) => ({kind,id,title,url:url || ''}));
+      const correction = { resultId, conversationId: current.conversationId, title: `Score correction · ${current.agentName || current.conversationId}`, instruction: `For similar cases, consider this authorized correction in the context of the entire transcript and current evidence: ${reason}`, triggerTerms: auditTriggerTerms(current.audit?.primaryIssue, reason), active: evidence.length > 0, evidence, approvedAt: new Date().toISOString(), scores };
+      const inserted = checked(await sb.from('activity_logs').insert({ actor_role: access.role, session_id: access.sessionId, user_name: access.name, user_email: access.email, auth_provider: access.authProvider, event_type: 'conversation_audit_correction', success: true, metadata: correction }).select('id').single(), 'Could not save correction snippet');
+      const changed = ['quality','efficiency','complexity'].filter((key) => Number(current.audit?.[key]) !== scores[key]);
+      const categoryFor = (key) => key === 'complexity' ? 'process' : key;
+      const deductions = (reviewed.deductions || []).filter((item) => !changed.some((key) => categoryFor(key) === item.category));
+      for (const key of changed) if (scores[key] < 10) deductions.push({ category: categoryFor(key), pointsDeducted: 10 - scores[key], reason: `Authorized score correction: ${reason}`, transcriptExample: '', betterAction: 'Review the full conversation and the reviewer explanation.' });
+      const audit = { ...reviewed, ...scores, deductions, finalScore: Number(((scores.quality + scores.efficiency + scores.complexity) / 3).toFixed(2)), scoreCorrection: { reason, reviewer: access.email || access.name, at: correction.approvedAt, previousAudit: current.audit, snippetId: inserted.id } };
+      for (const key of changed) audit[key === 'complexity' ? 'complexityComment' : `${key}Comment`] = `Authorized correction to ${scores[key]}/10: ${reason}`;
+      try { checked(await sb.from('activity_logs').update({ metadata: { ...current, audit, auditInputFingerprint: null } }).eq('id', resultId), 'Could not save corrected result'); }
+      catch (error) { await sb.from('activity_logs').delete().eq('id', inserted.id).eq('event_type', 'conversation_audit_correction'); throw error; }
+      redacted.ephemeralMap.clear(); redacted.tokenReplacements.clear();
+      return res.json({ result: { id: row.id, createdAt: row.created_at, ...current, audit }, snippetActive: correction.active });
     }
     if (action === 'review-dispute') {
       if (access.external) return res.status(403).json({ error: 'Audit dispute decisions require a signed-in auditor.' });
