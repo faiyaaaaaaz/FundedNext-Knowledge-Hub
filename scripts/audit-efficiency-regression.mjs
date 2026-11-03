@@ -28,4 +28,18 @@ check(/isTransferOut/.test(auditSource) && /endType: 'transfer'/.test(auditSourc
 check(/function efficiencyEvidenceTargets/.test(auditPage) && /metric-aht-unavailable/.test(auditPage), 'Efficiency deductions open their timing markers, including unavailable measurements');
 check(/evidenceTargets\.map/.test(auditPage), 'one button is rendered for each measurement that cost marks');
 
+// Speed and token economy: one model call per audit, compact numbered transcript, shared reads.
+check(!/REPAIR REQUIRED/.test(auditSource), 'there is no second full-context model call per audit');
+check((auditSource.match(/openaiChatDetailed\(item\.key/g) || []).length === 1, 'exactly one Gemini request is built per attempt');
+check(/function auditPromptTranscript/.test(auditSource) && /function auditPromptMetrics/.test(auditSource), 'transcript and measurements are compacted before the model sees them');
+check(/MEASUREMENTS: \$\{JSON\.stringify\(auditPromptMetrics\(metrics\)\)\}/.test(auditSource), 'the full measurement ledger is not sent to the model');
+check(/\$\{scoringMatrix\}\\n\\nTARGET AGENT/.test(auditSource), 'the unchanging matrix leads the prompt so the shared prefix can be reused');
+check(!/"recommendedResponse":""|"strengths":\[\]|"evidenceUsed":\[1\]/.test(auditSource), 'fields nothing displays or exports are no longer requested');
+check(/loadEvidenceTables/.test(auditSource) && /let ADMINS_CACHE/.test(auditSource), 'notices, corrections and the admin list are read once per batch, not once per conversation');
+check(/AUDIT_RUBRIC_VERSION = 'fn-cx-qa-2026\.11\.03-q4-v10'/.test(auditSource), 'the rubric version changed so old cached results are not reused');
+
+// Evidence: every deduction cites a numbered message, with fallbacks that never leave a silent gap.
+check(/evidenceRef/.test(auditSource) && /locateByReason/.test(auditSource) && /bestSentenceIn/.test(auditSource), 'deductions resolve through a message number, then the quote, then the reason');
+check(/View most likely message/.test(auditPage), 'an approximate match is labelled as the most likely message, not as evidence');
+
 console.log(`audit efficiency regression: ${count} assertions passed`);
