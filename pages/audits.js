@@ -273,10 +273,20 @@ function efficiencyEvidenceTargets(item, timeline, metrics) {
   if (!out.length) { add('metric-frt', 'View first response time'); add('metric-aht', 'View handling time'); }
   return out;
 }
+const REASON_STOP_WORDS = new Set(['marks', 'deducted', 'because', 'agent', 'client', 'trader', 'before', 'after', 'during', 'without', 'which', 'their', 'there', 'would', 'could', 'should', 'being', 'asked', 'asking', 'message', 'response', 'conversation', 'customer', 'support', 'timing', 'premature', 'instead', 'provide', 'provided', 'while', 'about', 'again', 'other']);
 function deductionEvidenceTargets(item, index, timeline, metrics) {
   if (item?.category === 'efficiency') return efficiencyEvidenceTargets(item, timeline, metrics);
   const id = deductionEvidenceTarget(item, index, timeline, metrics);
-  return id ? [{ id, label: 'View evidence in conversation' }] : [];
+  if (id) return [{ id, label: item?.evidenceApproximate ? 'View most likely message' : 'View evidence in conversation' }];
+  // Older audits saved no usable quote. When one agent message is clearly what the reason is about, open it,
+  // and say plainly that it is the most likely message rather than recorded evidence.
+  const terms = [...new Set(String(item?.reason || '').toLowerCase().match(/[a-z0-9]{5,}/g) || [])].filter((word) => !REASON_STOP_WORDS.has(word));
+  if (terms.length >= 2) {
+    const scored = timeline.filter((turn) => turn.timelineKind === 'agent' && String(turn.body || '').trim())
+      .map((turn) => ({ turn, score: terms.filter((word) => String(turn.body).toLowerCase().includes(word)).length })).sort((a, b) => b.score - a.score);
+    if (scored.length && scored[0].score >= 2 && (!scored[1] || scored[1].score < scored[0].score)) return [{ id: scored[0].turn.id, label: 'View most likely message' }];
+  }
+  return [];
 }
 function normalizeQuote(value) { return String(value || '').toLowerCase().replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, ' ').trim(); }
 function jumpToEvidence(id) {
