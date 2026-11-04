@@ -196,9 +196,21 @@ function intercomLink(conversation) {
     `https://app.intercom.com/a/inbox/_/inbox/search?query=${encodeURIComponent(conversation?.id || '')}`;
 }
 
-function primaryMeaningfulAgentId(turns, meaningfulIds = []) {
-  const allowed = new Set(meaningfulIds.map(String));
-  return [...turns].reverse().find((turn) => turn.kind === 'agent' && allowed.has(String(turn.authorId || '')) && String(turn.body || '').trim())?.authorId || meaningfulIds.at(-1) || null;
+// A pasted conversation ID has no chosen agent, so every human who gave a real answer in the chat is
+// scored on their own part (in the order they first helped). A sampled audit still scores only the
+// agent it was sampled for.
+function auditTargetIds(item, meaningful) {
+  return item.targetAgentId ? meaningful.filter((id) => id === String(item.targetAgentId)) : meaningful.map(String);
+}
+
+// Only the Master Admin and Faiyaz may see who runs audits; everyone else gets the job without a creator.
+function hideJobCreator(payload) {
+  if (!payload || typeof payload !== 'object') return payload;
+  const clean = (job) => (job && typeof job === 'object' && 'createdBy' in job ? { ...job, createdBy: '' } : job);
+  const out = { ...payload };
+  if (out.job) out.job = clean(out.job);
+  if (Array.isArray(out.jobs)) out.jobs = out.jobs.map((entry) => (entry?.job ? { ...entry, job: clean(entry.job) } : clean(entry)));
+  return out;
 }
 
 async function prepareWorkloadAnchors(token, queue, admins, level2AgentIds) {
@@ -210,9 +222,7 @@ async function prepareWorkloadAnchors(token, queue, admins, level2AgentIds) {
       if (entry.status !== 'fulfilled') return;
       const item = slice[index]; const conversation = entry.value; const turns = conversationTurns(conversation, admins);
       const meaningful = meaningfulAgentIds(turns);
-      const targetIds = item.targetAgentId
-        ? meaningful.filter((id) => id === String(item.targetAgentId))
-        : [primaryMeaningfulAgentId(turns, meaningful)].filter(Boolean);
+      const targetIds = auditTargetIds(item, meaningful);
       for (const targetId of targetIds) {
         const metrics = deriveMetrics(conversation, turns, targetId, { supportLevel: level2AgentIds.includes(String(targetId)) ? 'level2' : 'standard' });
         records.push({ conversationId: String(item.id), agentId: String(targetId), intercomLink: intercomLink(conversation), cycles: metrics.ahtCycles || [] });
@@ -411,7 +421,7 @@ async function processNext(access, sb, jobId) {
     const conversation = await fetchConversation(keys.intercomToken, item.id);
     const turns = conversationTurns(conversation, admins);
     const meaningful = meaningfulAgentIds(turns);
-    const targetIds = item.targetAgentId ? meaningful.filter((id) => id === String(item.targetAgentId)) : [primaryMeaningfulAgentId(turns, meaningful)].filter(Boolean);
+    const targetIds = auditTargetIds(item, meaningful);
     if (!targetIds.length) {
       const reason = meaningful.length ? 'The selected agent did not provide a meaningful support response.' : 'No human agent provided a meaningful support response.';
       await insertResult(sb, access, { jobId: String(jobId), status: 'skipped', conversationId: String(item.id), conversationDate: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '', skipReason: reason, intercomLink: intercomLink(conversation), rubricVersion: AUDIT_RUBRIC_VERSION });
@@ -498,6 +508,7 @@ export default async function handler(req, res) {
     const permission = access.external ? 'auditor' : await getAuditPermission(access, sb);
     if (!access.external && permission === 'none') return res.status(403).json({ error: 'Conversation Audit access has not been granted to this account.' });
     const identity = await auditIdentity(access, permission, sb);
+    if (!access.external && !canManageAudits(access)) { const sendJson = res.json.bind(res); res.json = (payload) => sendJson(hideJobCreator(payload)); }
     if (access.external) {
       const required = action === 'health' || action === 'bootstrap' ? 'diagnostics:read'
         : ['create-job','process-next','pause-job','resume-job','cancel-job'].includes(action) ? 'audit:run'
