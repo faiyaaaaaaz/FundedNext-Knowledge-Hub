@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Head from 'next/head';
 import Link from 'next/link';
+import { humanEfficiencyStory } from '../lib/auditFeedback.mjs';
 
 function Logo() {
   return (
@@ -1277,6 +1278,10 @@ function DeductionItem({ item, index, timeline, metrics }) {
   const level = levelParts(item);
   const excerpt = cleanExcerpt(item.transcriptExample);
   const points = Number(item.pointsDeducted);
+  // Audits saved before the wording change are re-worded from their stored measurements.
+  const story = item.category === 'efficiency' && !item.numbers && !item.deterministic && !item.missingReason && metrics && Object.keys(metrics).length ? humanEfficiencyStory(metrics) : null;
+  const numbers = item.numbers || story?.numbers || [];
+  const action = story ? story.advice.replace(/^Next time, /, '').replace(/^./, (c) => c.toUpperCase()) : item.betterAction;
   return (
     <section className={`deduction deduct-${item.category}${level ? ' level' : ''}`}>
       <header>
@@ -1303,7 +1308,15 @@ function DeductionItem({ item, index, timeline, metrics }) {
           <p className="deduction-reason">{level.text}</p>
         )
       ) : (
-        <p className="deduction-reason">{tidyText(item.reason)}</p>
+        <p className="deduction-reason">{tidyText(story ? story.summary : item.reason)}</p>
+      )}
+      {numbers.length > 0 && (
+        <p className="deduction-numbers">
+          <b>Numbers</b>
+          {numbers.map((entry) => (
+            <span key={entry}>{entry}</span>
+          ))}
+        </p>
       )}
       {excerpt && (
         <blockquote className="deduction-quote">
@@ -1311,9 +1324,9 @@ function DeductionItem({ item, index, timeline, metrics }) {
           {excerpt}
         </blockquote>
       )}
-      {item.betterAction && !level && (
+      {action && !level && (
         <p className="deduction-action">
-          <b>Next time:</b> {tidyText(item.betterAction)}
+          <b>Next time:</b> {tidyText(action)}
         </p>
       )}
       <div className="deduction-links">
@@ -2595,7 +2608,7 @@ export default function Audits() {
                   <div className="override-note">
                     <i>↳</i>
                     <span>
-                      <b>Direct conversation mode</b>Agent, date and priority-sample filters below will be ignored.
+                      <b>Direct conversation mode</b>Agent, date and priority-sample filters below will be ignored. If several agents helped in one chat, each gets their own result.
                     </span>
                   </div>
                 )}
