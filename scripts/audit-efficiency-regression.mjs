@@ -4,6 +4,8 @@ import { scoreEfficiency, humanEfficiencyComment } from '../lib/auditFeedback.mj
 
 const auditSource = await readFile(new URL('../lib/audits.js', import.meta.url), 'utf8');
 const auditPage = await readFile(new URL('../pages/audits.js', import.meta.url), 'utf8');
+const auditApi = await readFile(new URL('../pages/api/audits.js', import.meta.url), 'utf8');
+const appShell = await readFile(new URL('../pages/_app.js', import.meta.url), 'utf8');
 let count = 0;
 const check = (condition, message) => { assert.ok(condition, message); count += 1; };
 
@@ -26,7 +28,7 @@ check(/isTransferOut/.test(auditSource) && /endType: 'transfer'/.test(auditSourc
 
 // Evidence buttons: every Efficiency deduction opens the exact marker it came from.
 check(/function efficiencyEvidenceTargets/.test(auditPage) && /metric-aht-unavailable/.test(auditPage), 'Efficiency deductions open their timing markers, including unavailable measurements');
-check(/evidenceTargets\.map/.test(auditPage), 'one button is rendered for each measurement that cost marks');
+check(/targets\.map\(\(target\)/.test(auditPage), 'one button is rendered for each measurement that cost marks');
 
 // Speed and token economy: one model call per audit, compact numbered transcript, shared reads.
 check(!/REPAIR REQUIRED/.test(auditSource), 'there is no second full-context model call per audit');
@@ -41,5 +43,16 @@ check(/AUDIT_RUBRIC_VERSION = 'fn-cx-qa-2026\.11\.03-q4-v10'/.test(auditSource),
 // Evidence: every deduction cites a numbered message, with fallbacks that never leave a silent gap.
 check(/evidenceRef/.test(auditSource) && /locateByReason/.test(auditSource) && /bestSentenceIn/.test(auditSource), 'deductions resolve through a message number, then the quote, then the reason');
 check(/View most likely message/.test(auditPage), 'an approximate match is labelled as the most likely message, not as evidence');
+
+// Speed summaries, redaction safety and the refreshed interface.
+check(/function conversationTiming/.test(auditPage) && /function summarizeTiming/.test(auditPage) && /function TimingChips/.test(auditPage), 'every conversation shows FRT, average ART and AHT');
+check(/batchTiming/.test(auditPage) && /className="speed-summary"/.test(auditPage), 'each batch shows its average FRT, ART and AHT');
+check(/history-timing/.test(auditPage) && /timingSummary/.test(auditPage), 'history rows show the batch timing averages');
+check(/function summarizeTiming/.test(auditApi) && /timingSummary: enrichment\.timingSummary/.test(auditApi), 'the server supplies timing averages for saved batches');
+check(/const redactBody = /.test(auditSource), 'each message is redacted on its own so timestamps cannot be overwritten');
+check(!/\\\[\?AGENT\(\?:\[_ \]\\d\+\)\?\\\]\?/.test(auditSource), 'the plain word "agent" is never rewritten as a token');
+check(/refresh\.css/.test(appShell), 'the refreshed stylesheet is loaded last');
+check(/function DeductionItem/.test(auditPage) && /levelParts/.test(auditPage) && /level-facts/.test(auditPage), 'score-level explanations are shown as plain labelled facts');
+check(/<details className="aht-verification">/.test(auditPage), 'timing details are collapsed by default');
 
 console.log(`audit efficiency regression: ${count} assertions passed`);
