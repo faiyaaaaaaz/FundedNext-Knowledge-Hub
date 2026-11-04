@@ -1,6 +1,6 @@
-import assert from 'node:assert/strict';
+﻿import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { scoreEfficiency, humanEfficiencyComment } from '../lib/auditFeedback.mjs';
+import { scoreEfficiency, humanEfficiencyComment, humanEfficiencyStory } from '../lib/auditFeedback.mjs';
 
 const auditSource = await readFile(new URL('../lib/audits.js', import.meta.url), 'utf8');
 const auditPage = await readFile(new URL('../pages/audits.js', import.meta.url), 'utf8');
@@ -38,7 +38,7 @@ check(/MEASUREMENTS: \$\{JSON\.stringify\(auditPromptMetrics\(metrics\)\)\}/.tes
 check(/\$\{scoringMatrix\}\\n\\nTARGET AGENT/.test(auditSource), 'the unchanging matrix leads the prompt so the shared prefix can be reused');
 check(!/"recommendedResponse":""|"strengths":\[\]|"evidenceUsed":\[1\]/.test(auditSource), 'fields nothing displays or exports are no longer requested');
 check(/loadEvidenceTables/.test(auditSource) && /let ADMINS_CACHE/.test(auditSource), 'notices, corrections and the admin list are read once per batch, not once per conversation');
-check(/AUDIT_RUBRIC_VERSION = 'fn-cx-qa-2026\.11\.03-q4-v10'/.test(auditSource), 'the rubric version changed so old cached results are not reused');
+check(/AUDIT_RUBRIC_VERSION = 'fn-cx-qa-2026\.11\.04-q4-v11'/.test(auditSource), 'the rubric version changed so old cached results are not reused');
 
 // Evidence: every deduction cites a numbered message, with fallbacks that never leave a silent gap.
 check(/evidenceRef/.test(auditSource) && /locateByReason/.test(auditSource) && /bestSentenceIn/.test(auditSource), 'deductions resolve through a message number, then the quote, then the reason');
@@ -54,5 +54,26 @@ check(!/\\\[\?AGENT\(\?:\[_ \]\\d\+\)\?\\\]\?/.test(auditSource), 'the plain wor
 check(/refresh\.css/.test(appShell), 'the refreshed stylesheet is loaded last');
 check(/function DeductionItem/.test(auditPage) && /levelParts/.test(auditPage) && /level-facts/.test(auditPage), 'score-level explanations are shown as plain labelled facts');
 check(/<details className="aht-verification">/.test(auditPage), 'timing details are collapsed by default');
+
+
+// Wording: sentences are rounded like a person would say them; exact figures sit in a separate list.
+const sample = { frtSeconds: 52, frtHit: false, frtTarget: 30, responseTimes: [40, 140, 95], artBreaches: 2, artTarget: 90, ahtSeconds: 1290, ahtTarget: 1200, ahtHit: false };
+const story = humanEfficiencyStory(sample);
+check(!/\d+\s*(?:seconds?|secs?)\b/i.test(story.summary + story.advice), 'sentences never quote exact seconds');
+check(story.numbers.length === 3 && story.numbers.some((entry) => /FRT 52s/.test(entry)) && story.numbers.some((entry) => /AHT 21m 30s/.test(entry)), 'exact FRT, ART and AHT are listed separately');
+check(/\n\nNumbers: FRT 52s/.test(humanEfficiencyComment(sample)), 'the comment ends with a separate Numbers line');
+check(!/approved Level|matrix/i.test(story.summary), 'the reason does not quote the internal matrix');
+check(humanEfficiencyStory({ supportLevel: 'level2', ahtSeconds: 410, ahtTarget: 300, ahtHit: false }).numbers.length === 1, 'Level 2 lists only AHT');
+
+// Focused audits: every human who really helped is scored on their own part; Level 2 uses the Level 2 rules.
+check(/function auditTargetIds/.test(auditApi) && (auditApi.match(/const targetIds = auditTargetIds\(item, meaningful\)/g) || []).length === 2, 'pasted conversation IDs score every participating agent, in both the ledger and the scoring step');
+check(!/primaryMeaningfulAgentId/.test(auditApi), 'a pasted conversation is no longer reduced to one agent');
+check(/supportLevel: level2AgentIds\.includes\(String\(targetId\)\) \? 'level2' : 'standard'/.test(auditApi), 'each agent is measured at their own saved support level');
+check(/never deduct from the target for them/.test(auditSource) && /Level 2 target is judged/.test(auditSource), 'the rubric keeps other agents\' work out of the target\'s score');
+
+// Access: only the Master Admin and Faiyaz see who runs audits or can grant access.
+check(/function hideJobCreator/.test(auditApi) && /!canManageAudits\(access\)\) \{ const sendJson/.test(auditApi), 'job creators are hidden from everyone but the Master Admin and Faiyaz');
+check(/action === 'save-access'\) \{\s*if \(!canManageAudits\(access\)\)/.test(auditApi) && /action === 'save-self-access'\) \{\s*if \(!canManageAudits\(access\)\)/.test(auditApi), 'only they can change audit access');
+check(/config: !access\.external && canManageAudits\(access\) \? await getAuditAccessConfig/.test(auditApi), 'the authorized-auditor list is only sent to them');
 
 console.log(`audit efficiency regression: ${count} assertions passed`);
