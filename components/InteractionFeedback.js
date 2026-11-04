@@ -12,7 +12,7 @@ export default function InteractionFeedback(){
    if(!button||button.disabled)return;
    if(button.dataset.requestPending){event.preventDefault();event.stopImmediatePropagation();return;}
    if(!window.matchMedia('(prefers-reduced-motion: reduce)').matches)button.animate?.([{transform:'scale(1)'},{transform:'scale(.97)'},{transform:'scale(1)'}],{duration:180});
-   intent={id:++serial,button,at:Date.now(),count:0,error:null,label:(button.getAttribute('aria-label')||button.textContent||'Request').trim().replace(/\s+/g,' ').slice(0,65)};
+   intent={id:++serial,button,at:Date.now(),count:0,error:null,label:(button.getAttribute('aria-label')||button.getAttribute('title')||button.querySelector?.('b,strong')?.textContent||button.textContent||'Request').trim().replace(/\s+/g,' ').replace(/\s*[\u2192\u2197\u2193\u21bb]+\s*$/,'').slice(0,48)};
   }
   async function observedFetch(input,options){
    const url=new URL(typeof input==='string'||input instanceof URL?input:input.url,window.location.href);
@@ -35,7 +35,7 @@ export default function InteractionFeedback(){
    finally{
     action.count--;
     if(!action.count){pending.delete(action.id);delete action.button.dataset.requestPending;action.button.removeAttribute('aria-busy');
-     if(!pending.size)show(action.error||action.label+' — response received.',action.error?'error':'complete');
+     if(!pending.size)show(action.error||action.label+' — done',action.error?'error':'complete');
     }
    }
   }
