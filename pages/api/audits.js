@@ -34,8 +34,24 @@ function publicJob(row, enrichment = {}) {
     filters: meta.filters || {}, seed: meta.seed || '', rubricVersion: meta.rubricVersion || AUDIT_RUBRIC_VERSION,
     updatedAt: meta.updatedAt || row?.created_at, error: meta.error || '', directIds: meta.directIds || [], agentNames,
     scoreSummary: enrichment.scoreSummary || meta.scoreSummary || null,
+    timingSummary: enrichment.timingSummary || meta.timingSummary || null,
     selection: meta.selection ? { checked: Number(meta.selection.checked || 0), available: Number(meta.selection.available || 0), requested: Number(meta.selection.requested || 0) } : null
   };
+}
+
+// Average FRT, ART and AHT across a batch. Each conversation counts once (its own mean ART), and a
+// measurement that could not be taken is left out instead of being counted as zero.
+function summarizeTiming(items = []) {
+  const mean = (values) => values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : null;
+  const pick = (key) => items.map((item) => item[key]).filter((value) => Number.isFinite(value));
+  const frt = pick('frt'); const art = pick('art'); const aht = pick('aht');
+  const target = (key) => items.map((item) => item.targets?.[key]).find((value) => Number.isFinite(value)) ?? null;
+  return { frt: mean(frt), art: mean(art), aht: mean(aht), frtCount: frt.length, artCount: art.length, ahtCount: aht.length, total: items.length, targets: { frt: target('frt'), art: target('art'), aht: target('aht') } };
+}
+function conversationTiming(metrics = {}) {
+  const art = Array.isArray(metrics.responseTimes) && metrics.responseTimes.length ? metrics.responseTimes.reduce((sum, value) => sum + Number(value || 0), 0) / metrics.responseTimes.length : null;
+  const number = (value) => (value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value));
+  return { frt: metrics.supportLevel === 'level2' ? null : number(metrics.frtSeconds), art: metrics.supportLevel === 'level2' ? null : art, aht: number(metrics.ahtSeconds), targets: { frt: number(metrics.frtTarget), art: number(metrics.artTarget), aht: number(metrics.ahtTarget) } };
 }
 
 function fileSafe(value) {
@@ -559,6 +575,7 @@ export default async function handler(req, res) {
       }
       const namesByJob = new Map();
       const scoresByJob = new Map();
+      const timingByJob = new Map();
       for (const row of recentResults) {
         const jobId = String(row.jobId || ''); if (!jobId) continue;
         if (!namesByJob.has(jobId)) namesByJob.set(jobId, new Set());
@@ -566,6 +583,8 @@ export default async function handler(req, res) {
         if (row.status === 'completed' && row.audit) {
           if (!scoresByJob.has(jobId)) scoresByJob.set(jobId, []);
           scoresByJob.get(jobId).push(row.audit);
+          if (!timingByJob.has(jobId)) timingByJob.set(jobId, []);
+          timingByJob.get(jobId).push(conversationTiming(row.metrics));
         }
       }
       const adminNameById = new Map(admins.map((agent) => [String(agent.id), agent.name]));
@@ -573,7 +592,7 @@ export default async function handler(req, res) {
         const id = String(row.id); const filterNames = permission === 'self' ? [] : (row.metadata?.filters?.agentIds || []).map((agentId) => adminNameById.get(String(agentId))).filter(Boolean);
         const scores = scoresByJob.get(id) || []; const average = (key) => scores.length ? Number((scores.reduce((sum, audit) => sum + Number(audit?.[key] || 0), 0) / scores.length).toFixed(2)) : null;
         const quality = average('quality'); const efficiency = average('efficiency'); const process = average('complexity');
-        const visible = publicJob(row, { agentNames: [...filterNames, ...(namesByJob.get(id) || [])], scoreSummary: scores.length ? { quality, efficiency, process, final: Number(((quality + efficiency + process) / 3).toFixed(2)) } : null });
+        const visible = publicJob(row, { agentNames: [...filterNames, ...(namesByJob.get(id) || [])], scoreSummary: scores.length ? { quality, efficiency, process, final: Number(((quality + efficiency + process) / 3).toFixed(2)) } : null, timingSummary: timingByJob.get(id)?.length ? summarizeTiming(timingByJob.get(id)) : null });
         return permission === 'self' ? { ...visible, total: scores.length, processed: scores.length, completed: scores.length, evaluations: scores.length, skipped: 0, failed: 0, currentConversationId: null, filters: {} } : visible;
       });
       const canReviewDisputes = !access.external && canReviewAuditDisputes(access);
