@@ -2184,8 +2184,8 @@ export default function Audits() {
         lastJob = result.job;
         // Real pace: only conversations finished during this session count, and an estimate needs at least two.
         const finishedNow = Number(result.job?.processed || 0);
-        if (!paceRef.current) paceRef.current = { at: Date.now(), base: finishedNow };
-        else if (finishedNow - paceRef.current.base >= 2) setPace({ perChat: (Date.now() - paceRef.current.at) / 1000 / (finishedNow - paceRef.current.base) });
+        if (!paceRef.current && finishedNow > 0) paceRef.current = { at: Date.now(), base: finishedNow };
+        else if (paceRef.current && finishedNow - paceRef.current.base >= 1) setPace({ perChat: (Date.now() - paceRef.current.at) / 1000 / (finishedNow - paceRef.current.base) });
         setCurrentJob(result.job);
         if (result.results?.length) setResults((current) => [...current, ...result.results]);
         if (result.processed && result.processed.status !== 'completed') {
