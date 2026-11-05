@@ -364,7 +364,7 @@ function ProgressReport({ job, results, running, elapsed, pace }) {
   const total = Number(job.total || 0);
   const processed = Number(job.processed || 0);
   const selection = job.selection;
-  const selectionDone = direct || processed > 0 || finished || /Sample ready|ledger|Removing|Matching|Scoring|Fetching|Saved|Excluded/i.test(stage);
+  const selectionDone = direct || selection?.completed || processed > 0 || finished || /Sample ready|ledger|Removing|Matching|Scoring|Fetching|Saved|Excluded/i.test(stage);
   const prepareDone = processed > 0 || finished || /Scoring|Matching|Removing/i.test(stage);
   const completed = job.status === 'completed';
   const stored = results.filter((item) => item.status === 'completed').length;
@@ -2990,7 +2990,7 @@ export default function Audits() {
                         />
                       </div>
                       <small>
-                        {currentJob.selection && currentJob.processed === 0
+                        {currentJob.selection && !currentJob.selection.completed && currentJob.processed === 0
                           ? `Checked ${currentJob.selection.checked} of ${currentJob.selection.available} candidates · selecting ${currentJob.selection.requested}`
                           : `${currentJob.processed} of ${currentJob.total} conversations · ${progress}%`}
                       </small>
