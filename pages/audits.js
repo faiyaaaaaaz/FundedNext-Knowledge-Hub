@@ -350,6 +350,117 @@ function AuditLaunchLoader() {
   );
 }
 
+function clockText(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  const minutes = Math.floor(total / 60);
+  return minutes ? `${minutes}m ${String(total % 60).padStart(2, '0')}s` : `${total}s`;
+}
+
+// Everything shown here comes from the saved batch itself: real counts, real stage, real times.
+function ProgressReport({ job, results, running, elapsed, pace }) {
+  const direct = job.mode === 'direct';
+  const finished = ['completed', 'cancelled', 'failed'].includes(job.status);
+  const stage = String(job.stage || '');
+  const total = Number(job.total || 0);
+  const processed = Number(job.processed || 0);
+  const selection = job.selection;
+  const selectionDone = direct || processed > 0 || finished || /Sample ready|ledger|Removing|Matching|Scoring|Fetching|Saved|Excluded/i.test(stage);
+  const prepareDone = processed > 0 || finished || /Scoring|Matching|Removing/i.test(stage);
+  const completed = job.status === 'completed';
+  const stored = results.filter((item) => item.status === 'completed').length;
+  const expected = Number(job.evaluations || 0);
+  const left = pace && total > processed ? (total - processed) * pace.perChat : null;
+  const started = Date.parse(job.createdAt || '');
+  const ended = Date.parse(job.finishedAt || job.updatedAt || '');
+  const totalTime = finished && started && ended ? (ended - started) / 1000 : null;
+  const slow = running && /cooldown|retry|slowly/i.test(stage);
+  const steps = [
+    {
+      label: direct ? 'Chats received' : 'Finding chats',
+      detail: direct ? `${total} to audit` : selectionDone ? `${total} chat${total === 1 ? '' : 's'} chosen` : selection ? `${selection.checked} of ${selection.available} checked` : 'Starting',
+      state: selectionDone ? 'done' : 'active',
+    },
+    { label: 'Preparing timings', detail: 'FRT, ART and AHT', state: !selectionDone ? 'todo' : prepareDone ? 'done' : 'active' },
+    {
+      label: 'Scoring',
+      detail: `${processed} of ${total} chats`,
+      state: completed ? 'done' : finished ? 'stopped' : prepareDone ? 'active' : 'todo',
+    },
+    { label: 'Saved', detail: completed ? `${expected} result${expected === 1 ? '' : 's'}` : 'After every chat', state: completed ? 'done' : 'todo' },
+  ];
+  return (
+    <section className="progress-report" aria-label="Audit progress report" aria-live="polite">
+      <ol className="progress-steps">
+        {steps.map((step) => (
+          <li key={step.label} className={step.state}>
+            <i aria-hidden="true">{step.state === 'done' ? '✓' : step.state === 'stopped' ? '■' : ''}</i>
+            <b>{step.label}</b>
+            <small>{step.detail}</small>
+          </li>
+        ))}
+      </ol>
+      <dl className="progress-facts">
+        <div>
+          <dt>Saved so far</dt>
+          <dd>{expected}<small> agent result{expected === 1 ? '' : 's'}</small></dd>
+        </div>
+        <div>
+          <dt>{finished ? 'Total time' : 'Time on this run'}</dt>
+          <dd>{clockText(finished ? totalTime ?? 0 : elapsed)}</dd>
+        </div>
+        {!finished && (
+          <div>
+            <dt>Time left</dt>
+            <dd>{left != null ? `about ${clockText(Math.ceil(left / 10) * 10)}` : 'Working it out…'}</dd>
+          </div>
+        )}
+        {pace && (
+          <div>
+            <dt>Pace</dt>
+            <dd>{clockText(pace.perChat)}<small> per chat</small></dd>
+          </div>
+        )}
+        {Number(job.skipped) > 0 && (
+          <div>
+            <dt>Skipped</dt>
+            <dd>{job.skipped}</dd>
+          </div>
+        )}
+        {Number(job.failed) > 0 && (
+          <div className="bad">
+            <dt>Failed</dt>
+            <dd>{job.failed}</dd>
+          </div>
+        )}
+      </dl>
+      {running && job.currentConversationId && <p className="progress-now">Working on conversation {job.currentConversationId}</p>}
+      {slow && <p className="progress-note">Gemini is slow to answer right now. This chat is retrying on its own and nothing is lost.</p>}
+      {completed && (
+        <div className={`save-banner ${stored === expected ? 'ok' : 'warn'}`} role="status">
+          <b>{stored === expected ? '✓ Audit complete and saved' : 'Audit finished, please check the saved results'}</b>
+          <span>
+            {stored === expected
+              ? `Batch #${job.id} is in Audit history with ${stored} agent result${stored === 1 ? '' : 's'} from ${job.completed} conversation${Number(job.completed) === 1 ? '' : 's'}${Number(job.skipped) ? `, ${job.skipped} skipped` : ''}${Number(job.failed) ? `, ${job.failed} failed` : ''}. Finished ${formatDate(job.finishedAt || job.updatedAt)}.`
+              : `Only ${stored} of ${expected} saved results are showing. Open this batch again from Audit history to confirm.`}
+          </span>
+        </div>
+      )}
+      {job.status === 'cancelled' && (
+        <div className="save-banner warn" role="status">
+          <b>Audit cancelled</b>
+          <span>{`The ${stored} result${stored === 1 ? '' : 's'} finished before cancelling ${stored === 1 ? 'is' : 'are'} saved in Audit history.`}</span>
+        </div>
+      )}
+      {job.status === 'paused' && (
+        <div className="save-banner warn" role="status">
+          <b>Audit paused</b>
+          <span>{`${stored} result${stored === 1 ? '' : 's'} saved. Resume any time from this page or Audit history.`}</span>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function AuditBatchPreparation({ elapsed = 0, direct = false, requested = 0 }) {
   const steps = direct
     ? [
@@ -1810,6 +1921,8 @@ export default function Audits() {
   const [results, setResults] = useState([]);
   const [running, setRunning] = useState(false);
   const [elapsed, setElapsed] = useState(0);
+  const [pace, setPace] = useState(null);
+  const paceRef = useRef(null);
   const [syncingAgents, setSyncingAgents] = useState(false);
   const [enabledDraft, setEnabledDraft] = useState([]);
   const [level2Draft, setLevel2Draft] = useState([]);
@@ -1886,17 +1999,33 @@ export default function Audits() {
   }, [running]);
 
   async function request(action, body = {}, token = session) {
-    const response = await fetch('/api/audits', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-app-session': token },
-      body: JSON.stringify({ action, ...body }),
-    });
-    const result = await response.json();
+    let response;
+    try {
+      response = await fetch('/api/audits', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-app-session': token },
+        body: JSON.stringify({ action, ...body }),
+      });
+    } catch {
+      const lost = new Error('The connection was interrupted.');
+      lost.transient = true;
+      throw lost;
+    }
+    let result = {};
+    try {
+      result = await response.json();
+    } catch {
+      result = {};
+    }
     if (response.status === 401) {
       localStorage.removeItem('appSession');
       setSession('');
     }
-    if (!response.ok) throw new Error(result.error || 'Audit request failed.');
+    if (!response.ok) {
+      const failure = new Error(result.error || (response.status >= 500 ? 'The server took too long to answer.' : 'Audit request failed.'));
+      failure.transient = [502, 503, 504].includes(response.status) || (response.status >= 500 && !result.error);
+      throw failure;
+    }
     return result;
   }
 
@@ -2032,9 +2161,31 @@ export default function Audits() {
     processingRef.current = true;
     setRunning(true);
     stopRef.current = false;
+    paceRef.current = null;
+    setPace(null);
+    let interruptions = 0;
+    let lastJob = null;
     try {
       while (!stopRef.current) {
-        const result = await request('process-next', { jobId }, token);
+        let result;
+        try {
+          result = await request('process-next', { jobId }, token);
+          if (interruptions) setNotice('');
+          interruptions = 0;
+        } catch (err) {
+          // Every finished conversation is already saved, so a cut-off call just continues from the last checkpoint.
+          if (err.transient && ++interruptions <= 6) {
+            setNotice('The server took too long on this step. Nothing is lost; continuing from the last saved checkpoint…');
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            continue;
+          }
+          throw err;
+        }
+        lastJob = result.job;
+        // Real pace: only conversations finished during this session count, and an estimate needs at least two.
+        const finishedNow = Number(result.job?.processed || 0);
+        if (!paceRef.current) paceRef.current = { at: Date.now(), base: finishedNow };
+        else if (finishedNow - paceRef.current.base >= 2) setPace({ perChat: (Date.now() - paceRef.current.at) / 1000 / (finishedNow - paceRef.current.base) });
         setCurrentJob(result.job);
         if (result.results?.length) setResults((current) => [...current, ...result.results]);
         if (result.processed && result.processed.status !== 'completed') {
@@ -2046,6 +2197,16 @@ export default function Audits() {
         if (['completed', 'cancelled'].includes(result.job?.status) || result.done) break;
         if (result.retryAfterMs) await new Promise((resolve) => setTimeout(resolve, Math.min(result.retryAfterMs, 30000)));
         else await new Promise((resolve) => setTimeout(resolve, 350));
+      }
+      // Read the batch back from the database so the saved status and results on screen are what is really stored.
+      if (lastJob && ['completed', 'cancelled'].includes(lastJob.status)) {
+        const fresh = await fetch(`/api/audits?action=job&id=${encodeURIComponent(jobId)}`, { headers: { 'x-app-session': token } })
+          .then((response) => response.json())
+          .catch(() => null);
+        if (fresh?.job) {
+          setCurrentJob(fresh.job);
+          if (fresh.results) setResults(fresh.results);
+        }
       }
     } catch (err) {
       setError(err.message);
@@ -2877,6 +3038,7 @@ export default function Audits() {
                       )}
                     </div>
                   </section>
+                  <ProgressReport job={currentJob} results={results} running={running} elapsed={elapsed} pace={pace} />
                   <div className="audit-kpis">
                     <Metric label="Completed chats" value={currentJob.completed} />
                     <Metric label="Agent evaluations" value={currentJob.evaluations} />
