@@ -224,14 +224,16 @@ function hideJobCreator(payload) {
   return out;
 }
 
-async function prepareWorkloadAnchors(token, queue, admins, level2AgentIds) {
-  const records = [];
+async function prepareWorkloadAnchors(token, queue, admins, level2AgentIds, currentConversationId) {
+  const records = []; let firstConversation = null;
   for (let offset = 0; offset < queue.length; offset += 12) {
     const slice = queue.slice(offset, offset + 12);
     const fetched = await Promise.allSettled(slice.map((item) => fetchConversation(token, item.id)));
     fetched.forEach((entry, index) => {
       if (entry.status !== 'fulfilled') return;
-      const item = slice[index]; const conversation = entry.value; const turns = conversationTurns(conversation, admins);
+      const item = slice[index]; const conversation = entry.value;
+      if (String(item.id) === String(currentConversationId)) firstConversation = conversation;
+      const turns = conversationTurns(conversation, admins);
       const meaningful = meaningfulAgentIds(turns);
       const targetIds = auditTargetIds(item, meaningful);
       for (const targetId of targetIds) {
@@ -253,7 +255,7 @@ async function prepareWorkloadAnchors(token, queue, admins, level2AgentIds) {
     if (!ledger[key] || ledger[key].previousConversationId) continue;
     ledger[key] = { ...ledger[key], previousReplyAt: Number(item.previousAgentReplyAt), previousConversationId: String(item.previousConversationId), previousConversationLink: item.previousConversationLink || '' };
   }
-  return ledger;
+  return { ledger, firstConversation };
 }
 
 async function insertResult(sb, access, metadata, success = true) {
@@ -431,15 +433,16 @@ async function processNext(access, sb, jobId) {
   row = claimed; meta = row.metadata || meta;
   const keys = await getKeys();
   try {
-    const admins = await fetchIntercomAdmins(keys.intercomToken);
-    const level2AgentIds = await getAuditLevel2Config(sb);
+    const [admins, level2AgentIds] = await Promise.all([fetchIntercomAdmins(keys.intercomToken), getAuditLevel2Config(sb)]);
+    let preparedConversation = null;
     if (!meta.workloadAnchorsPrepared) {
       row = await updateJob(sb, row, { stage: 'Building the non-overlapping AHT ledger', currentConversationId: null });
-      const workloadAnchors = await prepareWorkloadAnchors(keys.intercomToken, queue, admins, level2AgentIds);
+      const prepared = await prepareWorkloadAnchors(keys.intercomToken, queue, admins, level2AgentIds, item.id);
+      const workloadAnchors = prepared.ledger; preparedConversation = prepared.firstConversation;
       row = await updateJob(sb, row, { workloadAnchors, workloadAnchorsPrepared: true, stage: 'AHT ledger ready — fetching the conversation', currentConversationId: item.id });
       meta = row.metadata || meta;
     }
-    const conversation = await fetchConversation(keys.intercomToken, item.id);
+    const conversation = preparedConversation || await fetchConversation(keys.intercomToken, item.id);
     const turns = conversationTurns(conversation, admins);
     const meaningful = meaningfulAgentIds(turns);
     const targetIds = auditTargetIds(item, meaningful);
@@ -453,7 +456,7 @@ async function processNext(access, sb, jobId) {
     row = await updateJob(sb, row, { stage: 'Removing personal information before AI analysis' });
     const redacted = redactConversation(turns, conversation, admins);
     row = await updateJob(sb, row, { stage: 'Matching current FAQs, Notices and approved corrections' });
-    const knowledge = await retrieveAuditEvidence(sb, redacted.transcript);
+    const knowledge = await retrieveAuditEvidence(sb, redacted.transcript, { keys });
     const produced = [];
     // An earlier pass may have been cut off after saving some agents. Those are never scored (or saved) twice.
     const savedRows = checked(await sb.from('activity_logs').select('id,metadata').eq('event_type', 'conversation_audit_result').contains('metadata', { jobId: String(jobId), conversationId: String(item.id), status: 'completed' }).limit(50), 'Could not check results already saved for this conversation');
@@ -466,7 +469,7 @@ async function processNext(access, sb, jobId) {
       const metrics = deriveMetrics(conversation, turns, targetId, { supportLevel: level2AgentIds.includes(String(targetId)) ? 'level2' : 'standard', thresholds: meta.thresholds, ahtAnchors });
       const auditFingerprint = auditInputFingerprint({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgentId: targetId });
       const cached = await cachedAuditResult(sb, auditFingerprint);
-      const model = cached ? null : await runAuditModel({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgent: { token: redacted.agentTokens[targetId] || '[TARGET_AGENT]', conversationAt: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '' } }, sb, { deadlineAt });
+      const model = cached ? null : await runAuditModel({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgent: { token: redacted.agentTokens[targetId] || '[TARGET_AGENT]', conversationAt: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '' } }, sb, { deadlineAt, keys });
       const restoredAudit = cached?.audit || restoreAuditTokens(model.audit, redacted.tokenReplacements);
       return insertResult(sb, access, {
         jobId: String(jobId), status: 'completed', conversationId: String(item.id), conversationDate: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '',
