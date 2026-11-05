@@ -570,3 +570,32 @@ body { font-size: var(--fs-md); line-height: 1.55; }
   .audit-shell .history-list .history-open > .history-timing { grid-column: 1 / -1; grid-row: 5; justify-self: start; }
   .audit-shell .history-state { justify-self: start; }
 }
+
+/* ---- progress report and saved banner ---- */
+.audit-shell .progress-report { margin: 14px 0 0; padding: 18px 20px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); display: grid; gap: 14px; }
+.audit-shell .progress-steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.audit-shell .progress-steps li { position: relative; display: grid; gap: 2px; padding: 10px 12px 10px 40px; border-radius: var(--r-md); border: 1px solid var(--line); background: var(--surface-2); min-width: 0; }
+.audit-shell .progress-steps li i { position: absolute; left: 12px; top: 12px; width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--line-strong, var(--line)); display: grid; place-items: center; font-style: normal; font-size: 12px; font-weight: 800; color: var(--on-accent); box-sizing: border-box; }
+.audit-shell .progress-steps li b { font-size: var(--fs-sm); }
+.audit-shell .progress-steps li small { font-size: var(--fs-xs); color: var(--muted); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.audit-shell .progress-steps li.todo { opacity: .6; }
+.audit-shell .progress-steps li.done i { background: var(--success); border-color: var(--success); }
+.audit-shell .progress-steps li.active { border-color: var(--violet-3, var(--violet)); }
+.audit-shell .progress-steps li.active i { border-color: var(--violet); border-top-color: transparent; animation: progress-spin .9s linear infinite; }
+.audit-shell .progress-steps li.stopped i { background: var(--warn); border-color: var(--warn); }
+.audit-shell .progress-facts { margin: 0; display: flex; flex-wrap: wrap; gap: 10px 28px; }
+.audit-shell .progress-facts > div { min-width: 96px; }
+.audit-shell .progress-facts dt { font-size: var(--fs-xs); font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.audit-shell .progress-facts dd { margin: 2px 0 0; font-size: var(--fs-lg); font-weight: 700; font-variant-numeric: tabular-nums; }
+.audit-shell .progress-facts dd small { font-size: var(--fs-xs); font-weight: 500; color: var(--muted); margin-left: 4px; }
+.audit-shell .progress-facts .bad dd { color: var(--danger); }
+.audit-shell .progress-now, .audit-shell .progress-note { margin: 0; font-size: var(--fs-sm); color: var(--muted); }
+.audit-shell .progress-note { padding: 8px 12px; border-radius: var(--r-sm); background: var(--warn-soft); color: var(--ink); }
+.audit-shell .save-banner { display: grid; gap: 2px; padding: 12px 14px; border-radius: var(--r-md); border: 1px solid transparent; font-size: var(--fs-sm); line-height: 1.5; animation: progress-pop .35s var(--ease); }
+.audit-shell .save-banner b { font-size: var(--fs-md); }
+.audit-shell .save-banner.ok { background: var(--success-soft); border-color: var(--success); }
+.audit-shell .save-banner.warn { background: var(--warn-soft); border-color: var(--warn); }
+@keyframes progress-spin { to { transform: rotate(360deg); } }
+@keyframes progress-pop { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@media (max-width: 760px) { .audit-shell .progress-steps { grid-template-columns: 1fr 1fr; } }
+@media (prefers-reduced-motion: reduce) { .audit-shell .progress-steps li.active i, .audit-shell .save-banner { animation: none; } }
