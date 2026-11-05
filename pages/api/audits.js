@@ -32,7 +32,7 @@ function publicJob(row, enrichment = {}) {
     evaluations: Number(meta.evaluations || 0), currentConversationId: meta.currentConversationId || null,
     pauseRequested: !!meta.pauseRequested, cancelRequested: !!meta.cancelRequested,
     filters: meta.filters || {}, seed: meta.seed || '', rubricVersion: meta.rubricVersion || AUDIT_RUBRIC_VERSION,
-    updatedAt: meta.updatedAt || row?.created_at, error: meta.error || '', directIds: meta.directIds || [], agentNames,
+    updatedAt: meta.updatedAt || row?.created_at, finishedAt: meta.finishedAt || '', error: meta.error || '', directIds: meta.directIds || [], agentNames,
     scoreSummary: enrichment.scoreSummary || meta.scoreSummary || null,
     timingSummary: enrichment.timingSummary || meta.timingSummary || null,
     selection: meta.selection ? { checked: Number(meta.selection.checked || 0), available: Number(meta.selection.available || 0), requested: Number(meta.selection.requested || 0) } : null
@@ -170,6 +170,9 @@ async function resultsWithLiveTranscripts(results, intercomToken) {
 async function updateJob(sb, row, patch) {
   const latest = checked(await sb.from('activity_logs').select('*').eq('id', row.id).eq('event_type', 'conversation_audit_job').single(), 'Could not refresh audit controls');
   const metadata = { ...(latest.metadata || {}), ...patch, updatedAt: new Date().toISOString() };
+  // The moment a batch ends is saved together with its final status.
+  if (['completed', 'cancelled', 'failed'].includes(metadata.status) && !metadata.finishedAt) metadata.finishedAt = metadata.updatedAt;
+  if (!['completed', 'cancelled', 'failed'].includes(metadata.status) && metadata.finishedAt) delete metadata.finishedAt;
   const success = metadata.status === 'completed' ? true : metadata.status === 'failed' ? false : latest.success;
   const data = checked(await sb.from('activity_logs').update({ metadata, success }).eq('id', row.id).select('*').single(), 'Could not save audit progress');
   return data;
@@ -194,6 +197,14 @@ async function claimJobIndex(sb, row, index, conversationId) {
 function intercomLink(conversation) {
   return conversation?.links?.conversation_web || conversation?.links?.conversation || conversation?.conversation_web_url ||
     `https://app.intercom.com/a/inbox/_/inbox/search?query=${encodeURIComponent(conversation?.id || '')}`;
+}
+
+// Runs the tasks with at most `limit` in flight and reports each outcome; one failure never hides the others.
+async function runLimited(items, limit, task) {
+  const outcomes = new Array(items.length); let next = 0;
+  const worker = async () => { while (next < items.length) { const index = next++; try { outcomes[index] = { ok: true, value: await task(items[index]) }; } catch (error) { outcomes[index] = { ok: false, error }; } } };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return outcomes;
 }
 
 // A pasted conversation ID has no chosen agent, so every human who gave a real answer in the chat is
@@ -266,6 +277,14 @@ async function cachedAuditResult(sb, fingerprint) {
   return data ? publicResult(data) : null;
 }
 
+// Only the conversation and agent ids are needed to avoid repeats, so the large saved audits are not downloaded.
+// If the database rejects the slim query, the full one still works.
+async function previouslyAuditedRows(sb) {
+  const slim = await sb.from('activity_logs').select('conversationId:metadata->>conversationId,agentId:metadata->>agentId').eq('event_type', 'conversation_audit_result').eq('success', true).limit(5000);
+  if (!slim.error && Array.isArray(slim.data)) return slim.data.map((row) => ({ metadata: { conversationId: row.conversationId, agentId: row.agentId } }));
+  return checked(await sb.from('activity_logs').select('metadata').eq('event_type', 'conversation_audit_result').eq('success', true).limit(5000), 'Could not check previous audits');
+}
+
 async function createJob(req, access, sb, body) {
   const keys = await getKeys();
   if (!keys.intercomToken) throw new Error('Intercom is not connected. Add the API key in Admin first.');
@@ -306,7 +325,7 @@ async function createJob(req, access, sb, body) {
     if (requestedSize > 100) throw new Error('The total sample cannot exceed 100 conversations.');
     const [candidates, previousRows] = await Promise.all([
       findConversationCandidates(keys.intercomToken, { agentIds: requested, from: body.from, to: body.to, maxPerAgent: Math.max(150, requestedSize * 4) }),
-      checked(await sb.from('activity_logs').select('metadata').eq('event_type', 'conversation_audit_result').eq('success', true).limit(5000), 'Could not check previous audits')
+      previouslyAuditedRows(sb)
     ]);
     if (!candidates.length) throw new Error('Intercom returned no conversations for the selected agents and date range.');
     const previouslyAudited = new Set((previousRows || []).map((row) => {
@@ -335,6 +354,8 @@ function cryptoRandom() {
 }
 
 async function processNext(access, sb, jobId) {
+  // The function is cut off at 120s; Gemini must hand back before that so progress is never lost.
+  const deadlineAt = Date.now() + 100000;
   let row = await loadJob(sb, jobId); let meta = row.metadata || {};
   if (meta.status === 'completed' || meta.status === 'cancelled') return { job: publicJob(row), results: await loadResults(sb, jobId), done: true };
   if (meta.pauseRequested) return { job: publicJob(await updateJob(sb, row, { status: 'paused', stage: 'Paused safely — progress is saved', currentConversationId: null })), done: true, paused: true };
@@ -434,17 +455,20 @@ async function processNext(access, sb, jobId) {
     row = await updateJob(sb, row, { stage: 'Matching current FAQs, Notices and approved corrections' });
     const knowledge = await retrieveAuditEvidence(sb, redacted.transcript);
     const produced = [];
-    for (const targetId of targetIds) {
+    // An earlier pass may have been cut off after saving some agents. Those are never scored (or saved) twice.
+    const savedRows = checked(await sb.from('activity_logs').select('id,metadata').eq('event_type', 'conversation_audit_result').contains('metadata', { jobId: String(jobId), conversationId: String(item.id), status: 'completed' }).limit(50), 'Could not check results already saved for this conversation');
+    const alreadyScored = new Set((savedRows || []).map((saved) => String(saved.metadata?.agentId || '')));
+    const pendingIds = targetIds.filter((id) => !alreadyScored.has(String(id)));
+    const scoreTarget = async (targetId) => {
       const agent = admins.find((candidate) => candidate.id === targetId) || { id: targetId, name: turns.find((turn) => turn.authorId === targetId)?.authorName || `Agent ${targetId}` };
       const prefix = `${item.id}:${targetId}:`; const ahtAnchors = {};
       for (const [key, value] of Object.entries(meta.workloadAnchors || {})) if (key.startsWith(prefix)) ahtAnchors[key.slice(prefix.length)] = value;
       const metrics = deriveMetrics(conversation, turns, targetId, { supportLevel: level2AgentIds.includes(String(targetId)) ? 'level2' : 'standard', thresholds: meta.thresholds, ahtAnchors });
       const auditFingerprint = auditInputFingerprint({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgentId: targetId });
-      row = await updateJob(sb, row, { stage: `Scoring ${agent.name} with evidence`, currentConversationId: item.id });
       const cached = await cachedAuditResult(sb, auditFingerprint);
-      const model = cached ? null : await runAuditModel({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgent: { token: redacted.agentTokens[targetId] || '[TARGET_AGENT]', conversationAt: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '' } }, sb);
+      const model = cached ? null : await runAuditModel({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgent: { token: redacted.agentTokens[targetId] || '[TARGET_AGENT]', conversationAt: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '' } }, sb, { deadlineAt });
       const restoredAudit = cached?.audit || restoreAuditTokens(model.audit, redacted.tokenReplacements);
-      const result = await insertResult(sb, access, {
+      return insertResult(sb, access, {
         jobId: String(jobId), status: 'completed', conversationId: String(item.id), conversationDate: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '',
         agentId: targetId, agentName: agent.name, agentEmail: agent.email || '', intercomLink: intercomLink(conversation), audit: restoredAudit, metrics,
         evidence: knowledge.evidence.map(({ kind, id, title, url, postedAt }) => ({ kind, id, title, url, postedAt })), evidenceRetrievedAt: knowledge.retrievedAt,
@@ -454,13 +478,21 @@ async function processNext(access, sb, jobId) {
         keyName: cached?.keyName || model?.keyName, keyFingerprint: cached?.keyFingerprint || model?.keyFingerprint,
         routeAttempts: cached ? [] : model?.attempts, usage: cached ? {} : model?.usage
       });
-      produced.push(result);
+    };
+    if (pendingIds.length) {
+      const names = pendingIds.map((id) => admins.find((candidate) => candidate.id === id)?.name || turns.find((turn) => turn.authorId === id)?.authorName || 'the agent');
+      row = await updateJob(sb, row, { stage: pendingIds.length > 1 ? `Scoring ${pendingIds.length} agents together: ${names.join(', ')}` : `Scoring ${names[0]} with evidence`, currentConversationId: item.id });
     }
+    // Agents in one chat are scored at the same time (three at most), so a five-agent chat takes about as long as one.
+    const outcomes = await runLimited(pendingIds, 3, scoreTarget);
+    for (const outcome of outcomes) if (outcome.ok) produced.push(outcome.value);
+    const failed = outcomes.find((outcome) => !outcome.ok);
+    if (failed) throw failed.error;
     const nextProcessed = index + 1;
     const latestControl = (await loadJob(sb, jobId)).metadata || {};
     const controlledStatus = latestControl.cancelRequested ? 'cancelled' : latestControl.pauseRequested ? 'paused' : nextProcessed >= queue.length ? 'completed' : 'running';
     row = await updateJob(sb, row, {
-      processed: nextProcessed, completed: Number(meta.completed || 0) + 1, evaluations: Number(meta.evaluations || 0) + produced.length,
+      processed: nextProcessed, completed: Number(meta.completed || 0) + 1, evaluations: Number(meta.evaluations || 0) + produced.length + (targetIds.length - pendingIds.length),
       agentNames: [...new Set([...(latestControl.agentNames || meta.agentNames || []), ...produced.map((result) => result.agentName).filter(Boolean)])],
       stage: controlledStatus === 'cancelled' ? 'Audit cancelled — completed results remain saved' : controlledStatus === 'paused' ? 'Paused safely — progress is saved' : nextProcessed >= queue.length ? 'Audit completed' : 'Saved securely — moving to the next conversation',
       status: controlledStatus, currentConversationId: null, processingIndex: null, processingConversationId: null, processingClaim: null
