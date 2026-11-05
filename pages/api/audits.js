@@ -35,7 +35,7 @@ function publicJob(row, enrichment = {}) {
     updatedAt: meta.updatedAt || row?.created_at, finishedAt: meta.finishedAt || '', error: meta.error || '', directIds: meta.directIds || [], agentNames,
     scoreSummary: enrichment.scoreSummary || meta.scoreSummary || null,
     timingSummary: enrichment.timingSummary || meta.timingSummary || null,
-    selection: meta.selection ? { checked: Number(meta.selection.checked || 0), available: Number(meta.selection.available || 0), requested: Number(meta.selection.requested || 0) } : null
+    selection: meta.selection ? { checked: Number(meta.selection.checked || 0), available: Number(meta.selection.available || 0), requested: Number(meta.selection.requested || 0), completed: !!meta.selection.completed || (Array.isArray(meta.queue) && meta.queue.length > 0) } : null
   };
 }
 
@@ -362,7 +362,7 @@ async function processNext(access, sb, jobId) {
   if (meta.status === 'completed' || meta.status === 'cancelled') return { job: publicJob(row), results: await loadResults(sb, jobId), done: true };
   if (meta.pauseRequested) return { job: publicJob(await updateJob(sb, row, { status: 'paused', stage: 'Paused safely — progress is saved', currentConversationId: null })), done: true, paused: true };
   let queue = Array.isArray(meta.queue) ? meta.queue : [];
-  if (meta.mode === 'sample' && meta.selection && Number(meta.selection.checked || 0) < Number(meta.selection.available || 0)) {
+  if (meta.mode === 'sample' && meta.selection && !meta.selection.completed && !queue.length && Number(meta.selection.checked || 0) < Number(meta.selection.available || 0)) {
     const keys = await getKeys();
     const selection = { ...meta.selection, candidates: Array.isArray(meta.selection.candidates) ? meta.selection.candidates : [], eligible: Array.isArray(meta.selection.eligible) ? meta.selection.eligible : [] };
     const start = Number(selection.checked || 0); const slice = selection.candidates.slice(start, start + 8);
@@ -416,6 +416,7 @@ async function processNext(access, sb, jobId) {
       row = await updateJob(sb, row, { selection, status: 'failed', stage: 'No eligible conversations found', error: 'No conversations with meaningful human-agent participation were found in this selection.', total: 0 });
       return { job: publicJob(row), done: true };
     }
+    selection.completed = true;
     row = await updateJob(sb, row, { selection, queue, total: queue.length, stage: `Sample ready · ${queue.length} conversations selected` });
     meta = row.metadata || {}; queue = meta.queue || [];
   }
