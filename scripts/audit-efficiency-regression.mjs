@@ -76,4 +76,12 @@ check(/function hideJobCreator/.test(auditApi) && /!canManageAudits\(access\)\) 
 check(/action === 'save-access'\) \{\s*if \(!canManageAudits\(access\)\)/.test(auditApi) && /action === 'save-self-access'\) \{\s*if \(!canManageAudits\(access\)\)/.test(auditApi), 'only they can change audit access');
 check(/config: !access\.external && canManageAudits\(access\) \? await getAuditAccessConfig/.test(auditApi), 'the authorized-auditor list is only sent to them');
 
+// Speed and reliability: nothing may run past the 120s function limit, and a cut-off call resumes without repeats.
+check(/MODEL_CALL_BUDGET_MS = 100000/.test(auditSource) && /ATTEMPT_TIMEOUT_MS = 30000/.test(auditSource) && /AUDIT_ROUTES_COOLDOWN/.test(auditSource), 'every Gemini attempt is limited to 30s and the whole call to a 100s budget');
+check(!/classified\.kind === 'transient' && pass === 0/.test(auditSource), 'an overloaded key is not asked again straight away');
+check(/MODEL_FAILURE_LIMIT/.test(auditSource) && /MODEL_COOLDOWNS/.test(auditSource), 'repeated failures move to the next configured model instead of trying every key');
+check(/runLimited\(pendingIds, 3, scoreTarget\)/.test(auditApi) && /alreadyScored/.test(auditApi), 'agents in one chat are scored together and never saved twice on a retry');
+check(/finishedAt/.test(auditApi) && /function ProgressReport/.test(auditPage) && /save-banner/.test(auditPage), 'the batch saves its finish time and the page shows a real progress report and saved status');
+check(/err\.transient/.test(auditPage) && /continuing from the last saved checkpoint/.test(auditPage), 'a timed-out server call resumes by itself instead of stopping the audit');
+
 console.log(`audit efficiency regression: ${count} assertions passed`);
