@@ -180,12 +180,16 @@ async function updateJob(sb, row, patch) {
 
 async function claimJobIndex(sb, row, index, conversationId) {
   const expectedUpdatedAt = String(row?.metadata?.updatedAt || '');
+  const claimedAt = Date.parse(row?.metadata?.processingClaimAt || '');
+  if (row?.metadata?.processingClaim && Number.isFinite(claimedAt) && Date.now() - claimedAt < 130000) return null;
   if (!expectedUpdatedAt) return null;
+  const previousUpdateMs = Date.parse(expectedUpdatedAt);
+  const claimUpdate = new Date(Math.max(Date.now(), Number.isFinite(previousUpdateMs) ? previousUpdateMs + 1 : 0)).toISOString();
   const metadata = {
     ...(row.metadata || {}), status: 'running', processingIndex: Number(index),
-    processingConversationId: String(conversationId), processingClaim: cryptoRandom(),
+    processingConversationId: String(conversationId), processingClaim: cryptoRandom(), processingClaimAt: new Date().toISOString(),
     stage: 'Fetching the complete Intercom conversation', currentConversationId: String(conversationId),
-    error: '', updatedAt: new Date().toISOString()
+    error: '', updatedAt: claimUpdate
   };
   const result = await sb.from('activity_logs').update({ metadata })
     .eq('id', row.id).eq('event_type', 'conversation_audit_job')
@@ -242,6 +246,11 @@ async function prepareWorkloadAnchors(token, queue, admins, level2AgentIds, curr
       }
     });
   }
+  const ledger = workloadLedgerWithCandidateTrace(records, queue);
+  return { ledger, firstConversation };
+}
+
+function workloadLedgerWithCandidateTrace(records, queue) {
   const ledger = buildAgentWorkloadLedger(records);
   // The selected queue is only a sample, so the immediately preceding handled
   // conversation can sit outside it. Candidate discovery preserves that trace;
@@ -255,7 +264,7 @@ async function prepareWorkloadAnchors(token, queue, admins, level2AgentIds, curr
     if (!ledger[key] || ledger[key].previousConversationId) continue;
     ledger[key] = { ...ledger[key], previousReplyAt: Number(item.previousAgentReplyAt), previousConversationId: String(item.previousConversationId), previousConversationLink: item.previousConversationLink || '' };
   }
-  return { ledger, firstConversation };
+  return ledger;
 }
 
 async function insertResult(sb, access, metadata, success = true) {
@@ -355,6 +364,31 @@ function cryptoRandom() {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+// Prepare later chats only while holding the batch claim. A retry finds saved results before calling a model again.
+async function prefetchConversationResult(item, { access, sb, jobId, keys, admins, level2AgentIds, meta, deadlineAt }) {
+  const id = String(item.id || ''); let targetId = String(item.targetAgentId || ''); if (!id) return null;
+  const saved = checked(await sb.from('activity_logs').select('id,metadata').eq('event_type', 'conversation_audit_result').contains('metadata', { jobId: String(jobId), conversationId: id, status: 'completed' }).limit(50), 'Could not check saved results');
+  if (targetId && (saved || []).some((row) => String(row.metadata?.agentId || '') === targetId)) return null;
+  const conversation = await fetchConversation(keys.intercomToken, id); const turns = conversationTurns(conversation, admins);
+  const meaningful = meaningfulAgentIds(turns);
+  if (!targetId) { if (meaningful.length !== 1) return null; targetId = String(meaningful[0]); }
+  if (!meaningful.includes(targetId) || (saved || []).some((row) => String(row.metadata?.agentId || '') === targetId)) return null;
+  const redacted = redactConversation(turns, conversation, admins);
+  try {
+    const knowledge = await retrieveAuditEvidence(sb, redacted.transcript, { keys });
+    const agent = admins.find((candidate) => candidate.id === targetId) || { id: targetId, name: turns.find((turn) => turn.authorId === targetId)?.authorName || `Agent ${targetId}` };
+    const prefix = `${id}:${targetId}:`; const ahtAnchors = {};
+    for (const [key, value] of Object.entries(meta.workloadAnchors || {})) if (key.startsWith(prefix)) ahtAnchors[key.slice(prefix.length)] = value;
+    const metrics = deriveMetrics(conversation, turns, targetId, { supportLevel: level2AgentIds.includes(targetId) ? 'level2' : 'standard', thresholds: meta.thresholds, ahtAnchors });
+    const auditFingerprint = auditInputFingerprint({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgentId: targetId });
+    const cached = await cachedAuditResult(sb, auditFingerprint);
+    const model = cached ? null : await runAuditModel({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgent: { token: redacted.agentTokens[targetId] || '[TARGET_AGENT]', conversationAt: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '' } }, sb, { deadlineAt, keys });
+    const controls = (await loadJob(sb, jobId)).metadata || {};
+    if (controls.cancelRequested || controls.pauseRequested) return null;
+    return await insertResult(sb, access, { jobId: String(jobId), status: 'completed', conversationId: id, conversationDate: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '', agentId: targetId, agentName: agent.name, agentEmail: agent.email || '', intercomLink: intercomLink(conversation), audit: cached?.audit || restoreAuditTokens(model.audit, redacted.tokenReplacements), metrics, evidence: knowledge.evidence.map(({ kind, id: evidenceId, title, url, postedAt }) => ({ kind, id: evidenceId, title, url, postedAt })), evidenceRetrievedAt: knowledge.retrievedAt, redactionCount: redacted.redactionCount, rubricVersion: AUDIT_RUBRIC_VERSION, auditInputFingerprint: auditFingerprint, reusedDeterministicResult: !!cached, reusedFromResultId: cached?.id || null, provider: cached?.provider || 'gemini', model: cached?.model || model?.model, keyName: cached?.keyName || model?.keyName, keyFingerprint: cached?.keyFingerprint || model?.keyFingerprint, routeAttempts: cached ? [] : model?.attempts, usage: cached ? {} : model?.usage });
+  } finally { redacted.ephemeralMap.clear(); redacted.tokenReplacements.clear(); }
+}
+
 async function processNext(access, sb, jobId) {
   // The function is cut off at 120s; Gemini must hand back before that so progress is never lost.
   const deadlineAt = Date.now() + 100000;
@@ -367,7 +401,7 @@ async function processNext(access, sb, jobId) {
     const selection = { ...meta.selection, candidates: Array.isArray(meta.selection.candidates) ? meta.selection.candidates : [], eligible: Array.isArray(meta.selection.eligible) ? meta.selection.eligible : [] };
     const start = Number(selection.checked || 0); const slice = selection.candidates.slice(start, start + 8);
     row = await updateJob(sb, row, { status: 'running', stage: `Checking eligible conversations · ${start}/${selection.available}`, currentConversationId: null, error: '' });
-    const [admins, fetched] = await Promise.all([fetchIntercomAdmins(keys.intercomToken), Promise.allSettled(slice.map((candidate) => fetchConversation(keys.intercomToken, candidate.id)))]);
+    const [admins, level2AgentIds, fetched] = await Promise.all([fetchIntercomAdmins(keys.intercomToken), getAuditLevel2Config(sb), Promise.allSettled(slice.map((candidate) => fetchConversation(keys.intercomToken, candidate.id)))]);
     fetched.forEach((result, index) => {
       if (result.status !== 'fulfilled') return;
       const candidate = slice[index]; const turns = conversationTurns(result.value, admins);
@@ -375,7 +409,12 @@ async function processNext(access, sb, jobId) {
       const agentReplies = turns.filter((turn) => turn.kind === 'agent' && turn.authorId === String(candidate.agentId) && turn.body);
       const agentMessageCount = agentReplies.length;
       const identity = `${candidate.id}:${candidate.agentId}`;
-      if (!selection.eligible.some((item) => `${item.id}:${item.agentId}` === identity)) selection.eligible.push({ ...candidate, agentMessageCount, agentReplyTimes: agentReplies.map((turn) => turn.at).filter(Number.isFinite) });
+      if (!selection.eligible.some((item) => `${item.id}:${item.agentId}` === identity)) {
+        const measured = deriveMetrics(result.value, turns, String(candidate.agentId), { supportLevel: level2AgentIds.includes(String(candidate.agentId)) ? 'level2' : 'standard', thresholds: meta.thresholds });
+        // Persist structured timing only; transcript text and personal data remain request-scoped.
+        const workloadCycles = (measured.ahtCycles || []).map(({ replyId, replyAt, readyAt, startAt, endAt, incomplete, basis }) => ({ replyId, replyAt, readyAt, startAt, endAt, incomplete, basis }));
+        selection.eligible.push({ ...candidate, agentMessageCount, agentReplyTimes: agentReplies.map((turn) => turn.at).filter(Number.isFinite), workloadCycles, workloadLink: intercomLink(result.value) });
+      }
     });
     selection.checked = Math.min(selection.available, start + slice.length);
     const exhausted = selection.checked >= selection.available;
@@ -417,7 +456,11 @@ async function processNext(access, sb, jobId) {
       return { job: publicJob(row), done: true };
     }
     selection.completed = true;
-    row = await updateJob(sb, row, { selection, queue, total: queue.length, stage: `Sample ready · ${queue.length} conversations selected` });
+    // Old in-progress batches may lack timing snapshots: retain their existing full-fetch path.
+    const canReuseTiming = selected.length === queue.length && selected.every((item) => Array.isArray(item.workloadCycles));
+    const records = canReuseTiming ? selected.map((item) => ({ conversationId: String(item.id), agentId: String(item.agentId), intercomLink: item.workloadLink || '', cycles: item.workloadCycles })) : [];
+    const timingPatch = canReuseTiming ? { workloadAnchors: workloadLedgerWithCandidateTrace(records, queue), workloadAnchorsPrepared: true } : {};
+    row = await updateJob(sb, row, { selection, queue, ...timingPatch, total: queue.length, stage: `Sample ready · ${queue.length} conversations selected` });
     meta = row.metadata || {}; queue = meta.queue || [];
   }
   const index = Number(meta.processed || 0);
@@ -432,7 +475,7 @@ async function processNext(access, sb, jobId) {
     return { job: publicJob(latest), done: false, retryAfterMs: 1200, retrying: true, claimBusy: true };
   }
   row = claimed; meta = row.metadata || meta;
-  const keys = await getKeys();
+  const keys = await getKeys(); let pendingPrefetch = null;
   try {
     const [admins, level2AgentIds] = await Promise.all([fetchIntercomAdmins(keys.intercomToken), getAuditLevel2Config(sb)]);
     let preparedConversation = null;
@@ -454,15 +497,29 @@ async function processNext(access, sb, jobId) {
       if (index + 1 >= queue.length) row = await updateJob(sb, row, { status: 'completed', stage: 'Audit completed' });
       return { job: publicJob(row), processed: { conversationId: item.id, status: 'skipped', reason } };
     }
+    const savedRows = checked(await sb.from('activity_logs').select('id,metadata').eq('event_type', 'conversation_audit_result').contains('metadata', { jobId: String(jobId), conversationId: String(item.id), status: 'completed' }).limit(50), 'Could not check results already saved for this conversation');
+    const alreadyScored = new Set((savedRows || []).map((saved) => String(saved.metadata?.agentId || '')));
+    const pendingIds = targetIds.filter((id) => !alreadyScored.has(String(id)));
+    // Only start ahead after a recent healthy uncached model response; never fan out during cooldown.
+    if (['sample','direct'].includes(meta.mode) && targetIds.length === 1 && meta.allowParallelNext && meta.workloadAnchorsPrepared) {
+      const upcoming = queue.slice(index + 1, index + 3);
+      if (upcoming.length) pendingPrefetch = runLimited(upcoming, 2, (candidate) => prefetchConversationResult(candidate, { access, sb, jobId, keys, admins, level2AgentIds, meta, deadlineAt }));
+    }
+    if (!pendingIds.length) {
+      const ahead = pendingPrefetch ? await pendingPrefetch : [];
+      const prefetched = ahead.filter((entry) => entry.ok && entry.value).map((entry) => entry.value);
+      const latest = (await loadJob(sb, jobId)).metadata || {}; let next = index + 1;
+      while (next < queue.length && prefetched.some((result) => String(result.conversationId) === String(queue[next].id) && (!queue[next].targetAgentId || String(result.agentId) === String(queue[next].targetAgentId)))) next += 1;
+      const advanced = next - index;
+      const status = latest.cancelRequested ? 'cancelled' : latest.pauseRequested ? 'paused' : next >= queue.length ? 'completed' : 'running';
+      row = await updateJob(sb, row, { processed: next, completed: Number(meta.completed || 0) + advanced, evaluations: Number(meta.evaluations || 0) + targetIds.length + advanced - 1, status, stage: status === 'completed' ? 'Audit completed' : status === 'cancelled' ? 'Audit cancelled — completed results remain saved' : status === 'paused' ? 'Paused safely — progress is saved' : 'Saved securely — moving to the next conversation', currentConversationId: null, processingIndex: null, processingConversationId: null, processingClaim: null, processingClaimAt: null });
+      return { job: publicJob(row), processed: { conversationId: item.id, status: 'already_saved' }, results: prefetched, done: ['paused','cancelled','completed'].includes(status) };
+    }
     row = await updateJob(sb, row, { stage: 'Removing personal information before AI analysis' });
     const redacted = redactConversation(turns, conversation, admins);
     row = await updateJob(sb, row, { stage: 'Matching current FAQs, Notices and approved corrections' });
     const knowledge = await retrieveAuditEvidence(sb, redacted.transcript, { keys });
     const produced = [];
-    // An earlier pass may have been cut off after saving some agents. Those are never scored (or saved) twice.
-    const savedRows = checked(await sb.from('activity_logs').select('id,metadata').eq('event_type', 'conversation_audit_result').contains('metadata', { jobId: String(jobId), conversationId: String(item.id), status: 'completed' }).limit(50), 'Could not check results already saved for this conversation');
-    const alreadyScored = new Set((savedRows || []).map((saved) => String(saved.metadata?.agentId || '')));
-    const pendingIds = targetIds.filter((id) => !alreadyScored.has(String(id)));
     const scoreTarget = async (targetId) => {
       const agent = admins.find((candidate) => candidate.id === targetId) || { id: targetId, name: turns.find((turn) => turn.authorId === targetId)?.authorName || `Agent ${targetId}` };
       const prefix = `${item.id}:${targetId}:`; const ahtAnchors = {};
@@ -485,45 +542,52 @@ async function processNext(access, sb, jobId) {
     };
     if (pendingIds.length) {
       const names = pendingIds.map((id) => admins.find((candidate) => candidate.id === id)?.name || turns.find((turn) => turn.authorId === id)?.authorName || 'the agent');
-      row = await updateJob(sb, row, { stage: pendingIds.length > 1 ? `Scoring ${pendingIds.length} agents together: ${names.join(', ')}` : `Scoring ${names[0]} with evidence`, currentConversationId: item.id });
+      row = await updateJob(sb, row, { stage: pendingPrefetch ? 'Scoring up to 3 conversations concurrently' : pendingIds.length > 1 ? `Scoring ${pendingIds.length} agents together: ${names.join(', ')}` : `Scoring ${names[0]} with evidence`, currentConversationId: item.id });
     }
     // Agents in one chat are scored at the same time (three at most), so a five-agent chat takes about as long as one.
     const outcomes = await runLimited(pendingIds, 3, scoreTarget);
     for (const outcome of outcomes) if (outcome.ok) produced.push(outcome.value);
     const failed = outcomes.find((outcome) => !outcome.ok);
     if (failed) throw failed.error;
-    const nextProcessed = index + 1;
+    const ahead = pendingPrefetch ? await pendingPrefetch : [];
+    const prefetched = ahead.filter((entry) => entry.ok && entry.value).map((entry) => entry.value);
+    let nextProcessed = index + 1;
+    while (nextProcessed < queue.length && prefetched.some((result) => String(result.conversationId) === String(queue[nextProcessed].id) && (!queue[nextProcessed].targetAgentId || String(result.agentId) === String(queue[nextProcessed].targetAgentId)))) nextProcessed += 1;
+    const advanced = nextProcessed - index;
     const latestControl = (await loadJob(sb, jobId)).metadata || {};
     const controlledStatus = latestControl.cancelRequested ? 'cancelled' : latestControl.pauseRequested ? 'paused' : nextProcessed >= queue.length ? 'completed' : 'running';
     row = await updateJob(sb, row, {
-      processed: nextProcessed, completed: Number(meta.completed || 0) + 1, evaluations: Number(meta.evaluations || 0) + produced.length + (targetIds.length - pendingIds.length),
+      allowParallelNext: ahead.every((entry) => entry.ok) && produced.some((entry) => !entry.reusedDeterministicResult && !(entry.routeAttempts || []).some((attempt) => ['transient','rate_limit'].includes(attempt.status))),
+      processed: nextProcessed, completed: Number(meta.completed || 0) + advanced, evaluations: Number(meta.evaluations || 0) + produced.length + (targetIds.length - pendingIds.length) + advanced - 1,
       agentNames: [...new Set([...(latestControl.agentNames || meta.agentNames || []), ...produced.map((result) => result.agentName).filter(Boolean)])],
       stage: controlledStatus === 'cancelled' ? 'Audit cancelled — completed results remain saved' : controlledStatus === 'paused' ? 'Paused safely — progress is saved' : nextProcessed >= queue.length ? 'Audit completed' : 'Saved securely — moving to the next conversation',
-      status: controlledStatus, currentConversationId: null, processingIndex: null, processingConversationId: null, processingClaim: null
+      status: controlledStatus, currentConversationId: null, processingIndex: null, processingConversationId: null, processingClaim: null, processingClaimAt: null
     });
     // The replacement map was scoped to this request and becomes unreachable here.
     redacted.ephemeralMap.clear();
     redacted.tokenReplacements.clear();
-    return { job: publicJob(row), processed: { conversationId: item.id, status: 'completed', evaluations: produced.length }, results: produced, done: ['paused','cancelled','completed'].includes(controlledStatus) };
+    return { job: publicJob(row), processed: { conversationId: item.id, status: 'completed', evaluations: produced.length }, results: [...produced, ...prefetched], done: ['paused','cancelled','completed'].includes(controlledStatus) };
   } catch (error) {
+    const ahead = pendingPrefetch ? await pendingPrefetch : [];
+    const prefetched = ahead.filter((entry) => entry.ok && entry.value).map((entry) => entry.value);
     const latestControl = (await loadJob(sb, jobId)).metadata || {};
     if (latestControl.cancelRequested || latestControl.pauseRequested) {
       row = await updateJob(sb, row, {
         status: latestControl.cancelRequested ? 'cancelled' : 'paused',
         stage: latestControl.cancelRequested ? 'Audit cancelled — completed results remain saved' : 'Paused safely — progress is saved',
-        currentConversationId: null, error: ''
+        currentConversationId: null, error: '', processingIndex: null, processingConversationId: null, processingClaim: null, processingClaimAt: null, allowParallelNext: false
       });
       return { job: publicJob(row), done: true, cancelled: !!latestControl.cancelRequested, paused: !!latestControl.pauseRequested };
     }
     if (error.code === 'AUDIT_ROUTES_COOLDOWN') {
-      row = await updateJob(sb, row, { status: 'running', stage: `Provider cooldown — conversation ${item.id} will retry automatically`, error: error.message, currentConversationId: item.id });
-      return { job: publicJob(row), retryAfterMs: Math.min(Number(error.retryAfterMs) || 15000, 30000), retrying: true };
+      row = await updateJob(sb, row, { status: 'running', stage: `Provider cooldown — conversation ${item.id} will retry automatically`, error: error.message, currentConversationId: item.id, processingIndex: null, processingConversationId: null, processingClaim: null, processingClaimAt: null, allowParallelNext: false });
+      return { job: publicJob(row), results: prefetched, retryAfterMs: Math.min(Number(error.retryAfterMs) || 15000, 30000), retrying: true };
     }
     const attempts = Number(item.attempts || 0) + 1;
     queue[index] = { ...item, attempts };
     if (attempts < 3 && /temporarily unavailable|too long|rate|quota|429|500|502|503|504|fetch/i.test(error.message)) {
-      row = await updateJob(sb, row, { queue, status: 'running', stage: `Waiting to retry conversation ${item.id}`, error: error.message, currentConversationId: item.id });
-      return { job: publicJob(row), retryAfterMs: 3000, retrying: true };
+      row = await updateJob(sb, row, { queue, status: 'running', stage: `Waiting to retry conversation ${item.id}`, error: error.message, currentConversationId: item.id, processingIndex: null, processingConversationId: null, processingClaim: null, processingClaimAt: null, allowParallelNext: false });
+      return { job: publicJob(row), results: prefetched, retryAfterMs: 3000, retrying: true };
     }
     const routeAttempts = Array.isArray(error.attempts) ? error.attempts : [];
     const routeSummary = routeAttempts.length ? ` ${routeAttempts.length} provider routes were attempted; details are saved for diagnosis.` : '';
