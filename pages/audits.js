@@ -1960,6 +1960,10 @@ export default function Audits() {
     );
   }, [data?.agents, adminAgentSearch]);
   const completedResults = results.filter((item) => item.status === 'completed');
+  // Results may be saved out of order by parallel workers before the job's
+  // sequential checkpoint advances. Derive the visible totals from the same
+  // saved result set used for the cards and averages.
+  const completedConversationCount = new Set(completedResults.map((item) => String(item.conversationId || '')).filter(Boolean)).size;
   const batchTiming = useMemo(() => summarizeTiming(results.filter((item) => item.status === 'completed' && item.metrics).map((item) => conversationTiming(item.metrics))), [results]);
 
   useEffect(() => {
@@ -3040,8 +3044,8 @@ export default function Audits() {
                   </section>
                   <ProgressReport job={currentJob} results={results} running={running} elapsed={elapsed} pace={pace} />
                   <div className="audit-kpis">
-                    <Metric label="Completed chats" value={currentJob.completed} />
-                    <Metric label="Agent evaluations" value={currentJob.evaluations} />
+                    <Metric label="Completed chats" value={completedConversationCount} />
+                    <Metric label="Agent evaluations" value={completedResults.length} />
                     <Metric label="Average quality" value={avg('quality')} />
                     <Metric label="Average efficiency" value={avg('efficiency')} />
                     <Metric label="Average final" value={avg('finalScore')} tone="accent" />
