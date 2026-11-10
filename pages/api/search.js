@@ -1940,38 +1940,42 @@ export default async function handler(req, res) {
       }
     }
 
-    // ---- Grounding verification --------------------------------------------
-    // The grounding check is a CONFIDENCE signal, not a refusal switch. It lowers
-    // confidence when the evidence weakly supports the answer, and only replaces
-    // the answer when the evidence supports almost nothing (a clear fabrication).
-    // This keeps the assistant useful for agents while catching invented claims.
+    // Verify claims against the sources actually cited, rather than allowing
+    // unrelated retrieved material to validate an unsupported citation.
     let groundingScore = null;
-    if (smartRetrieval && answer !== SAFE_UNCONFIRMED && !usedCalculator && !deterministicPolicyResolved) {
+    let groundingUnavailable = false;
+    if (answer !== SAFE_UNCONFIRMED && !usedCalculator && !deterministicPolicyResolved) {
       await logActivity({ metadata: { stage: 'Verifying answer', durationMs: Date.now() - started } });
-      const check = await verifyGrounding({
-        question: clearQuestion || question, answer, context,
-        provider: answerProvider, model: usedFallback ? fallbackModel : chatModel, openaiKey, groqKey: groqPrimary
-      });
-      if (check) {
-        groundingScore = check.score;
-        const topSimilarity = candidates.reduce((m, c) => Math.max(m, Number(c.similarity) || 0), 0);
-        // Replace only when the verifier AND retrieval agree there's little support:
-        // near-zero grounding score and no strongly matching FAQ evidence.
-        if (check.score < 30 && topSimilarity < 0.5) {
-          answer = SAFE_UNCONFIRMED;
-          sources = [];
-          segments = null;
-          usedCalculator = false;
-          confidence = Math.min(confidence, 22);
-        } else {
-          confidence = Math.max(0, Math.min(confidence, check.score + 20));
-        }
+      const citedMatches = matches.filter(item => sources.some(source =>
+        source.url ? source.url === item.article_url : source.title === item.article_title));
+      const citedContext = citedMatches.map(item => `${item.article_title}\n${item.content}`).join('\n\n---\n\n');
+      const check = citedContext ? await verifyGrounding({
+        question: clearQuestion || question, answer, context: citedContext,
+        provider: answerProvider, model: usedFallback ? fallbackModel : chatModel,
+        openaiKey, groqKey: usedGroqKey || groqPrimary, geminiKeyPool
+      }) : null;
+      groundingUnavailable = !check;
+      groundingScore = check?.score ?? null;
+      if (!check || !check.grounded || check.score < 80 || check.unsupported.length) {
+        answer = SAFE_UNCONFIRMED;
+        sources = [];
+        segments = null;
+        usedCalculator = false;
+        confidence = Math.min(confidence, 22);
+        confidenceLabel = 'Needs verification';
+      } else {
+        confidence = Math.min(confidence, check.score);
         confidenceLabel = confidence >= 85 ? 'High confidence' : confidence >= 65 ? 'Review suggested' : 'Needs verification';
       }
     }
 
     const verifiedSourceGap = answer === SAFE_UNCONFIRMED;
-    if (verifiedSourceGap) answer = verifiedSourceGapAnswer(questionCoverage);
+    if (verifiedSourceGap) {
+      questionCoverage = questionCoverage.map(item => ({...item, status:'not_confirmed'}));
+      answeredCount = 0; partialCount = 0; notConfirmedCount = questionCoverage.length;
+      coverageSummary = {total:questionCoverage.length, answered:0, partial:0, notConfirmed:notConfirmedCount};
+      answer = verifiedSourceGapAnswer(questionCoverage);
+    }
 
     // Structured, auditable confidence explanations. These are derived from
     // actual retrieval/verification measurements; the answer model cannot
@@ -2024,7 +2028,7 @@ export default async function handler(req, res) {
           sourceDeclarationPresent: !!sourceLine,
           finalSources: sources.slice(0, 12).map((source) => ({ title: source.title, url: source.url, kind: source.kind }))
         },
-        processing: { partialAnswerRetryAttempted, partialAnswerRetrySucceeded, citationMappingRecovered, coverageReconciled, fallback: usedFallback, groundingScore, semanticSearchDegraded: !!semanticSearchError },
+        processing: { partialAnswerRetryAttempted, partialAnswerRetrySucceeded, citationMappingRecovered, coverageReconciled, fallback: usedFallback, groundingScore, groundingUnavailable, semanticSearchDegraded: !!semanticSearchError },
         snippetsUsed,
         questionCoverage, coverageSummary,
         noticeConflict: noticeConflictDetected ? { detected: true, resolution: 'A relevant CEx Notice overrode incompatible FAQ information.', noticeSources: sources.filter((source) => source.kind === 'notice').map((source) => source.title), faqSources: sources.filter((source) => source.kind === 'faq').map((source) => source.title) } : { detected: false },
@@ -2036,7 +2040,7 @@ export default async function handler(req, res) {
     });
 
     return res.status(200).json({
-      answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel, queryLogId, reliabilityRevision: '2026-11-10-general-retrieval-v2',
+      answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel, queryLogId, reliabilityRevision: '2026-11-10-general-retrieval-v3',
       confidenceReasons, selectedScope: { product: selectedProduct, model: selectedModel?.slug || 'all', label: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models` },
       ambiguous: isAmbiguous, interpretations, usedCalculator,
       questionCoverage, coverageSummary,
