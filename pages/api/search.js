@@ -1,3 +1,4 @@
+import { extractErrorCodes, unsupportedErrorCodes } from '../../lib/errorEvidence.mjs';
 import {
   authenticateRequest, getKeys, getPrompt, supabaseAdmin, openaiEmbed, getEmbeddings,
   openaiChatDetailed, geminiChatDetailed, getBrandingRules, brandingInstructions,
@@ -772,6 +773,12 @@ export default async function handler(req, res) {
       if (selectedProduct === 'fnmarkets') query = query.or('article_url.ilike.%help.fnmarkets.com%,article_title.ilike.%FNmarkets%,article_title.ilike.%FN markets%');
       return query.limit(limit);
     };
+    // Exact error identifiers may otherwise fall outside the first keyword
+    // terms of a long pasted message. Search indexed FAQ passages directly.
+    const requestedErrorCodes = extractErrorCodes(question);
+    for (const code of requestedErrorCodes) {
+      anchorQueries.push(scopedEnglishAnchor(`content.ilike.%${code}%`, 80));
+    }
     if (requestedRuleIntent.dailyLoss) {
       anchorQueries.push(scopedEnglishAnchor('article_title.ilike.%daily%loss%,article_title.ilike.%permitted%loss%'));
     }
@@ -1135,6 +1142,16 @@ export default async function handler(req, res) {
       matches = picked.sort((a, b) => order.get(a.id) - order.get(b.id)).slice(0, answerEvidenceLimit);
     } else {
       matches = candidates.slice(0, answerEvidenceLimit);
+    }
+    // Preserve an exact error-code passage for a technical question. It still
+    // passes the normal product, model and region scope filters above.
+    if (requestedErrorCodes.length) {
+      const exact = candidates.filter(item => requestedErrorCodes.some(code =>
+        new RegExp(`(?:^|[^a-z0-9])${code}(?:$|[^a-z0-9])`, 'i').test(String(item.content || ''))));
+      const seen = new Set();
+      matches = [...exact, ...matches].filter(item => {
+        const id = String(item.id); if (seen.has(id)) return false; seen.add(id); return true;
+      }).slice(0, answerEvidenceLimit);
     }
     // The article title can identify the correct Account scope while a different
     // chunk from that article contains the actual EA permission/prohibition.
@@ -1940,6 +1957,32 @@ export default async function handler(req, res) {
       }
     }
 
+    // A question's error code is not proof of its cause. Check each paragraph
+    // against the passages it actually cites before the model verifier runs.
+    let unsupportedTechnicalCode = false;
+    if (segments?.length && requestedErrorCodes.length) {
+      segments = segments.map(segment => {
+        const cited = (segment.refs || []).map(ref => sources[ref - 1]).filter(Boolean);
+        const evidence = matches.filter(item => cited.some(source => source.url
+          ? source.url === item.article_url : source.title === item.article_title))
+          .map(item => item.content || '').join('\n');
+        const missing = unsupportedErrorCodes(question, segment.text, evidence);
+        if (!missing.length) return segment;
+        unsupportedTechnicalCode = true;
+        return { text: `I cannot verify the meaning or cause of error ${missing.join(', ')} from the available cited evidence. Please ask Support to check the platform error.`, refs: [] };
+      });
+      if (unsupportedTechnicalCode) {
+        answer = segments.map(segment => segment.text).join('\n\n');
+        questionCoverage = questionCoverage.map(item => requestedErrorCodes.some(code =>
+          String(item.question || '').toLowerCase().includes(code)) ? {...item,status:'not_confirmed'} : item);
+        answeredCount = questionCoverage.filter(item => item.status === 'answered').length;
+        partialCount = questionCoverage.filter(item => item.status === 'partial').length;
+        notConfirmedCount = questionCoverage.filter(item => item.status === 'not_confirmed').length;
+        coverageSummary = {total:questionCoverage.length,answered:answeredCount,partial:partialCount,notConfirmed:notConfirmedCount};
+        confidence = Math.min(confidence, 60); confidenceLabel = 'Needs verification';
+      }
+    }
+
     // Verify claims against the sources actually cited, rather than allowing
     // unrelated retrieved material to validate an unsupported citation.
     let groundingScore = null;
@@ -2028,7 +2071,7 @@ export default async function handler(req, res) {
           sourceDeclarationPresent: !!sourceLine,
           finalSources: sources.slice(0, 12).map((source) => ({ title: source.title, url: source.url, kind: source.kind }))
         },
-        processing: { partialAnswerRetryAttempted, partialAnswerRetrySucceeded, citationMappingRecovered, coverageReconciled, fallback: usedFallback, groundingScore, groundingUnavailable, semanticSearchDegraded: !!semanticSearchError },
+        processing: { partialAnswerRetryAttempted, partialAnswerRetrySucceeded, citationMappingRecovered, coverageReconciled, fallback: usedFallback, groundingScore, groundingUnavailable, unsupportedTechnicalCode, semanticSearchDegraded: !!semanticSearchError },
         snippetsUsed,
         questionCoverage, coverageSummary,
         noticeConflict: noticeConflictDetected ? { detected: true, resolution: 'A relevant CEx Notice overrode incompatible FAQ information.', noticeSources: sources.filter((source) => source.kind === 'notice').map((source) => source.title), faqSources: sources.filter((source) => source.kind === 'faq').map((source) => source.title) } : { detected: false },
@@ -2040,7 +2083,7 @@ export default async function handler(req, res) {
     });
 
     return res.status(200).json({
-      answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel, queryLogId, reliabilityRevision: '2026-11-10-general-retrieval-v3',
+      answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel, queryLogId, reliabilityRevision: '2026-11-10-general-retrieval-v4',
       confidenceReasons, selectedScope: { product: selectedProduct, model: selectedModel?.slug || 'all', label: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models` },
       ambiguous: isAmbiguous, interpretations, usedCalculator,
       questionCoverage, coverageSummary,
