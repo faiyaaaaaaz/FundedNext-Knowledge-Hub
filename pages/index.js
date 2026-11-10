@@ -698,6 +698,7 @@ export default function Home() {
   );
   const currentModels = availableModels.filter((model) => model.status === 'current');
   const previousModels = availableModels.filter((model) => model.status === 'previous');
+  const discoveredModels = availableModels.filter((model) => model.status === 'discovered');
   const selectedModelName = availableModels.find((model) => model.slug === scopeModel)?.name ||
     (scopeProduct === 'both' ? 'All products' : scopeProduct === 'fnmarkets' ? 'All FNmarkets knowledge' : `All ${scopeProduct.toUpperCase()} models`);
   const syncPhaseIndex = syncProgress.phase === 'complete' ? 3 : syncProgress.phase === 'indexing' ? 2 : 1;
@@ -718,7 +719,8 @@ export default function Home() {
   const modelGroups = [
     { label: 'Scope', options: [{ value: 'all', label: scopeProduct === 'both' ? 'All products and models' : `All ${scopeProduct.toUpperCase()} models`, description: 'Use every verified model in this family' }] },
     ...(currentModels.length ? [{ label: 'Current models', options: currentModels.map((model) => ({ value: model.slug, label: model.name, description: `${model.articleCount || 0} matching FAQ article${model.articleCount === 1 ? '' : 's'}`, badge: 'Current', badgeTone: 'current' })) }] : []),
-    ...(previousModels.length ? [{ label: 'Previous models', options: previousModels.map((model) => ({ value: model.slug, label: model.name, description: `${model.articleCount || 0} saved FAQ article${model.articleCount === 1 ? '' : 's'}`, badge: 'Not currently live', badgeTone: 'previous' })) }] : [])
+    ...(previousModels.length ? [{ label: 'Previous models', options: previousModels.map((model) => ({ value: model.slug, label: model.name, description: `${model.articleCount || 0} saved FAQ article${model.articleCount === 1 ? '' : 's'}`, badge: 'Not currently live', badgeTone: 'previous' })) }] : []),
+    ...(discoveredModels.length ? [{ label: 'Discovered models', options: discoveredModels.map((model) => ({ value: model.slug, label: model.name, description: 'Found in active knowledge; availability not confirmed', badge: 'Availability unknown', badgeTone: 'previous' })) }] : [])
   ];
   const scopeIsDefault = savedScope.product === scopeProduct && savedScope.model === scopeModel;
 
