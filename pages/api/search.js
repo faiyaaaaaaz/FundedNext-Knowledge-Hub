@@ -507,9 +507,15 @@ export default async function handler(req, res) {
         notice: 'Choose another verified model or search the full product family. The assistant did not broaden the search automatically.'
       });
     }
-    const questionModels = modelsMentioned(question, scopeCatalog.models);
-    const questionProduct = detectNamedProduct(question);
-    const productConflict = selectedProduct !== 'both' && (questionProduct && questionProduct !== selectedProduct || questionModels.some((item) => item.product !== selectedProduct));
+    const allQuestionModels = modelsMentioned(question, scopeCatalog.models);
+    // A model label can appear in more than one product catalogue. A selected
+    // product resolves that ambiguity; do not reject a matching model merely
+    // because an identically named model also exists in another family.
+    const questionModels = selectedProduct === 'both' ? allQuestionModels : allQuestionModels.filter(item => item.product === selectedProduct);
+    const detectedProduct = detectNamedProduct(question);
+    const explicitlyNamedProduct = /\b(?:fn\s*markets|brokerage|cfd|fundednext\W*futures|futures\W+(?:account|challenge|model|rules?))\b/i.test(question);
+    const questionProduct = explicitlyNamedProduct || !questionModels.length ? detectedProduct : null;
+    const productConflict = selectedProduct !== 'both' && ((questionProduct && questionProduct !== selectedProduct) || (allQuestionModels.length > 0 && questionModels.length === 0));
     if (productConflict) {
       return res.status(200).json({
         scopeNotice: true,
@@ -1381,7 +1387,9 @@ export default async function handler(req, res) {
     const ambiguityText = isAmbiguous
       ? '\n\nThis question is general and can reasonably mean more than one thing. Address EACH meaning the FAQ evidence supports, each on its own short labelled line' +
         (interpretations.length ? `. The likely meanings are:\n${interpretations.map((s) => `- ${s}`).join('\n')}` : '.') +
-        '\nRules for this: (a) Payout ELIGIBILITY / cycle timing depends on the Account model. If the customer did not name an Account, give the timing for each Account model the evidence supports, or clearly say it depends on the Account model and name which models differ — then, if helpful, ask which Account they have. (b) Keep the eligibility cycle and the 24-hour processing Brand Promise as separate points; never merge them into one number. (c) Only include a meaning the evidence actually supports. Use plain text labels like "Eligibility (depends on your account): ..." — no markdown symbols.'
+        (payoutish
+          ? '\nFor payout questions, distinguish eligibility from processing time, and include only details relevant to the question and supported by evidence.'
+          : '\nAddress only meanings relevant to the customer question and supported by the evidence. Do not introduce unrelated topics.')
       : '';
     // Long, multi-part questions (like the payout + risk + rules bundles agents
     // paste in) should be answered part-by-part, not refused as a whole.
@@ -1878,8 +1886,8 @@ export default async function handler(req, res) {
     // per-question coverage; turn every unsupported part into a visible,
     // focused statement instead of making the customer infer what was skipped.
     if (answer !== SAFE_UNCONFIRMED && notConfirmedCount) {
-      const unresolved = questionCoverage.filter((item) => item.status === 'not_confirmed')
-        .map((item, index) => `Part ${index + 1} still needs verification from an applicable FAQ or Notice. I have not guessed at that detail.`);
+      const unresolved = questionCoverage.map((item, index) => ({...item, index})).filter((item) => item.status === 'not_confirmed')
+        .map((item) => `Part ${item.index + 1} still needs verification: ${item.question}`);
       if (unresolved.length) {
         answer = `${answer}\n\n${unresolved.join('\n\n')}`;
         segments = [...(segments || []), ...unresolved.map((text) => ({ text, refs: [] }))];
@@ -2028,7 +2036,7 @@ export default async function handler(req, res) {
     });
 
     return res.status(200).json({
-      answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel, queryLogId, reliabilityRevision: '2026-11-10-general-retrieval-v1',
+      answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel, queryLogId, reliabilityRevision: '2026-11-10-general-retrieval-v2',
       confidenceReasons, selectedScope: { product: selectedProduct, model: selectedModel?.slug || 'all', label: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models` },
       ambiguous: isAmbiguous, interpretations, usedCalculator,
       questionCoverage, coverageSummary,
