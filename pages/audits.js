@@ -542,6 +542,8 @@ function Metric({ label, value, detail, tone = '' }) {
     ? 'Q'
     : /efficiency/i.test(label)
       ? 'E'
+      : /complexity/i.test(label)
+        ? 'C'
       : /final/i.test(label)
         ? '★'
         : /review/i.test(label)
@@ -1852,11 +1854,20 @@ function ConversationReviewModal({ state, onClose, onSubmitDispute, onReviewDisp
                       <time>{formatDate(new Date((turn.displayAt ?? turn.at) * 1000).toISOString())}</time>
                     </div>
                     <div className="transcript-message">
-                      {state.translations?.[String(turn.id)] && (
-                        <div lang="en"><small>English translation</small><TranscriptBody text={state.translations[String(turn.id)]} /></div>
+                      {state.translations?.[String(turn.id)] ? (
+                        <>
+                          <section className="transcript-translation" lang="en">
+                            <span className="transcript-language-label">English translation</span>
+                            <TranscriptBody text={state.translations[String(turn.id)]} />
+                          </section>
+                          <section className="transcript-original">
+                            <span className="transcript-language-label">Original message</span>
+                            <TranscriptBody text={body} flags={flags} highlight={['agent', 'client'].includes(turn.timelineKind)} />
+                          </section>
+                        </>
+                      ) : (
+                        <TranscriptBody text={body} flags={flags} highlight={['agent', 'client'].includes(turn.timelineKind)} />
                       )}
-                      {state.translations?.[String(turn.id)] && <small>Original message</small>}
-                      <TranscriptBody text={body} flags={flags} highlight={['agent', 'client'].includes(turn.timelineKind)} />
                     </div>
                     {(turn.attachments || []).length > 0 && (
                       <div className="transcript-attachments">
@@ -2582,6 +2593,13 @@ export default function Audits() {
         ).toFixed(2)
       : '—';
 
+  const complexityScores = completedResults.map((item) => item.audit?.complexity)
+    .filter((value) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)))
+    .map(Number);
+  const avgComplexity = complexityScores.length
+    ? (complexityScores.reduce((sum, value) => sum + value, 0) / complexityScores.length).toFixed(2)
+    : '—';
+
   return (
     <>
       <Head>
@@ -3063,6 +3081,7 @@ export default function Audits() {
                     <Metric label="Agent evaluations" value={completedResults.length} />
                     <Metric label="Average quality" value={avg('quality')} />
                     <Metric label="Average efficiency" value={avg('efficiency')} />
+                    <Metric label="Average complexity" value={avgComplexity} />
                     <Metric label="Average final" value={avg('finalScore')} tone="accent" />
                     <Metric label="Manual review" value={completedResults.filter((item) => item.audit?.manualReview).length} />
                   </div>
