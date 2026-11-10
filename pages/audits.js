@@ -1810,6 +1810,10 @@ function ConversationReviewModal({ state, onClose, onSubmitDispute, onReviewDisp
               <div className="transcript-heading">
                 <div>
                   <span>Live Intercom transcript</span>
+                  {state.translationStatus === 'loading' && <small role="status">Translating messages to English…</small>}
+                  {state.translationStatus === 'ready' && <small role="status">Translations appear above the original messages.</small>}
+                  {state.translationStatus === 'partial' && <small role="status">Some messages could not be translated; originals remain visible.</small>}
+                  {state.translationStatus === 'failed' && <small role="alert">Translation unavailable; originals remain visible.</small>}
                   <div className="transcript-legend">
                     <i className="client" />
                     Client
@@ -1848,6 +1852,10 @@ function ConversationReviewModal({ state, onClose, onSubmitDispute, onReviewDisp
                       <time>{formatDate(new Date((turn.displayAt ?? turn.at) * 1000).toISOString())}</time>
                     </div>
                     <div className="transcript-message">
+                      {state.translations?.[String(turn.id)] && (
+                        <div lang="en"><small>English translation</small><TranscriptBody text={state.translations[String(turn.id)]} /></div>
+                      )}
+                      {state.translations?.[String(turn.id)] && <small>Original message</small>}
                       <TranscriptBody text={body} flags={flags} highlight={['agent', 'client'].includes(turn.timelineKind)} />
                     </div>
                     {(turn.attachments || []).length > 0 && (
@@ -2409,9 +2417,16 @@ export default function Audits() {
     setComparison({ result, loading: true, conversation: null, error: '' });
     try {
       const response = await request('conversation-view', { conversationId: result.conversationId });
-      setComparison({ result, loading: false, conversation: response.conversation, error: '' });
+      setComparison((current) => current?.result === result ? { result, loading: false, conversation: response.conversation, error: '', translationStatus:'loading', translations:{} } : current);
+      // Load the transcript first; translation runs in the background. Ignore
+      // responses from a modal that has since closed or switched conversations.
+      request('translate-transcript', {conversationId:result.conversationId}).then((translated) => {
+        setComparison((current) => current?.result === result ? {...current, translations:translated.translations || {}, translationStatus:translated.partial ? 'partial' : 'ready'} : current);
+      }).catch(() => {
+        setComparison((current) => current?.result === result ? {...current, translationStatus:'failed'} : current);
+      });
     } catch (err) {
-      setComparison({ result, loading: false, conversation: null, error: err.message });
+      setComparison((current) => current?.result === result ? { result, loading: false, conversation: null, error: err.message } : current);
     }
   }
 
