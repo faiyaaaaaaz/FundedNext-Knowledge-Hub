@@ -39,7 +39,7 @@ const SAFE_UNCONFIRMED =
 const VALID_COVERAGE = new Set(['answered', 'partial', 'not_confirmed']);
 const CORE_GUARDRAILS =
   '\n\nNON-OVERRIDABLE QUALITY RULES:\n' +
-  '- Write only a customer-ready reply. Never mention excerpts, source numbers, context, retrieval, database, or knowledge base.\n' +
+  '- Write only a customer-ready reply from the support agent to the trader. Never repeat a customer letter as if you were its author or repeat a customer signature. Never mention excerpts, source numbers, context, retrieval, database, or knowledge base.\n' +
   '- Never transfer a rule from one Account type to another.\n' +
   '- Never transfer a country- or region-specific rule to customers outside that region or to a question whose region is unknown.\n' +
   '- In comparisons, cover the same requested dimensions for each named model. Distinguish shared rules from differences. A fact available for only one model is not proof of a difference.\n' +
@@ -216,6 +216,12 @@ function answerEchoesQuestion(answer, question) {
   const words = (value) => String(value || '').toLowerCase().replace(/user clarification:[\s\S]*$/i, '').match(/[a-z0-9]{3,}/g) || [];
   const questionWords = words(question); const answerWords = words(answer);
   if (questionWords.length < 12 || answerWords.length < 8) return false;
+  // A copied customer paragraph can be surrounded by novel text, defeating
+  // a whole-answer overlap ratio. Detect long contiguous copied sequences.
+  const q = ` ${questionWords.join(' ')} `;
+  for (let i = 0; i + 12 <= answerWords.length; i++) {
+    if (q.includes(` ${answerWords.slice(i, i + 12).join(' ')} `)) return true;
+  }
   const questionSet = new Set(questionWords); const overlap = answerWords.filter((word) => questionSet.has(word)).length / answerWords.length;
   const novel = answerWords.filter((word) => !questionSet.has(word)).length;
   return overlap >= .82 && novel < Math.max(8, Math.floor(answerWords.length * .15));
@@ -492,7 +498,7 @@ export default async function handler(req, res) {
     const selectedProduct = PRODUCT_SCOPES.includes(req.body?.scope?.product) ? req.body.scope.product : 'cfd';
     const selectedModelSlug = String(req.body?.scope?.model || 'all');
     const selectedModelFromUi = selectedModelSlug === 'all' ? null : scopeCatalog.models.find((item) =>
-      item.slug === selectedModelSlug && ['current','previous'].includes(item.status) && (selectedProduct === 'both' || item.product === selectedProduct)
+      item.slug === selectedModelSlug && ['current','previous','discovered'].includes(item.status) && (selectedProduct === 'both' || item.product === selectedProduct)
     );
     if (selectedModelSlug !== 'all' && !selectedModelFromUi) {
       return res.status(200).json({
@@ -674,7 +680,7 @@ export default async function handler(req, res) {
         clarifyingQuestion: 'Which Account model should I check?',
         clarificationReason: 'Targets, limits, cycles, and breach rules can differ by Account model.',
         choices: [
-          ...scopeCatalog.models.filter((item) => item.product === selectedProduct && ['current','previous'].includes(item.status)).slice(0, 7)
+          ...scopeCatalog.models.filter((item) => item.product === selectedProduct && ['current','previous','discovered'].includes(item.status)).slice(0, 7)
             .map((item) => ({ value: item.name, label: item.name, description: `Use the verified ${item.name} rules.` })),
           { value: `Compare every ${selectedProduct.toUpperCase()} Account model`, label: 'Compare all models', description: 'Show model-specific differences without merging their rules.' }
         ]
@@ -877,7 +883,7 @@ export default async function handler(req, res) {
     let candidates = [...combined.values()].map((item) => {
       const title = String(item.article_title || '').toLowerCase();
       const content = String(item.content || '').toLowerCase();
-      const termScore = terms.reduce((score, term) => score + (title.includes(term) ? 3 : content.includes(term) ? 1 : 0), 0);
+      const termScore = terms.reduce((score, term) => score + (title.includes(term) ? 2 : 0) + (content.includes(term) ? 3 : 0), 0);
       const intentTerms = keywords(clearQuestion);
       const titleHits = intentTerms.filter((term) => title.includes(term)).length;
       const exactTitleScore = intentTerms.length ? (titleHits / intentTerms.length) * 14 + (titleHits >= Math.min(3, intentTerms.length) ? 6 : 0) : 0;
@@ -944,7 +950,7 @@ export default async function handler(req, res) {
         const specificallyAssigned = override?.model && override.model !== 'all';
         const comparisonEvidence = allModelRuleOverview && namedInSelectedProduct.length >= 2;
         const explicitlyProductWide = /\b(?:applicable|available)\s+(?:to|for|on)\s+all accounts\b|\ball account models\b/i.test(blob);
-        if (!comparisonModels.length && !comparisonEvidence && !explicitlyProductWide && (specificallyAssigned || namedInSelectedProduct.length)) {
+        if (!comparisonModels.length && !comparisonEvidence && !explicitlyProductWide && specificallyAssigned) {
           const named = specificallyAssigned ? override.model : namedInSelectedProduct.map((model) => model.slug).join(', ');
           rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: `Model-specific FAQ excluded until the customer selects or names an Account model (${named})`, similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
           return false;
@@ -992,7 +998,7 @@ export default async function handler(req, res) {
       return accepted;
     });
 
-    if (!candidates.length) {
+    if (!candidates.length && (competitionMinimumQuestion || !(await noticeEvidencePromise).matches?.length)) {
       const family = selectedProduct === 'both' ? 'the complete knowledge base' : selectedProduct.toUpperCase();
       const target = selectedModel?.name || `all ${family} models`;
       await logActivity({
@@ -1197,7 +1203,7 @@ export default async function handler(req, res) {
       }
     }
 
-    if (!matches.length) {
+    if (!matches.length && (competitionMinimumQuestion || !(await noticeEvidencePromise).matches?.length)) {
       await logActivity({
         actorRole: access.role, sessionId: access.sessionId, userName: access.name, userEmail: access.email,
         authProvider: access.authProvider, questionWordCount: wordCount(question), eventType: 'query', success: true,
@@ -1247,7 +1253,7 @@ export default async function handler(req, res) {
             _rank: 40 + (Number(m.similarity || 0) * 8),
             _scoped: m.meta?.model === selectedModel?.slug
           }));
-          matches = [...noticeEvidence, ...matches].slice(0, answerEvidenceLimit);
+          matches = [...noticeEvidence.slice(0, Math.min(2, Math.max(1, answerEvidenceLimit - 4))), ...matches].slice(0, answerEvidenceLimit);
         }
     } catch (e) { /* notices are best-effort */ }
 
@@ -1360,8 +1366,8 @@ export default async function handler(req, res) {
         '- Cite each correction passage in SOURCES and SEGMENTS exactly like FAQ evidence.'
       : '';
     const scopeText = `\n\nMANDATORY USER-SELECTED SCOPE: Product = ${selectedProduct.toUpperCase()}; Account model = ${selectedModel?.name || 'All models in the selected product family'}. ` +
-      'Every evidence item in this prompt has already been filtered — no wrong-product or wrong-model articles are present. ' +
-      `General product-wide policy articles (those that do not name any specific Account model) apply to ALL models in the selected product family, including ${selectedModel?.name || 'the selected model'}. You MUST use these to answer foundational questions unless a model-specific article explicitly overrides the rule for this model. ` +
+      'Evidence is filtered by product and by explicit scope assignments, but mixed articles may describe multiple models. ' +
+      'Treat each rule as applying only to the model, phase, region, and conditions actually stated in its passage. Do not infer universal applicability merely because a passage names no model. When the customer has not specified a model, explain supported model-specific conditions or ask for the model when needed. ' +
       `${selectedModel ? `Evidence that explicitly names ${selectedModel.name} takes highest priority over general policy. ` : ''}` +
       'Never cite or apply a rule that is explicitly and exclusively stated for a DIFFERENT Account model. If a model-specific article states an exception or prohibition for the selected model, it overrides the general rule for that specific point only.';
     const regionText = regionIntent.included.length
@@ -2022,7 +2028,7 @@ export default async function handler(req, res) {
     });
 
     return res.status(200).json({
-      answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel, queryLogId,
+      answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel, queryLogId, reliabilityRevision: '2026-11-10-general-retrieval-v1',
       confidenceReasons, selectedScope: { product: selectedProduct, model: selectedModel?.slug || 'all', label: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models` },
       ambiguous: isAmbiguous, interpretations, usedCalculator,
       questionCoverage, coverageSummary,
