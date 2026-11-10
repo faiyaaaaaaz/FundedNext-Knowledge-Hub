@@ -1,10 +1,11 @@
+import { buildReviewItems, validateReview } from '../../lib/answerReview.mjs';
 import { extractErrorCodes, unsupportedErrorCodes } from '../../lib/errorEvidence.mjs';
 import {
   authenticateRequest, getKeys, getPrompt, supabaseAdmin, openaiEmbed, getEmbeddings,
   openaiChatDetailed, geminiChatDetailed, getBrandingRules, brandingInstructions,
   applyBrandingReplacements, getRelevantSnippets, logActivity as createActivity,
   expandConcepts, clarifyQuery, correctTypos, runCalculators,
-  sha256, getGroqKeys, verifyGrounding, getSearchScopeState, modelsMentioned,
+  sha256, getGroqKeys, reviewAnswerSegments, getSearchScopeState, modelsMentioned,
   questionRegionIntent
 } from '../../lib/server';
 import { retrieveNotices, noticesAccess } from '../../lib/notices';
@@ -1983,32 +1984,48 @@ export default async function handler(req, res) {
       }
     }
 
-    // Verify claims against the sources actually cited, rather than allowing
-    // unrelated retrieved material to validate an unsupported citation.
+    // A single call reviews each paragraph using only its own cited passages.
+    // Unsupported paragraphs are removed; supported paragraphs are retained.
     let groundingScore = null;
     let groundingUnavailable = false;
-    if (answer !== SAFE_UNCONFIRMED && !usedCalculator && !deterministicPolicyResolved) {
+    let reviewRemoved = 0;
+    if (answer !== SAFE_UNCONFIRMED && !deterministicPolicyResolved) {
       await logActivity({ metadata: { stage: 'Verifying answer', durationMs: Date.now() - started } });
-      const citedMatches = matches.filter(item => sources.some(source =>
-        source.url ? source.url === item.article_url : source.title === item.article_title));
-      const citedContext = citedMatches.map(item => `${item.article_title}\n${item.content}`).join('\n\n---\n\n');
-      const check = citedContext ? await verifyGrounding({
-        question: clearQuestion || question, answer, context: citedContext,
-        provider: answerProvider, model: usedFallback ? fallbackModel : chatModel,
-        openaiKey, groqKey: usedGroqKey || groqPrimary, geminiKeyPool
+      const items = buildReviewItems(segments, sources, matches);
+      const rawReview = items.length ? await reviewAnswerSegments({
+        question: clearQuestion || question, items, provider: answerProvider,
+        model: usedFallback ? fallbackModel : chatModel, openaiKey,
+        groqKey: usedGroqKey || groqPrimary, geminiKeyPool
       }) : null;
-      groundingUnavailable = !check;
-      groundingScore = check?.score ?? null;
-      if (!check || !check.grounded || check.score < 80 || check.unsupported.length) {
-        answer = SAFE_UNCONFIRMED;
-        sources = [];
-        segments = null;
-        usedCalculator = false;
-        confidence = Math.min(confidence, 22);
-        confidenceLabel = 'Needs verification';
+      const verdicts = validateReview(items, rawReview);
+      groundingUnavailable = !verdicts;
+      if (!verdicts) {
+        answer = SAFE_UNCONFIRMED; sources = []; segments = null;
+        confidence = Math.min(confidence, 22); confidenceLabel = 'Needs verification';
       } else {
-        confidence = Math.min(confidence, check.score);
-        confidenceLabel = confidence >= 85 ? 'High confidence' : confidence >= 65 ? 'Review suggested' : 'Needs verification';
+        const factual = items.filter(item => !item.safeUncertainty);
+        reviewRemoved = factual.filter(item => !verdicts[item.index]).length;
+        groundingScore = factual.length ? Math.round(100 * (factual.length - reviewRemoved) / factual.length) : 0;
+        if (reviewRemoved) {
+          const kept = segments.filter((segment, index) => verdicts[index]);
+          if (kept.some(segment => (segment.refs || []).length)) {
+            const usedRefs = [...new Set(kept.flatMap(segment => segment.refs || []))].sort((a,b) => a-b);
+            const refMap = new Map(usedRefs.map((ref,index) => [ref,index+1]));
+            sources = usedRefs.map(ref => sources[ref-1]).filter(Boolean);
+            const note = 'Some details could not be verified against their cited sources. Please check those points with Support.';
+            segments = [...kept.map(segment => ({...segment,refs:(segment.refs||[]).map(ref=>refMap.get(ref)).filter(Boolean)})), {text:note, refs:[]}];
+            answer = segments.map(segment => segment.text).join('\n\n');
+            questionCoverage = questionCoverage.map(item => item.status === 'answered' ? {...item,status:'partial'} : item);
+            answeredCount = questionCoverage.filter(item => item.status === 'answered').length;
+            partialCount = questionCoverage.filter(item => item.status === 'partial').length;
+            notConfirmedCount = questionCoverage.filter(item => item.status === 'not_confirmed').length;
+            coverageSummary = {total:questionCoverage.length,answered:answeredCount,partial:partialCount,notConfirmed:notConfirmedCount};
+            confidence = Math.min(confidence, 60); confidenceLabel = 'Needs verification';
+          } else {
+            answer = SAFE_UNCONFIRMED; sources = []; segments = null;
+            confidence = Math.min(confidence, 22); confidenceLabel = 'Needs verification';
+          }
+        }
       }
     }
 
@@ -2071,7 +2088,7 @@ export default async function handler(req, res) {
           sourceDeclarationPresent: !!sourceLine,
           finalSources: sources.slice(0, 12).map((source) => ({ title: source.title, url: source.url, kind: source.kind }))
         },
-        processing: { partialAnswerRetryAttempted, partialAnswerRetrySucceeded, citationMappingRecovered, coverageReconciled, fallback: usedFallback, groundingScore, groundingUnavailable, unsupportedTechnicalCode, semanticSearchDegraded: !!semanticSearchError },
+        processing: { partialAnswerRetryAttempted, partialAnswerRetrySucceeded, citationMappingRecovered, coverageReconciled, fallback: usedFallback, groundingScore, groundingUnavailable, reviewRemoved, unsupportedTechnicalCode, semanticSearchDegraded: !!semanticSearchError },
         snippetsUsed,
         questionCoverage, coverageSummary,
         noticeConflict: noticeConflictDetected ? { detected: true, resolution: 'A relevant CEx Notice overrode incompatible FAQ information.', noticeSources: sources.filter((source) => source.kind === 'notice').map((source) => source.title), faqSources: sources.filter((source) => source.kind === 'faq').map((source) => source.title) } : { detected: false },
@@ -2083,7 +2100,7 @@ export default async function handler(req, res) {
     });
 
     return res.status(200).json({
-      answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel, queryLogId, reliabilityRevision: '2026-11-10-general-retrieval-v4',
+      answer, sources, segments, answerProvider, usedFallback, confidence, confidenceLabel, queryLogId, reliabilityRevision: '2026-11-10-segment-review-v1',
       confidenceReasons, selectedScope: { product: selectedProduct, model: selectedModel?.slug || 'all', label: selectedModel?.name || `All ${selectedProduct.toUpperCase()} models` },
       ambiguous: isAmbiguous, interpretations, usedCalculator,
       questionCoverage, coverageSummary,
