@@ -28,7 +28,7 @@ export default async function handler(req, res) {
         getPublishedScopeCatalog(sb),
         sb.from('settings').select('value').eq('key', key).maybeSingle()
       ]);
-      const catalog={...rawCatalog,models:rawCatalog.models.filter(m=>['current','previous'].includes(m.status))};
+      const catalog={...rawCatalog,models:rawCatalog.models.filter(m=>['current','previous','discovered'].includes(m.status))};
       const preference = safePreference(prefResult.data?.value);
       const selectedExists = preference.model === 'all' || catalog.models.some((model) =>
         model.slug === preference.model && (preference.product === 'both' || model.product === preference.product)
@@ -40,7 +40,7 @@ export default async function handler(req, res) {
       const preference = safePreference(req.body || {});
       const catalog = await getPublishedScopeCatalog(sb);
       const valid = preference.model === 'all' || catalog.models.some((model) =>
-        model.slug === preference.model && ['current','previous'].includes(model.status) && (preference.product === 'both' || model.product === preference.product)
+        model.slug === preference.model && ['current','previous','discovered'].includes(model.status) && (preference.product === 'both' || model.product === preference.product)
       );
       if (!valid) return res.status(400).json({ error: 'That Account model is not available in the verified catalogue.' });
       const { error } = await sb.from('settings').upsert({ key, value: JSON.stringify(preference) });
