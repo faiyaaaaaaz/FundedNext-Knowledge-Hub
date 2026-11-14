@@ -138,7 +138,7 @@ function sourceType(source = {}) {
   if (source.type === 'answer_scope' || source.type === 'query_log') return source.type;
   if (source.kind) return source.kind;
   const url = String(source.url || '');
-  if (/app\.clickup\.com/i.test(url)) return 'notice';
+  if (/app\.clickup\.com|(?:^|\.)slack\.com/i.test(url)) return 'notice';
   if (/help(?:futures)?\.fundednext\.com/i.test(url)) return 'faq';
   return 'unknown';
 }
@@ -470,10 +470,23 @@ export default function Admin() {
     } catch (e) { setError(e.message); } finally { if (announce) setNoticeRefreshing(false); }
   };
   const importNoticeFile = async () => {
-    if (!noticeFile) return setError('Choose the combined RAG .json file first.');
+    if (!noticeFile) return setError('Choose a notices file first.');
     setNoticeBusy(true); setNoticeMsg('');
     try {
       const text = await noticeFile.text();
+      // Slack exports are unstructured source material, not approved policy.
+      // Bring them into the existing review-before-save workflow.
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch { /* plain text */ }
+      if (!parsed?.entries) {
+        const messages = Array.isArray(parsed) ? parsed : null;
+        if (messages && !messages.some(m => typeof m?.text === 'string')) throw new Error('No Slack message text found in this file.');
+        const content = messages ? messages.filter(m => typeof m?.text === 'string').map(m => `[${m.user || 'Slack user'}${m.ts ? ' · ' + m.ts : ''}]\n${m.text}`).join('\n\n') : text;
+        if (!content.trim()) throw new Error('The file contains no notice text.');
+        setPasteText(content); setPasteProposed(null); setPasteStage('');
+        setNoticeMsg('File loaded below. Add the Slack message link and review the proposed facts before saving.');
+        return;
+      }
       JSON.parse(text);
       const r = await fetch('/api/notices', { method: 'POST', headers: headers(true), body: JSON.stringify({ action: 'import', rag: text }) });
       const d = await r.json();
@@ -1558,17 +1571,17 @@ export default function Admin() {
 
         {tab === 'notices' && <div className="settings-stack">
           <section className="settings-card">
-            <div className="settings-head"><div><h2>Coverage status</h2><p>This shows exactly where your stored ClickUp coverage currently ends.</p></div><button className="btn btn-secondary notice-refresh-btn" disabled={noticeBusy || noticeRefreshing} onClick={() => loadNotices(true)}>{noticeRefreshing ? <><span className="notice-spinner" />Refreshing…</> : 'Refresh'}</button></div>
+            <div className="settings-head"><div><h2>Coverage status</h2><p>The latest stored notice and searchable index status.</p></div><button className="btn btn-secondary notice-refresh-btn" disabled={noticeBusy || noticeRefreshing} onClick={() => loadNotices(true)}>{noticeRefreshing ? <><span className="notice-spinner" />Refreshing…</> : 'Refresh'}</button></div>
             {latestNotice ? <div className="notice-coverage-grid">
-              <div className="notice-latest-card"><span className="eyebrow">Latest notice covered</span><h3>{latestNotice.title}</h3><p><b>{latestNotice.posted_by || 'Poster not recorded'}</b> · {formatDate(latestNotice.posted_at)}</p><small>{latestNotice.category} · {latestNotice.product}/{latestNotice.model}</small>{latestNotice.source_url && <a href={latestNotice.source_url} target="_blank" rel="noreferrer">Open this notice in ClickUp ↗</a>}</div>
+              <div className="notice-latest-card"><span className="eyebrow">Latest notice covered</span><h3>{latestNotice.title}</h3><p><b>{latestNotice.posted_by || 'Poster not recorded'}</b> · {formatDate(latestNotice.posted_at)}</p><small>{latestNotice.category} · {latestNotice.product}/{latestNotice.model}</small>{latestNotice.source_url && <a href={latestNotice.source_url} target="_blank" rel="noreferrer">Open source notice ↗</a>}</div>
               <div className="notice-stat"><span>Total stored</span><strong>{noticeList.length}</strong></div>
               <div className="notice-stat"><span>Active</span><strong>{noticeCounts.active}</strong></div>
               <div className="notice-stat"><span>Last searchable refresh</span><strong className="notice-stat-date">{noticeIndexedAt ? formatDate(noticeIndexedAt) : 'Not recorded'}</strong></div>
             </div> : <div className="empty-admin">No notices could be loaded. If notices were previously uploaded, refresh once and check the error message above.</div>}
           </section>
           <section className="settings-card">
-            <div className="settings-head"><div><h2>Upload notices</h2><p>Upload the combined notices RAG file. This imports every entry, resolves supersession (most-recent-wins), and indexes the active ones so the assistant answers from them with priority over FAQs.</p></div></div>
-            <input type="file" accept="application/json,.json" onChange={(e) => { setNoticeFile(e.target.files?.[0] || null); setNoticeMsg(''); }} />
+            <div className="settings-head"><div><h2>Upload notices</h2><p>Upload a Slack text or JSON export for review, or import an existing structured RAG JSON file. Add the Slack link below so users can open the source.</p></div></div>
+            <input type="file" accept="application/json,text/plain,.json,.txt" onChange={(e) => { setNoticeFile(e.target.files?.[0] || null); setNoticeMsg(''); }} />
             <div className="autosync-actions" style={{ marginTop: 12 }}>
               <button className="btn btn-primary" disabled={noticeBusy || !noticeFile} onClick={importNoticeFile}>{noticeBusy ? 'Working\u2026' : 'Upload & load'}</button>
               <button className="btn btn-secondary" disabled={noticeBusy} onClick={reindexNoticesNow}>Re-index only</button>
@@ -1577,9 +1590,9 @@ export default function Admin() {
             {noticeMsg && <p className="field-help" style={{ color: '#5fd08a' }}>{noticeMsg}</p>}
           </section>
           <section className="settings-card">
-            <div className="settings-head"><div><h2>Paste a notice</h2><p>Paste a notice (and its thread clarifications) copied from ClickUp. The AI structures it and shows what will be saved before you confirm. Contradictions update automatically by topic.</p></div></div>
+            <div className="settings-head"><div><h2>Paste a notice</h2><p>Paste the Slack notice and relevant thread replies, or load a file above. Review the extracted facts before saving. A link identifies the source; it does not fetch private Slack messages.</p></div></div>
             <div className="autosync-grid">
-              <div className="field-block"><label>ClickUp notice link</label><input value={pasteUrl} onChange={(e) => setPasteUrl(e.target.value)} placeholder="https://app.clickup.com/…/t/…" /></div>
+              <div className="field-block"><label>Slack or other source link</label><input value={pasteUrl} onChange={(e) => setPasteUrl(e.target.value)} placeholder="https://your-workspace.slack.com/archives/…" /></div>
               <div className="field-block"><label>Posted by</label><input value={pastePoster} onChange={(e) => setPastePoster(e.target.value)} placeholder="e.g. Preya Hossain" /></div>
               <div className="field-block"><label>Posted date and time (GMT+6)</label><input type="datetime-local" value={pasteDate} onChange={(e) => setPasteDate(e.target.value)} /><div className="notice-date-shortcuts"><button type="button" onClick={() => setPasteDate(dhakaDateTimeInput())}>Now</button><button type="button" onClick={() => setPasteDate(dhakaDateTimeInput(-1))}>Yesterday</button></div></div>
             </div>
