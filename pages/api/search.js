@@ -514,6 +514,15 @@ export default async function handler(req, res) {
     // product resolves that ambiguity; do not reject a matching model merely
     // because an identically named model also exists in another family.
     const questionModels = selectedProduct === 'both' ? allQuestionModels : allQuestionModels.filter(item => item.product === selectedProduct);
+    // Never silently answer a named Labs model with generic rules when the
+    // catalogue does not yet recognize it. This protects new launches even
+    // while the next FAQ sync or discovery scan is still pending.
+    const namedLabsId = question.match(/\bFNL\s*:?\s*(\d{3,})\b/i);
+    if (namedLabsId && !questionModels.some(model => [model.name, model.slug, ...(model.aliases || [])].some(value => String(value).replace(/[^a-z0-9]/gi, '').toLowerCase().includes('fnl' + namedLabsId[1])))) {
+      const answer = `I cannot verify the rules for FNL:${namedLabsId[1]} from the current model catalogue. Please check the relevant notice or ask Support to confirm.`;
+      await logActivity({success:true, metadata:{status:'completed', stage:'Model not in catalogue', answer, confidence:0, refusalReason:'model_not_in_catalogue', selectedProduct, selectedModel:'all', durationMs:Date.now()-started}});
+      return res.status(200).json({ answer, sources: [], confidence: 0, confidenceLabel: 'Needs verification', selectedScope: { product: selectedProduct, model: 'all' } });
+    }
     const detectedProduct = detectNamedProduct(question);
     const explicitlyNamedProduct = /\b(?:fn\s*markets|brokerage|cfd|fundednext\W*futures|futures\W+(?:account|challenge|model|rules?))\b/i.test(question);
     const questionProduct = explicitlyNamedProduct || !questionModels.length ? detectedProduct : null;
@@ -952,6 +961,10 @@ export default async function handler(req, res) {
       // content cross-published on the CFD help centre domain).
       if (!internalKnowledge && selectedProduct !== 'both' && sourceProduct !== selectedProduct) {
         rejectedEvidence.push({ id: item.article_id, title: item.article_title, url: item.article_url, reason: `Wrong product: ${sourceProduct || 'unknown'} evidence for ${selectedProduct}`, similarity: Number(item.similarity || 0), rank: Number(item._rank || 0) });
+        return false;
+      }
+      if (namedLabsId && selectedModel && !internalKnowledge && override?.model !== selectedModel.slug && !new RegExp('\\bFNL\\s*:?\\s*' + namedLabsId[1] + '\\b', 'i').test(blob)) {
+        rejectedEvidence.push({ id:item.article_id, title:item.article_title, url:item.article_url, reason:`Source does not establish applicability to FNL:${namedLabsId[1]}`, similarity:Number(item.similarity || 0), rank:Number(item._rank || 0) });
         return false;
       }
       if (!selectedModel) {
