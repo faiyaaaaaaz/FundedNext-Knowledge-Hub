@@ -760,7 +760,10 @@ export default async function handler(req, res) {
     const expertAdvisorRecall = concepts.groups.includes('expert_advisor')
       ? ' Expert Advisor automated trading system trading bot manual trading'
       : '';
-    const terms = keywords(correctTypos(question) + ' ' + clearQuestion + (selectedModel ? ` ${selectedModel.name}` : '') + expertAdvisorRecall);
+    // Use the source's common wording as well as the user's wording. For
+    // example, an FAQ saying "purchase" should be found when asked "buy".
+    const recallSynonyms = /\b(?:buy|bought|purchase|purchased|buying)\b/i.test(question) ? ' purchase purchased buy' : '';
+    const terms = keywords(correctTypos(question) + ' ' + clearQuestion + (selectedModel ? ` ${selectedModel.name}` : '') + expertAdvisorRecall + recallSynonyms);
     let keywordMatches = [];
     if (terms.length) {
       const expression = terms.slice(0, 14).flatMap((term) => [`content.ilike.%${term}%`, `article_title.ilike.%${term}%`]).join(',');
@@ -814,6 +817,11 @@ export default async function handler(req, res) {
     if (selectedModel) {
       const modelNeedle = normalizedEvidenceText(selectedModel.name).replace(/[^a-z0-9 -]/gi, ' ').replace(/\s+/g, ' ').trim();
       if (modelNeedle) anchorQueries.push(scopedEnglishAnchor(`article_title.ilike.%${modelNeedle}%,content.ilike.%${modelNeedle}%`));
+      // The verified catalogue already records article IDs for this model.
+      // Retrieve their actual indexed chunks directly: punctuation-normalized
+      // model names (e.g. FNL 005 versus FNL:005) are not reliable SQL matches.
+      const articleIds = [...new Set((selectedModel.articles || []).map(a => String(a.id || '')).filter(id => /^\d+$/.test(id)))].slice(0, 15);
+      if (articleIds.length) anchorQueries.push(sb.from('chunks').select('id,article_id,article_title,article_url,content').in('article_id', articleIds).limit(200));
     }
     if (anchorQueries.length) {
       const anchorResults = await Promise.allSettled(anchorQueries);
@@ -1290,7 +1298,13 @@ export default async function handler(req, res) {
             _rank: 40 + (Number(m.similarity || 0) * 8),
             _scoped: m.meta?.model === selectedModel?.slug
           }));
-          matches = [...noticeEvidence.slice(0, Math.min(2, Math.max(1, answerEvidenceLimit - 4))), ...matches].slice(0, answerEvidenceLimit);
+          const chosenNotices = noticeEvidence.slice(0, Math.min(2, Math.max(1, answerEvidenceLimit - 4)));
+          // Keep model-specific evidence visible before general notices. Notice
+          // authority is still determined by the explicit conflict rules below,
+          // not by its position in the prompt.
+          const scopedMatches = selectedModel ? matches.filter(item => item._scoped) : [];
+          const rest = selectedModel ? matches.filter(item => !item._scoped) : matches;
+          matches = [...scopedMatches.slice(0, Math.max(0, answerEvidenceLimit - chosenNotices.length)), ...chosenNotices, ...scopedMatches.slice(Math.max(0, answerEvidenceLimit - chosenNotices.length)), ...rest].slice(0, answerEvidenceLimit);
         }
     } catch (e) { /* notices are best-effort */ }
 
@@ -1407,6 +1421,8 @@ export default async function handler(req, res) {
       'Treat each rule as applying only to the model, phase, region, and conditions actually stated in its passage. Do not infer universal applicability merely because a passage names no model. When the customer has not specified a model, explain supported model-specific conditions or ask for the model when needed. ' +
       `${selectedModel ? `Evidence that explicitly names ${selectedModel.name} takes highest priority over general policy. ` : ''}` +
       'Never cite or apply a rule that is explicitly and exclusively stated for a DIFFERENT Account model. If a model-specific article states an exception or prohibition for the selected model, it overrides the general rule for that specific point only.';
+    const scopedOverviewText = selectedModel && /^(?:(?:please\s+)?(?:tell|show|give|explain|describe)\s+(?:me\s+)?(?:about\s+)?|what\s+(?:are|is)\s+)?(?:the\s+)?(?:rules|overview|details|key rules|main rules|account rules)[?.!\s]*$/i.test(question.trim())
+      ? '\n\nMODEL OVERVIEW: The user has selected an Account model and asks for its general rules. Give a concise, cited overview of the directly supported rules in the model-specific evidence, including conditions and differences between options where available. Do not claim that an unmentioned rule is absent or apply unrelated notices. If a detail is missing, omit or identify only that detail; do not refuse the entire overview.' : '';
     const regionText = regionIntent.included.length
       ? `\n\nMANDATORY GEOGRAPHIC SCOPE: The customer explicitly referred to ${regionIntent.included.join(', ')}. Regional evidence may be used only when its REGIONAL SCOPE tag matches. State the regional condition in the answer whenever it changes the result.`
       : '\n\nMANDATORY GEOGRAPHIC SCOPE: The customer did not identify a region. Regional-only Help Center evidence has been excluded. Answer from globally applicable evidence only; never infer that a regional restriction applies to everyone.';
@@ -1454,7 +1470,7 @@ export default async function handler(req, res) {
     const noticesText = hasNoticeEvidence
       ? '\n\nAUTHORITATIVE UPDATES: Some evidence items are official CEx notices marked "OFFICIAL NOTICE (dated ...)". A Notice overrides an older FAQ or Notice ONLY for the exact rule and conditions it explicitly changes. Silence about a different requirement does not repeal that requirement. For example, a Notice changing a competition duration does not remove a separate minimum-trading-day rule. You MUST follow these rules: (1) Compare evidence by topic, product, model, region, effective date, and condition before declaring a conflict. (2) For the same rule and conditions, follow only the newest applicable statement. Never merge an older allowance with a newer restriction. (3) If a newer Notice explicitly restricts, prohibits, or removes something, do not present the old allowance as valid. (4) Honor every condition exactly as written. If the answer depends on a condition the customer did not state, give each supported conditional branch or ask. (5) Never soften a prohibition into "allowed with an add-on" unless the newest applicable Notice explicitly says so.'
       : '';
-    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + correctionText + snippetText + scopeText + regionText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText + policyPrecisionText + noticesText +
+    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + correctionText + snippetText + scopeText + scopedOverviewText + regionText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText + policyPrecisionText + noticesText +
       `\n\nAfter the customer-ready answer, add five private final lines. COVERAGE must contain exactly ${topicPlan.length} comma-separated values, one for each customer question in order:\n` +
       'SOURCES: comma-separated evidence numbers actually used, or none\n' +
       'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim\n' +
@@ -1476,6 +1492,7 @@ export default async function handler(req, res) {
     const recoveryById = new Map();
     const addRecovery = (item) => { if (item) recoveryById.set(String(item.id), item); };
     matches.filter((item) => String(item.article_id || '').startsWith('calc:')).forEach(addRecovery);
+    if (selectedModel) matches.filter(item => item._scoped).slice(0, 2).forEach(addRecovery);
     for (const topic of topicPlan) {
       const topicTerms = keywords(topic.question);
       const best = [...matches].sort((a, b) => {
@@ -1676,9 +1693,11 @@ export default async function handler(req, res) {
     let allDraftTopicsUnconfirmed = !!draftCoverage?.length && draftCoverage.every((status) => status === 'not_confirmed');
     // Correct the occasional whole-answer refusal when at least part of a
     // multi-part question has evidence. Genuine no-evidence cases are not retried.
-    const refusalDraft = cleanAnswer(raw) === SAFE_UNCONFIRMED || (cleanAnswer(raw).length < 300 && /(?:unable|cannot|can't|could not).{0,65}(?:confirm|answer)|allow me some time|please.*time.*verify/i.test(cleanAnswer(raw)));
+    const isRefusalDraft = (draft) => cleanAnswer(draft) === SAFE_UNCONFIRMED || (cleanAnswer(draft).length < 300 && /(?:unable|cannot|can't|could not).{0,65}(?:confirm|answer|verify)|allow me some time|please.*time.*verify/i.test(cleanAnswer(draft)));
+    const refusalDraft = isRefusalDraft(raw);
     const directRuleEvidenceAvailable = hasDirectRuleEvidence(matches, requestedRuleIntent);
-    if (refusalDraft && matches.length && (directRuleEvidenceAvailable || topicPlan.length > 1)) {
+    const scopedEvidenceAvailable = !!selectedModel && matches.some(item => item._scoped && String(item.content || '').trim().length >= 40);
+    if ((refusalDraft || allDraftTopicsUnconfirmed) && matches.length && (directRuleEvidenceAvailable || topicPlan.length > 1 || scopedEvidenceAvailable)) {
       partialAnswerRetryAttempted = true;
       const retrySystem = system +
         '\n\nREQUIRED PARTIAL-ANSWER RECOVERY: The first draft refused despite relevant evidence. ' +
@@ -1696,7 +1715,7 @@ export default async function handler(req, res) {
         ];
         try {
           const retried = await runAnswerRecovery(retryMessages);
-          if (cleanAnswer(retried.content) !== SAFE_UNCONFIRMED) {
+          if (!isRefusalDraft(retried.content) && !coverageFromDraft(retried.content, topicPlan.length)?.every(status => status === 'not_confirmed')) {
             completion = retried;
             raw = retried.content;
               partialAnswerRetrySucceeded = true;
@@ -1708,7 +1727,7 @@ export default async function handler(req, res) {
           if (isLimit(retryError) && canFallback && fallbackProvider !== answerProvider) {
             try {
               const retried = await runConfiguredFallback(retryMessages);
-              if (retried && cleanAnswer(retried.content) !== SAFE_UNCONFIRMED) {
+              if (retried && !isRefusalDraft(retried.content) && !coverageFromDraft(retried.content, topicPlan.length)?.every(status => status === 'not_confirmed')) {
                 completion = retried; raw = retried.content;
                 answerProvider = fallbackProvider; usedFallback = true;
                 partialAnswerRetrySucceeded = true;
