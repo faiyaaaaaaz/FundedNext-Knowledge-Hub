@@ -2006,7 +2006,7 @@ export default function Audits() {
       setLoading(false);
       return;
     }
-    bootstrap(token);
+    bootstrap(token, true);
     return () => {
       stopRef.current = true;
     };
@@ -2053,11 +2053,11 @@ export default function Audits() {
     return result;
   }
 
-  async function bootstrap(token = session) {
+  async function bootstrap(token = session, visit = false) {
     setLoading(true);
     setError('');
     try {
-      const response = await fetch('/api/audits?action=bootstrap', { headers: { 'x-app-session': token } });
+      const response = await fetch('/api/audits?action=bootstrap' + (visit ? '&visit=1' : ''), { headers: { 'x-app-session': token } });
       const result = await response.json();
       if (!response.ok) {
         if (response.status === 403) setAccessDenied(true);
@@ -2109,7 +2109,7 @@ export default function Audits() {
   async function loadJob(id, token = session) {
     setError('');
     try {
-      const response = await fetch(`/api/audits?action=job&id=${encodeURIComponent(id)}`, { headers: { 'x-app-session': token } });
+      const response = await fetch(`/api/audits?action=job&visit=1&id=${encodeURIComponent(id)}`, { headers: { 'x-app-session': token } });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Could not load this audit.');
       setCurrentJob(result.job);
@@ -2428,7 +2428,7 @@ export default function Audits() {
   async function openComparison(result) {
     setComparison({ result, loading: true, conversation: null, error: '' });
     try {
-      const response = await request('conversation-view', { conversationId: result.conversationId });
+      const response = await request('conversation-view', { conversationId: result.conversationId, resultId: result.id });
       setComparison((current) => current?.result === result ? { result, loading: false, conversation: response.conversation, error: '', translationStatus:'loading', translations:{} } : current);
       // Load the transcript first; translation runs in the background. Ignore
       // responses from a modal that has since closed or switched conversations.
