@@ -15,8 +15,9 @@ export default async function handler(req, res) {
     if (!/^\d{1,25}$/.test(articleId)) return res.status(400).json({error:'One numeric articleId is required.'});
     const sb = supabaseAdmin();
     if (retry) {
-      const result = await withSyncLease(sb, 'manual', async () => syncStep(sb, await getKeys(), {articleId}));
-      return res.status(result.locked ? 409 : 200).json({articleId, ...result, articleComplete:result.processed === 1});
+      const publishSaved = req.body?.action === 'publish-saved';
+      const result = await withSyncLease(sb, 'manual', async () => syncStep(sb, await getKeys(), {articleId,publishSaved}));
+      return res.status(result.locked ? 409 : 200).json({articleId, ...result, articleComplete:result.processed === 1 && !result.imageFailures});
     }
     const [article, chunks, settings] = await Promise.all([
       sb.from('articles').select('title,body,needs_index,last_indexed_at').eq('intercom_id',articleId).eq('state','published').maybeSingle(),
