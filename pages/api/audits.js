@@ -609,6 +609,7 @@ export default async function handler(req, res) {
     const permission = access.external ? 'auditor' : await getAuditPermission(access, sb);
     if (!access.external && permission === 'none') return res.status(403).json({ error: 'Conversation Audit access has not been granted to this account.' });
     const identity = await auditIdentity(access, permission, sb);
+    const recordView = (eventType, metadata) => logActivity({actorRole:access.role, sessionId:access.sessionId, userName:access.name, userEmail:access.email, authProvider:access.authProvider, eventType, success:true, metadata}, {sb});
     if (!access.external && !canManageAudits(access)) { const sendJson = res.json.bind(res); res.json = (payload) => sendJson(hideJobCreator(payload)); }
     if (access.external) {
       const required = action === 'health' || action === 'bootstrap' ? 'diagnostics:read'
@@ -640,6 +641,7 @@ export default async function handler(req, res) {
       if (permission === 'self') results = results.filter((result) => resultOwnedBy(result, access.email, identity.agentIds));
       if (!results.length && permission === 'self') return res.status(403).json({ error: 'This audit does not contain a result assigned to your email.' });
       if (permission === 'self') job = { ...job, total: results.length, processed: results.length, completed: results.filter((item) => item.status === 'completed').length, evaluations: results.length, skipped: 0, failed: 0, currentConversationId: null, filters: {}, agentNames: [...new Set(results.map((item) => item.agentName).filter(Boolean))] };
+      if (!access.external && req.query.visit === '1') await recordView('audit_batch_opened', {jobId:String(job.id)});
       return res.json({ job, results });
     }
 
@@ -667,6 +669,7 @@ export default async function handler(req, res) {
     }
 
     if (req.method === 'GET' && action === 'bootstrap') {
+      if (!access.external && req.query.visit === '1') await recordView('audit_workspace_visited', {});
       const keys = await getKeys();
       let admins = []; let intercomError = '';
       if (keys.intercomToken) try { admins = await fetchIntercomAdmins(keys.intercomToken); } catch (error) { intercomError = error.message; }
@@ -796,6 +799,13 @@ export default async function handler(req, res) {
       if (permission === 'self') {
         const rows = checked(await sb.from('activity_logs').select('id,metadata').eq('event_type', 'conversation_audit_result').contains('metadata', { conversationId }).limit(100), 'Could not verify transcript access');
         if (!(rows || []).map(publicResult).some((result) => resultOwnedBy(result, access.email, identity.agentIds))) return res.status(403).json({ error: 'You can open transcripts only for your own audit results.' });
+      }
+      if (!access.external && body.resultId) {
+        const row = checked(await sb.from('activity_logs').select('id,metadata').eq('id',String(body.resultId)).eq('event_type','conversation_audit_result').maybeSingle(), 'Could not identify result');
+        if (row && String(row.metadata?.conversationId) === conversationId && (permission !== 'self' || resultOwnedBy(publicResult(row), access.email, identity.agentIds))) {
+          const disputes = await loadDisputes(sb,[row.id]);
+          await recordView('audit_result_opened', {jobId:String(row.metadata.jobId), resultId:String(row.id), conversationId, disputeStatus:disputes.get(String(row.id))?.status || 'none'});
+        }
       }
       const [conversation, admins] = await Promise.all([fetchConversation(keys.intercomToken, conversationId), fetchIntercomAdmins(keys.intercomToken)]);
       const fullTurns = conversationTurns(conversation, admins);
