@@ -988,7 +988,7 @@ function cleanFlagPhrase(value) {
 function flagSpecs(audit) {
   const deductionFlags = displayDeductions(audit)
     .filter((item) => cleanExcerpt(item.transcriptExample))
-    .map((item) => ({ phrase: cleanFlagPhrase(cleanExcerpt(item.transcriptExample)), category: item.category, label: `${item.category} deduction` }));
+    .map((item) => ({ phrase: cleanFlagPhrase(cleanExcerpt(item.transcriptExample)), category: item.category, label: item.levelBased ? 'case evidence' : `${item.category} deduction` }));
   const accuracyFlags = (audit?.accuracyIssues || [])
     .filter((item) => item.wrongInformation)
     .map((item) => ({ phrase: cleanFlagPhrase(item.wrongInformation), category: 'accuracy', label: 'Incorrect information' }));
@@ -1386,7 +1386,7 @@ function ResultCard({ result, onCompare, onRetry }) {
   );
 }
 
-function DeductionItem({ item, index, timeline, metrics }) {
+function DeductionItem({ item, index, timeline, metrics, resolutionStatus }) {
   const targets = deductionEvidenceTargets(item, index, timeline, metrics);
   const level = levelParts(item);
   const excerpt = cleanExcerpt(item.transcriptExample);
@@ -1398,7 +1398,7 @@ function DeductionItem({ item, index, timeline, metrics }) {
   return (
     <section className={`deduction deduct-${item.category}${level ? ' level' : ''}`}>
       <header>
-        <span className="deduction-points">−{Number.isInteger(points) ? points : points.toFixed(1)}</span>
+        {!level && <span className="deduction-points">−{Number.isInteger(points) ? points : points.toFixed(1)}</span>}
         <span className="deduction-kind">{level ? 'Score level, not a mistake' : item.category === 'efficiency' ? 'Measured result' : 'Mistake found'}</span>
       </header>
       {level ? (
@@ -1406,14 +1406,14 @@ function DeductionItem({ item, index, timeline, metrics }) {
           <dl className="level-facts">
             {level.earned && (
               <div>
-                <dt>This case</dt>
-                <dd>{level.earned}</dd>
+                <dt>Score level</dt>
+                <dd>{item.category === 'process' && ['awaiting_customer', 'unresolved', 'unknown', 'partially_resolved', 'escalated'].includes(resolutionStatus) ? `${tidyText(level.earned.replace(/\s+resolved\b.*$/i, ''))}. The case was not confirmed resolved in this audit.` : level.earned}</dd>
               </div>
             )}
             {level.next && (
               <div>
-                <dt>To score {level.nextScore}</dt>
-                <dd>{level.next}</dd>
+                <dt>Higher rubric level</dt>
+                <dd>{level.next}. This describes a different level of work; it is not an instruction to change the case.</dd>
               </div>
             )}
           </dl>
@@ -1458,7 +1458,7 @@ function DeductionItem({ item, index, timeline, metrics }) {
   );
 }
 
-function MetricReview({ category, title, score, comment, correction, canReview, savingResult, onSave, deductions = [], timeline = [], metrics = {}, hideComment = false }) {
+function MetricReview({ category, title, score, comment, correction, canReview, savingResult, onSave, deductions = [], timeline = [], metrics = {}, hideComment = false, resolutionStatus }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(String(score));
   const [reason, setReason] = useState('');
@@ -1482,7 +1482,7 @@ function MetricReview({ category, title, score, comment, correction, canReview, 
             {score}
             <small>/10</small>
           </span>
-          {Number(score) < 10 && <em>−{10 - Number(score)}</em>}
+          {Number(score) < 10 && deductions.some(item => !item.levelBased) && <em>−{deductions.filter(item => !item.levelBased).reduce((sum, item) => sum + Number(item.pointsDeducted || 0), 0)}</em>}
         </div>
         {canReview && (
           <button
@@ -1504,7 +1504,7 @@ function MetricReview({ category, title, score, comment, correction, canReview, 
       {deductions.length > 0 ? (
         <div className="deduction-list">
           {deductions.map((item, index) => (
-            <DeductionItem key={index} item={item} index={index} timeline={timeline} metrics={metrics} />
+            <DeductionItem key={index} item={item} index={index} timeline={timeline} metrics={metrics} resolutionStatus={resolutionStatus} />
           ))}
         </div>
       ) : (
@@ -1714,6 +1714,7 @@ function ConversationReviewModal({ state, onClose, onSubmitDispute, onReviewDisp
                       deductions={items}
                       timeline={timeline}
                       metrics={metrics}
+                      resolutionStatus={audit.resolutionStatus}
                       correction={audit.scoreCorrections?.[category]}
                       canReview={canReview}
                       savingResult={result.id}
