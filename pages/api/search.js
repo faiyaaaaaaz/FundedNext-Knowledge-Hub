@@ -1211,6 +1211,17 @@ export default async function handler(req, res) {
         }).slice(0, answerEvidenceLimit);
       }
     }
+    // Reserve passages that actually state the requested rule. A matching
+    // model name in an unrelated chunk should not push a direct, applicable
+    // policy passage out of the prompt.
+    const directRuleMatches = candidates.filter(item => hasDirectRuleEvidence([item], requestedRuleIntent)).slice(0, 3);
+    if (directRuleMatches.length) {
+      const directIds = new Set(directRuleMatches.map(item => String(item.id)));
+      const seen = new Set();
+      matches = [...directRuleMatches, ...matches].filter(item => {
+        const id=String(item.id); if(seen.has(id)) return false; seen.add(id); return true;
+      }).map(item => directIds.has(String(item.id)) ? {...item,_directRule:true} : item).slice(0, answerEvidenceLimit);
+    }
     // Preserve evidence for each explicitly requested model in a comparison.
     if (comparisonModels.length > 1) {
       const balanced = new Map();
@@ -1303,9 +1314,9 @@ export default async function handler(req, res) {
           // Keep model-specific evidence visible before general notices. Notice
           // authority is still determined by the explicit conflict rules below,
           // not by its position in the prompt.
-          const scopedMatches = selectedModel ? matches.filter(item => item._scoped) : [];
-          const rest = selectedModel ? matches.filter(item => !item._scoped) : matches;
-          matches = [...scopedMatches.slice(0, Math.max(0, answerEvidenceLimit - chosenNotices.length)), ...chosenNotices, ...scopedMatches.slice(Math.max(0, answerEvidenceLimit - chosenNotices.length)), ...rest].slice(0, answerEvidenceLimit);
+          const priorityMatches = matches.filter(item => item._directRule || (selectedModel && item._scoped));
+          const rest = matches.filter(item => !item._directRule && !(selectedModel && item._scoped));
+          matches = [...priorityMatches.slice(0, Math.max(0, answerEvidenceLimit - chosenNotices.length)), ...chosenNotices, ...priorityMatches.slice(Math.max(0, answerEvidenceLimit - chosenNotices.length)), ...rest].slice(0, answerEvidenceLimit);
         }
     } catch (e) { /* notices are best-effort */ }
 
