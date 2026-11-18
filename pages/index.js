@@ -663,6 +663,8 @@ export default function Home() {
                   : `Indexing saved changes — ${data.remaining} article${data.remaining === 1 ? '' : 's'} remaining`,
             details: detail
           });
+          if (data.imageProgress) setSyncState({headline:`Checking FAQ images · ${data.imageProgress.completed} of ${data.imageProgress.total} processed`,details:data.sampleTitles || []});
+          if (data.imageFailures) setSyncState({headline:'Article text indexed with image warnings',details:data.sampleTitles || []});
           if (data.done) break;
         } catch (error) {
           clearTimeout(timeout); clearTimeout(progressNotice); if (cancelRef.current) continue;
@@ -674,6 +676,10 @@ export default function Home() {
             break;
           }
           failures++;
+          if (/provider temporarily unavailable|provider quota or rate limit/i.test(error?.message || '')) {
+            setSyncState({headline:'Indexing paused',details:[error.message]});
+            break;
+          }
           if (failures > 2) { setSyncState({ headline: 'Sync stopped without claiming completion', details: ['Completed batches remain saved', `${activePhase === 'detecting' ? 'Comparison' : 'Indexing'} failed twice`, error?.message || 'The request failed'] }); break; }
           setSyncState({ headline: `Retrying ${activePhase === 'detecting' ? 'the comparison' : 'this indexing batch'} · ${failures} of 2`, details: ['Completed batches remain saved', error?.message || 'The request failed', `Retry scheduled at ${clock()}`] });
           await new Promise((resolve) => setTimeout(resolve, 1500 * failures));
