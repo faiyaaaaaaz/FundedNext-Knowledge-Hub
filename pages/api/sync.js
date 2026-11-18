@@ -47,6 +47,11 @@ export default async function handler(req, res) {
     // completion only after its final no-difference verification pass, so the
     // homepage never mistakes a half-finished batch for a completed update.
     if (result.done) {
+      const imageState = await sb.from('settings').select('value').eq('key','faq_image_failures_v1').maybeSingle();
+      if (imageState.error) throw new Error('Could not check FAQ image indexing status: ' + imageState.error.message);
+      let imageFailures = {};
+      try { imageFailures = JSON.parse(imageState.data?.value || '{}'); } catch { throw new Error('FAQ image indexing status could not be read.'); }
+      result = {...result, imageFailureCount:Object.keys(imageFailures).length};
       const finishedAt = new Date().toISOString();
       const run = req.body?.run && typeof req.body.run === 'object' ? req.body.run : {};
       const changed = Math.max(0, Number(run.newFound || 0) + Number(run.updatedFound || 0), Number(result.changedFound || 0));
@@ -55,7 +60,7 @@ export default async function handler(req, res) {
       const scanned = Math.max(0, Number(run.scanned || 0), Number(result.scanned || 0));
       const chunksWritten = Math.max(0, Number(run.chunks || 0) + Number(result.chunkCount || 0));
       const startedAt = Number.isFinite(Date.parse(run.startedAt)) ? new Date(run.startedAt).toISOString() : finishedAt;
-      const summary = { at: finishedAt, trigger: 'manual', status: 'success', changed, indexed, deleted };
+      const summary = { at: finishedAt, trigger: 'manual', status: result.imageFailureCount ? 'partial' : 'success', changed, indexed, deleted, imageFailures:result.imageFailureCount };
       const { error: markerError } = await sb.from('settings').upsert([
         { key: 'last_manual_sync_at', value: finishedAt },
         { key: 'last_manual_sync_summary', value: JSON.stringify(summary) }
@@ -63,11 +68,11 @@ export default async function handler(req, res) {
       if (markerError) throw new Error('Saving the manual completion marker failed: ' + markerError.message);
       try {
         await sb.from('sync_logs').insert({
-          trigger: 'manual', status: 'success', started_at: startedAt, finished_at: finishedAt,
+          trigger: 'manual', status: summary.status, started_at: startedAt, finished_at: finishedAt,
           duration_ms: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)), articles_scanned: scanned,
           articles_changed: changed, articles_deleted: deleted, articles_indexed: indexed,
           chunks_written: chunksWritten, steps: Math.max(1, Number(run.steps || 0) + 1),
-          sample_titles: Array.isArray(run.titles) ? run.titles.slice(0, 8) : (result.sampleTitles || []), error: null
+          sample_titles: Array.isArray(run.titles) ? run.titles.slice(0, 8) : (result.sampleTitles || []), error: result.imageFailureCount ? `${result.imageFailureCount} FAQ images need retry or review.` : null
         });
         await sb.from('sync_logs').delete().lt('started_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString());
       } catch { /* history logging must never erase a successful completion */ }
