@@ -162,6 +162,7 @@ function ActivityLogCard({ log, expanded, onToggle }) {
     <button type="button" className="activity-log-summary" onClick={onToggle} aria-expanded={expanded}>
       <span className={`activity-event-icon ${log.success ? 'success' : 'failed'}`}>{acknowledgement ? '✓' : log.event_type === 'query' ? 'Q' : '•'}</span>
       <span className="activity-log-main"><b>{activityEventLabel(log.event_type)}</b><small>{formatDate(log.created_at)}</small></span>
+      {['audit_batch_opened','audit_result_opened','conversation_audit_dispute'].includes(log.event_type) && <span>Batch #{metadata.jobId}{metadata.conversationId && ` · Chat ${metadata.conversationId}`}{(metadata.disputeStatus || log.event_type === 'conversation_audit_dispute') && ` · Dispute: ${metadata.disputeStatus || metadata.status}`}</span>}
       <span className="activity-log-person"><b>{log.user_name || (log.actor_role === 'admin' ? 'Master Admin' : log.session_id ? 'Identity recovery needed' : 'Legacy system record')}</b><small>{log.user_email || (log.session_id ? 'No email recorded for this session' : 'No user identity was stored')}</small></span>
       <span className={`activity-result ${log.success ? 'good' : 'bad'}`}>{log.success ? 'Successful' : 'Failed'}</span>
       <span className="activity-expand">{expanded ? 'Hide details −' : 'View all details +'}</span>
