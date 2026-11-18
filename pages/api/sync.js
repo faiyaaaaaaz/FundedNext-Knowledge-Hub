@@ -29,13 +29,13 @@ export default async function handler(req, res) {
       });
     }
 
-    const { intercomToken, openaiKey, geminiKeys, embeddingProvider } = await getKeys();
+    const { intercomToken, openaiKey, geminiKeys, embeddingProvider, chatProvider, chatModel } = await getKeys();
     if (!intercomToken) return res.status(400).json({ error: 'No Intercom key saved yet. Add it in Admin first.' });
     const hasEmbeddingKey = embeddingProvider === 'gemini' ? (geminiKeys && geminiKeys.length > 0) : !!openaiKey;
     if (!hasEmbeddingKey) return res.status(400).json({ error: embeddingProvider === 'gemini' ? 'No Gemini keys saved yet. Add them in Admin first.' : 'No OpenAI key saved yet. Add it in Admin first.' });
 
     const sb = supabaseAdmin();
-    let result = await withSyncLease(sb, 'manual', () => syncStep(sb, { intercomToken, openaiKey, geminiKeys, embeddingProvider }));
+    let result = await withSyncLease(sb, 'manual', () => syncStep(sb, { intercomToken, openaiKey, geminiKeys, embeddingProvider, chatProvider, chatModel }));
     if (result.locked) return res.status(202).json({ phase: 'waiting', done: false, ...result });
     // When this browser run performed the comparison that created the queue,
     // draining that exact saved queue is completion. Do not download all 2,000+
