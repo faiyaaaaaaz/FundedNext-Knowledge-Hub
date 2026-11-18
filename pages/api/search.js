@@ -1353,7 +1353,13 @@ export default async function handler(req, res) {
     // Reviewed corrections can carry captured FAQ evidence. Apply the same
     // regional gate to that provenance so snippets cannot re-introduce an FAQ
     // that the main retrieval filter correctly rejected.
-    const snippets = rawSnippets.filter((snippet) => snippetFitsScope(snippet, {
+    // A model name alone cannot make a correction relevant to a chart lookup.
+    const chartSubjects = chartTerms.filter(term =>
+      !/^(?:step|instant|lite|challenge[s]?|charge[s]?|rule[s]?|ratio|available|fundednext|stellar|trader[s]?|funded|trading|which|about|specific|each|with|does|account[s]?|model[s]?)$/.test(term) &&
+      chartMatches.some(item => keywords(item.article_title).includes(term)));
+    const snippets = rawSnippets.filter(snippet => !chartSubjects.length ||
+      chartSubjects.some(term => keywords([snippet.title, ...(snippet._triggerMatch?.matched || [])].join(' ')).includes(term))
+    ).filter((snippet) => snippetFitsScope(snippet, {
       selectedProduct, selectedModel, comparisonModels, catalog: scopeCatalog.models
     }) && snippetFitsQuestion(snippet)).map((snippet) => {
       const evidence = snippet._evidence || [];
