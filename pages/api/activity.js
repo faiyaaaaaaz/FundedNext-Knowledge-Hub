@@ -7,12 +7,13 @@ const ACTIVITY_LIST_COLUMNS = [
   'question_word_count','input_tokens','output_tokens','estimated_cost','created_at',
   'meta_question_preview:metadata->>questionPreview','meta_answer_preview:metadata->>answerPreview',
   'meta_status:metadata->>status','meta_stage:metadata->>stage','meta_reason:metadata->>reason','meta_error:metadata->>error',
-  'meta_duration:metadata->>durationMs'
+  'meta_duration:metadata->>durationMs','meta_job:metadata->>jobId','meta_chat:metadata->>conversationId','meta_dispute:metadata->>disputeStatus'
 ].join(',');
 
 function normalizeListRow(row) {
   const metadata = {
     _compact: true,
+    jobId:row.meta_job, conversationId:row.meta_chat, disputeStatus:row.meta_dispute,
     questionPreview: row.meta_question_preview || '', answerPreview: row.meta_answer_preview || '',
     status: row.meta_status || '', stage: row.meta_stage || '', reason: row.meta_reason || '', error: row.meta_error || '',
     durationMs: Number(row.meta_duration || 0)
