@@ -567,11 +567,18 @@ export default function Home() {
     } catch (error) { setDisputeError(error.message); } finally { setSubmittingDispute(false); }
   }
 
+  async function syncRequestError(response) {
+    const body = await response.json().catch(() => null);
+    return Object.assign(new Error(body?.error || 'Sync request returned HTTP ' + response.status), {status: response.status});
+  }
+
   async function checkUpdates() {
     setSyncing(true); cancelRef.current = false; setElapsed(0);
     const started = Date.now();
     let processed = 0, chunks = 0, batches = 0, failures = 0, changedDetectionPasses = 0;
     let scanned = 0, newFound = 0, updatedFound = 0, deleted = 0, steps = 0, titles = [];
+    let lastQueue = null, lockSince = null;
+    const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
     const runStartedAt = new Date().toISOString();
     setSyncProgress({ phase: 'checking', processed: 0, remaining: null, scanned: 0, target: null, newFound: 0, updatedFound: 0, deleted: 0, titles: [] });
     const clock = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -583,35 +590,42 @@ export default function Home() {
           setSyncState((current) => ({ headline: 'Sync paused — progress saved', details: [...current.details, 'You can resume any time with Check for updates'] }));
           break;
         }
-        const statusResponse = await fetch('/api/sync', { method: 'POST', headers: headers(session, true), body: JSON.stringify({ action: 'status' }) });
-        const status = await statusResponse.json();
-        if (statusResponse.status === 401) { logout(); break; }
-        if (!statusResponse.ok) throw new Error(status.error || 'Could not inspect the sync queue.');
-        const activePhase = status.phase;
-        setSyncProgress((current) => ({ ...current, phase: activePhase, remaining: status.queued, target: status.stored || current.target, scanned: current.scanned ?? 0, newFound: current.newFound ?? 0, updatedFound: current.updatedFound ?? 0, deleted: current.deleted ?? 0 }));
-        setSyncState(activePhase === 'detecting' ? {
-          headline: 'Comparing Intercom with the saved knowledge base',
-          details: [
-            `Comparison started at ${clock()}`,
-            'Saved queue confirmed empty',
-            `Fetching every published article and comparing it with ${status.stored || 0} saved records`
-          ]
-        } : {
-          headline: `Making saved updates searchable · ${status.queued} articles remaining`,
-          details: [
-            `Batch started at ${clock()}`,
-            `${status.queued} pending articles from an earlier comparison (new and edited articles combined)`,
-            'This step processes saved updates; it does not discover new changes'
-          ]
-        });
-
-        const controller = new AbortController(); abortRef.current = controller;
-        const timeout = setTimeout(() => controller.abort(), 55000);
-        const progressNotice = setTimeout(() => setSyncState((current) => ({
-          headline: activePhase === 'detecting' ? 'Comparison is still scanning all article pages' : 'This indexing batch is still being processed',
-          details: [...current.details.slice(0, 3), `No result has returned yet · ${clock()}`]
-        })), 15000);
+        let activePhase = 'checking';
+        const controller = new AbortController();
+        abortRef.current = controller;
+        let timeout = setTimeout(() => controller.abort(), 20000);
+        let progressNotice;
         try {
+          const statusResponse = await fetch('/api/sync', {method:'POST', headers:headers(session,true), signal:controller.signal, body:JSON.stringify({action:'status'})});
+          if (statusResponse.status === 401) { logout(); break; }
+          if (!statusResponse.ok) throw await syncRequestError(statusResponse);
+          const status = await statusResponse.json();
+          if (lastQueue !== null && status.queued < lastQueue) failures = 0;
+          lastQueue = status.queued;
+          activePhase = status.phase;
+          clearTimeout(timeout);
+          timeout = setTimeout(() => controller.abort(), 75000);
+          setSyncProgress((current) => ({ ...current, phase: activePhase, remaining: status.queued, target: status.stored || current.target, scanned: current.scanned ?? 0, newFound: current.newFound ?? 0, updatedFound: current.updatedFound ?? 0, deleted: current.deleted ?? 0 }));
+          setSyncState(activePhase === 'detecting' ? {
+            headline: 'Comparing Intercom with the saved knowledge base',
+            details: [
+              `Comparison started at ${clock()}`,
+              'Saved queue confirmed empty',
+              `Fetching every published article and comparing it with ${status.stored || 0} saved records`
+            ]
+          } : {
+            headline: `Making saved updates searchable · ${status.queued} articles remaining`,
+            details: [
+              `Batch started at ${clock()}`,
+              `${status.queued} pending articles from an earlier comparison (new and edited articles combined)`,
+              'This step processes saved updates; it does not discover new changes'
+            ]
+          });
+
+          progressNotice = setTimeout(() => setSyncState((current) => ({
+            headline: activePhase === 'detecting' ? 'Comparison is still scanning all article pages' : 'This indexing batch is still being processed',
+            details: [...current.details.slice(0, 3), `No result has returned yet · ${clock()}`]
+          })), 15000);
           const response = await fetch('/api/sync', {
             method: 'POST', headers: headers(session, true), signal: controller.signal,
             body: JSON.stringify({
@@ -619,10 +633,21 @@ export default function Home() {
               run: { startedAt: runStartedAt, processed, chunks, scanned, newFound, updatedFound, deleted, steps, titles }
             })
           });
-          clearTimeout(timeout); clearTimeout(progressNotice);
-          const data = await response.json();
           if (response.status === 401) { logout(); break; }
-          if (!response.ok) throw new Error(data.error || `Server ${response.status}`);
+          if (!response.ok) throw await syncRequestError(response);
+          const data = await response.json();
+          if (data.locked) {
+            lockSince ??= Date.now();
+            if (Date.now() - lockSince > 300000) {
+              setSyncState({headline:'Another worker still holds the queue', details:['This tab stopped waiting after five minutes. Completed articles are saved.']});
+              break;
+            }
+            clearTimeout(progressNotice);
+            setSyncState({headline:'Waiting for the active indexing request', details:['Checking again in eight seconds.']});
+            await wait(8000);
+            continue;
+          }
+          lockSince = null;
           failures = 0; processed += data.processed || 0; chunks += data.chunkCount || 0; batches += data.embeddingBatches || 0; steps++;
           if (data.scanned != null) {
             scanned = Math.max(scanned, Number(data.scanned || 0));
@@ -668,21 +693,21 @@ export default function Home() {
           if (data.done) break;
         } catch (error) {
           clearTimeout(timeout); clearTimeout(progressNotice); if (cancelRef.current) continue;
-          // Aborting the browser request does not guarantee the serverless
-          // function stopped. Never launch a duplicate indexing request while
-          // the first one may still be committing its batch.
-          if (error?.name === 'AbortError') {
-            setSyncState({ headline: 'Stopped waiting without starting a duplicate request', details: ['The request did not return within 55 seconds', 'The server may still finish the current saved batch', 'Wait one minute, then press Check for updates to inspect the real queue state'] });
-            break;
-          }
+          const reason = error.name === 'AbortError' ? 'The server did not return a checkpoint in time.' : error.message;
+          const quota = /quota|rate.?limit|resource.exhausted/i.test(reason) || error.status === 429;
+          const permanent = error.status >= 400 && error.status < 500 && error.status !== 408;
           failures++;
-          if (/provider temporarily unavailable|provider quota or rate limit/i.test(error?.message || '')) {
-            setSyncState({headline:'Indexing paused',details:[error.message]});
+          if (quota || permanent || failures >= 4) {
+            setSyncState({headline:quota ? 'Paused at the provider quota limit' : 'Update interrupted', details:[reason, 'Completed articles remain searchable. Pending articles stay queued.']});
             break;
           }
-          if (failures > 2) { setSyncState({ headline: 'Sync stopped without claiming completion', details: ['Completed batches remain saved', `${activePhase === 'detecting' ? 'Comparison' : 'Indexing'} failed twice`, error?.message || 'The request failed'] }); break; }
-          setSyncState({ headline: `Retrying ${activePhase === 'detecting' ? 'the comparison' : 'this indexing batch'} · ${failures} of 2`, details: ['Completed batches remain saved', error?.message || 'The request failed', `Retry scheduled at ${clock()}`] });
-          await new Promise((resolve) => setTimeout(resolve, 1500 * failures));
+          const delay = 5 * 2 ** (failures - 1);
+          setSyncState({headline:'Rechecking the saved queue', details:[reason, 'Retrying in ' + delay + ' seconds. The server checks for an active worker before starting another batch.']});
+          await wait(delay * 1000);
+        } finally {
+          clearTimeout(timeout);
+          clearTimeout(progressNotice);
+          abortRef.current = null;
         }
       }
     } catch (error) {
@@ -765,6 +790,7 @@ export default function Home() {
             {syncProgress.titles.length > 0 && <div className="rail-sync-latest"><span>Articles made searchable</span>{syncProgress.titles.slice(0, 3).map((title) => <small key={title}>{title}</small>)}</div>}
             <button className="rail-sync-cancel" onClick={() => { cancelRef.current = true; abortRef.current?.abort(); }}>Pause after this safe checkpoint</button>
           </section> : <>
+            {role === 'admin' && syncState.details.length > 0 && <section className="metric-card update-time" role="status"><span>Last update in this tab</span><strong>{syncState.headline}</strong>{syncState.details.slice(-4).map((detail, index) => <small key={index}>{detail}</small>)}</section>}
             <div className="metric-card storage-health-card"><div className="storage-health-head"><span>Live database storage</span><strong>{statsLoading && !stats ? 'Checking…' : stats?.storageHealth ? (stats.storageHealth.percentUsed == null ? formatStorage(stats.storageHealth.databaseBytes) : `${stats.storageHealth.percentUsed.toFixed(1)}%`) : 'Reading unavailable'}</strong></div>{stats?.storageHealth ? <>{stats.storageHealth.percentUsed != null && <div className="storage-health-track"><i style={{ width: `${Math.min(100, Math.max(0, stats.storageHealth.percentUsed))}%` }} /></div>}<small>{formatStorage(stats.storageHealth.databaseBytes)}{stats.storageHealth.databaseLimitBytes ? ` of ${formatStorage(stats.storageHealth.databaseLimitBytes)}` : ''} · database size measured live</small>{stats.storageHealth.databaseLimitBytes == null && role === 'admin' && <small>Set your database allowance in Admin → Restore from report to show a percentage.</small>}</> : <small>{statsLoading && !stats ? 'Loading the latest health reading in the background…' : stats?.storageHealthStatus === 'setup_required' && role === 'admin' ? 'Run the SQL supplied with Admin → Restore from report once to enable the live reading.' : 'The live database reading is temporarily unavailable.'}</small>}</div>
             <div className="metric-card model-card"><span>Answering model</span><div className="model-provider-row"><ProviderLogo provider={stats?.answerProvider || 'openai'} showLabel={false}/><strong>{statsLoading && !stats ? 'Checking…' : stats?.answerProvider === 'groq' ? 'Groq' : stats?.answerProvider === 'gemini' ? 'Gemini' : 'OpenAI'}</strong></div><small>{statsLoading && !stats ? 'Loading saved configuration…' : stats?.answerModel || 'Unavailable'}</small><em>Fallback controlled in Admin</em></div>
             <div className="metric-card primary"><span>Published articles</span><strong>{stats?.totalArticles?.toLocaleString() ?? '—'}</strong><small>Total articles stored and available</small></div>
