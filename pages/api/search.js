@@ -12,7 +12,7 @@ import { retrieveNotices, noticesAccess } from '../../lib/notices';
 import { shouldUseLlmClarifier } from '../../lib/query-planning.mjs';
 import { authenticateExternalApiKey } from '../../lib/externalAccess';
 import {
-  buildEmbeddingPlan, evidenceBudgetForTopics, focusedEvidenceExcerpt,
+  buildEmbeddingPlan, evidenceBudgetForTopics, focusedEvidenceExcerpt, matchingImageReading,
   asksForPrivateAccountState, repairPrivateAccountStateClaims
 } from '../../lib/evidenceReliability.mjs';
 import {
@@ -1429,7 +1429,12 @@ export default async function handler(req, res) {
         : '';
       const tag = sourceTag + regionalTag;
       const excerptQuery = item._topicQuestions?.length ? item._topicQuestions.join(' ') : (clearQuestion || question);
-      return `[${index + 1}] ${tag}${item.article_title}\nURL: ${item.article_url}\n${focusedEvidenceExcerpt(item.content, excerptQuery, contextCharsPerSource)}`;
+      const screenshotReading = /\b(?:screenshot|screen|button|buttons|link|option|beneath|below)\b/i.test(question)
+        ? matchingImageReading(item.content, question) : '';
+      const passage = screenshotReading
+        ? `Verified image reading:\n${screenshotReading.slice(0,contextCharsPerSource)}`
+        : focusedEvidenceExcerpt(item.content, excerptQuery, contextCharsPerSource);
+      return `[${index + 1}] ${tag}${item.article_title}\nURL: ${item.article_url}\n${passage}`;
     }).join('\n\n---\n\n');
     const reviewSnippets = snippets.filter((snippet) => !approvedCorrectionIds.has(String(snippet.id)));
     const snippetText = reviewSnippets.length
@@ -1725,7 +1730,11 @@ export default async function handler(req, res) {
     const refusalDraft = isRefusalDraft(raw);
     const directRuleEvidenceAvailable = hasDirectRuleEvidence(matches, requestedRuleIntent);
     const scopedEvidenceAvailable = !!selectedModel && matches.some(item => item._scoped && String(item.content || '').trim().length >= 40);
-    if ((refusalDraft || allDraftTopicsUnconfirmed) && matches.length && (directRuleEvidenceAvailable || topicPlan.length > 1 || scopedEvidenceAvailable)) {
+    const imageEvidence = (refusalDraft || allDraftTopicsUnconfirmed) ? matches.flatMap((item,index) => {
+      const reading = matchingImageReading(item.content, question);
+      return reading ? [`[${index+1}] ${item.article_title}\nVerified screenshot text:\n${reading}`] : [];
+    }).slice(0,2).join('\n\n') : '';
+    if ((refusalDraft || allDraftTopicsUnconfirmed) && matches.length && (imageEvidence || directRuleEvidenceAvailable || topicPlan.length > 1 || scopedEvidenceAvailable)) {
       partialAnswerRetryAttempted = true;
       const retrySystem = system +
         '\n\nREQUIRED PARTIAL-ANSWER RECOVERY: The first draft refused despite relevant evidence. ' +
@@ -1735,7 +1744,7 @@ export default async function handler(req, res) {
         'Use the full refusal sentence only if the evidence answers zero questions.';
       const retryQuestion =
         `Customer questions:\n${topicPlan.map((topic, index) => `${index + 1}. ${topic.question}`).join('\n')}\n\n` +
-        `FAQ evidence:\n${recoveryContext || context}`;
+        `FAQ evidence:\n${imageEvidence}\n${recoveryContext || context}`;
       if (answerProvider === 'groq' ? (groqPool.length || usedGroqKey) : answerProvider === 'gemini' ? (geminiKeyPool && geminiKeyPool.length) : openaiKey) {
         const retryMessages = [
           { role: 'system', content: retrySystem },
