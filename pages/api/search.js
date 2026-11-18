@@ -790,6 +790,8 @@ export default async function handler(req, res) {
     // Exact error identifiers may otherwise fall outside the first keyword
     // terms of a long pasted message. Search indexed FAQ passages directly.
     const requestedErrorCodes = extractErrorCodes(question);
+    const chartTerms = terms.filter(term => /^[a-z]{4,24}$/i.test(term) && !/^(stellar|account|accounts|model|models|challenge|fundednext|forex|compare|what|does|trading)$/i.test(term)).slice(0, 10);
+    if (chartTerms.length) anchorQueries.push(scopedEnglishAnchor(chartTerms.map(term => `article_title.ilike.%${term}%`).join(','), 24).ilike('content','%machine transcription independently checked%'));
     for (const code of requestedErrorCodes) {
       anchorQueries.push(scopedEnglishAnchor(`content.ilike.%${code}%`, 80));
     }
@@ -1235,6 +1237,14 @@ export default async function handler(req, res) {
     // FAQ were crowding exact evidence from other relevant articles and making
     // prompts much larger without adding source diversity.
     const articleChunkCounts = new Map();
+    const chartMatches = candidates.filter(item =>
+      String(item.content || '').includes('machine transcription independently checked') &&
+      chartTerms.some(term => String(item.article_title || '').toLowerCase().includes(term.toLowerCase())));
+    if (chartMatches.length) {
+      const preferred = chartMatches.slice(0, 2);
+      const ids = new Set(preferred.map(item => item.id));
+      matches = [...preferred, ...matches.filter(item => !ids.has(item.id))].slice(0, answerEvidenceLimit);
+    }
     matches = matches.filter((item) => {
       const key = String(item.article_id || item.id);
       const count = articleChunkCounts.get(key) || 0;
@@ -1482,7 +1492,7 @@ export default async function handler(req, res) {
     const noticesText = hasNoticeEvidence
       ? '\n\nAUTHORITATIVE UPDATES: Some evidence items are official CEx notices marked "OFFICIAL NOTICE (dated ...)". A Notice overrides an older FAQ or Notice ONLY for the exact rule and conditions it explicitly changes. Silence about a different requirement does not repeal that requirement. For example, a Notice changing a competition duration does not remove a separate minimum-trading-day rule. You MUST follow these rules: (1) Compare evidence by topic, product, model, region, effective date, and condition before declaring a conflict. (2) For the same rule and conditions, follow only the newest applicable statement. Never merge an older allowance with a newer restriction. (3) If a newer Notice explicitly restricts, prohibits, or removes something, do not present the old allowance as valid. (4) Honor every condition exactly as written. If the answer depends on a condition the customer did not state, give each supported conditional branch or ask. (5) Never soften a prohibition into "allowed with an add-on" unless the newest applicable Notice explicitly says so.'
       : '';
-    const system = basePrompt + CORE_GUARDRAILS + brandingInstructions(brandRules) + correctionText + snippetText + scopeText + scopedOverviewText + regionText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText + policyPrecisionText + noticesText +
+    const system = basePrompt + CORE_GUARDRAILS + '\nFor verified FAQ tables, answer each requested model from the intersecting row and column, preserving the account phase, value and unit exactly as printed. If a unit or billing basis is missing, give the printed value without inferring that basis. Cite the table passage.' + brandingInstructions(brandRules) + correctionText + snippetText + scopeText + scopedOverviewText + regionText + allocationText + ambiguityText + multiPartText + calcText + calcMergeText + empathyText + formatText + groundingText + policyPrecisionText + noticesText +
       `\n\nAfter the customer-ready answer, add five private final lines. COVERAGE must contain exactly ${topicPlan.length} comma-separated values, one for each customer question in order:\n` +
       'SOURCES: comma-separated evidence numbers actually used, or none\n' +
       'CONFIDENCE: an integer from 0 to 100 based only on how directly the evidence supports every claim\n' +
