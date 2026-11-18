@@ -28,7 +28,7 @@ export default async function handler(req, res) {
     const {body,...details} = article.data;
     const values = Object.fromEntries(settings.data.map(row => [row.key,row.value]));
     return res.json({articleId,...details, eligibleImages:faqImages(body).length, unsupportedImages:unsupportedFaqImages(body).length,
-      savedImageReadings:JSON.parse(values['faq_image_stage_'+articleId] || '{}').texts?.length || 0,
+      savedImageReadings:JSON.parse(values['faq_image_stage_'+articleId] || '{}').texts?.filter(Boolean).length || 0,
       cooldownUntil:values.faq_image_quota_cooldown_until || null, lastImageFailure:JSON.parse(values.faq_image_failures_v1 || '{}')[articleId] || null,
       passages:chunks.data.map(row=>({index:row.chunk_index,text:row.content}))});
   } catch(error) {return res.status(error.status || 500).json({error:error.message});}
