@@ -645,6 +645,7 @@ export default function Home() {
                 `${data.remaining || 0} article${data.remaining === 1 ? '' : 's'} remain in the saved queue`,
                 ...(data.sampleTitles?.length ? [`Last completed batch: ${data.sampleTitles.join(' · ')}`] : [])
               ];
+          if (data.done && data.imageFailureCount > 0) detail.push(`${data.imageFailureCount} FAQ image${data.imageFailureCount === 1 ? '' : 's'} could not be verified and will need retry or review.`);
           if (data.phase === 'detecting' && data.changedFound > 0) {
             changedDetectionPasses++;
             if (changedDetectionPasses > 1) {
@@ -654,7 +655,7 @@ export default function Home() {
           }
           setSyncState({
             headline: data.done
-              ? 'Verified up to date — zero differences found'
+              ? data.imageFailureCount > 0 ? 'Text updated — some FAQ images need attention' : 'Verified up to date — zero differences found'
               : data.phase === 'detecting'
                 ? `${data.changedFound || 0} difference${data.changedFound === 1 ? '' : 's'} detected and queued`
                 : data.verificationRequired
