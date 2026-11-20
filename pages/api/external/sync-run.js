@@ -16,7 +16,9 @@ export default async function handler(req, res) {
     if (!secret) return res.status(500).json({ error: 'CRON_SECRET is not configured, so background indexing cannot start.' });
     const host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
     if (!/^[a-z0-9.-]+(:\d+)?$/i.test(host)) return res.status(400).json({ error: 'Unrecognised host.' });
-    const response = await fetch(`https://${host}/api/cron-sync`, { headers: { authorization: `Bearer ${secret}` }, signal: AbortSignal.timeout(58000) });
+    let response;
+    try { response = await fetch(`https://${host}/api/cron-sync`, { headers: { authorization: `Bearer ${secret}` }, signal: AbortSignal.timeout(54000) }); }
+    catch (error) { return res.status(202).json({ started: true, note: 'The pass was started but did not answer within 54s; check /api/external/sync-status.', reason: String(error?.message || error) }); }
     const body = await response.json().catch(() => ({}));
     const { sampleTitles, ...summary } = body;
     return res.status(response.status).json(summary);
