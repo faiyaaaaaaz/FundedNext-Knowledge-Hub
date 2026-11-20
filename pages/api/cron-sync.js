@@ -7,6 +7,30 @@ import {
 // continues on the next tick.
 export const config = { maxDuration: 60 };
 
+// Record every invocation so a missed or rejected scheduled run is visible in
+// /api/external/sync-status instead of silently leaving no trace.
+async function recordInvocation(sb, patch) {
+  try {
+    let previous = {};
+    try { previous = JSON.parse((await sb.from('settings').select('value').eq('key', 'cron_invocation_v1').maybeSingle()).data?.value || '{}'); } catch { previous = {}; }
+    await sb.from('settings').upsert({ key: 'cron_invocation_v1', value: JSON.stringify({ ...previous, ...patch, at: new Date().toISOString() }) });
+  } catch { /* observability only */ }
+}
+
+// Background draining without an open browser: after a pass that leaves work
+// queued, ask this same route to run again. The next invocation is a separate
+// serverless function, so the work continues after this one ends.
+const MAX_CHAIN_DEPTH = 400;
+async function kickNextPass(req, depth) {
+  const secret = process.env.CRON_SECRET;
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
+  if (!secret || !/^[a-z0-9.-]+(:\d+)?$/i.test(host) || depth >= MAX_CHAIN_DEPTH) return false;
+  try {
+    await fetch(`https://${host}/api/cron-sync`, { method: 'GET', headers: { authorization: `Bearer ${secret}`, 'x-chain-depth': String(depth + 1) }, signal: AbortSignal.timeout(5000) });
+  } catch { /* the 5s wait only confirms delivery; the next pass keeps running */ }
+  return true;
+}
+
 // This endpoint is hit two ways:
 //  1) Vercel Cron (scheduled in vercel.json) — authenticated by CRON_SECRET.
 //  2) An Admin pressing "Run auto-sync now" — authenticated by their session.
@@ -23,7 +47,11 @@ export default async function handler(req, res) {
   if (!isCron) {
     try { const a = await authenticateRequest(req); isAdmin = a?.role === 'admin'; } catch { isAdmin = false; }
   }
-  if (!isCron && !isAdmin) return res.status(401).json({ error: 'Unauthorized' });
+  const chainDepth = isCron ? Math.max(0, Math.min(Number(req.headers['x-chain-depth']) || 0, MAX_CHAIN_DEPTH)) : 0;
+  if (!isCron && !isAdmin) {
+    await recordInvocation(sb, { outcome: 'unauthorized', cronSecretConfigured: !!cronSecret, hadAuthorizationHeader: !!authHeader, userAgent: String(req.headers['user-agent'] || '').slice(0, 60) });
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
 
   const manual = isAdmin && !isCron;
 
@@ -60,11 +88,25 @@ export default async function handler(req, res) {
     }
 
     // Stay safely under the platform limit while draining as much as possible.
-    const budgetMs = 50000;
+    // Leave room for one final step (up to ~25s) inside the 60s function limit.
+    const budgetMs = 32000;
     const trigger = manual ? 'manual' : 'auto';
     const result = await withSyncLease(sb, trigger, () => runAutoSync(sb, { intercomToken, openaiKey, geminiKeys, embeddingProvider, chatProvider, chatModel }, { trigger, budgetMs }));
-    if (result.locked) return res.status(202).json({ ran: false, trigger, ...result });
-    return res.status(200).json({ ran: true, trigger, ...result });
+    if (result.locked) {
+      await recordInvocation(sb, { outcome: 'locked', trigger, chainDepth });
+      return res.status(202).json({ ran: false, trigger, ...result });
+    }
+    // Continue in the background while queued work remains and no pause or
+    // error stops it. A quota pause, error or empty queue ends the chain.
+    let chained = false;
+    if (!result.error) {
+      const { count } = await sb.from('articles').select('*', { count: 'exact', head: true }).eq('needs_index', true);
+      const pause = Date.parse((await sb.from('settings').select('value').eq('key', 'faq_image_quota_cooldown_until').maybeSingle()).data?.value || '');
+      const paused = Number.isFinite(pause) && pause > Date.now();
+      if ((count || 0) > 0 && !paused) chained = await kickNextPass(req, chainDepth);
+    }
+    await recordInvocation(sb, { outcome: result.error ? 'error' : 'ok', trigger, chainDepth, chained, error: result.error || null, indexed: result.articlesIndexed ?? null, steps: result.steps ?? null });
+    return res.status(200).json({ ran: true, trigger, chained, ...result });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
