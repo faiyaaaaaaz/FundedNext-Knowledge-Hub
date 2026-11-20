@@ -25,10 +25,18 @@ async function kickNextPass(req, depth) {
   const secret = process.env.CRON_SECRET;
   const host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
   if (!secret || !/^[a-z0-9.-]+(:\d+)?$/i.test(host) || depth >= MAX_CHAIN_DEPTH) return false;
-  try {
-    await fetch(`https://${host}/api/cron-sync`, { method: 'GET', headers: { authorization: `Bearer ${secret}`, 'x-chain-depth': String(depth + 1) }, signal: AbortSignal.timeout(3000) });
-  } catch { /* the 3s wait only confirms delivery; the next pass keeps running */ }
-  return true;
+  // The next pass flushes its response headers the moment it starts, so
+  // receiving them proves delivery. Abandon the body afterwards; the next pass
+  // keeps running on its own. If nothing arrives in 12s, send it once more
+  // (a duplicate is harmless: the database lease turns it away).
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await fetch(`https://${host}/api/cron-sync`, { method: 'GET', headers: { authorization: `Bearer ${secret}`, 'x-chain-depth': String(depth + 1) }, signal: AbortSignal.timeout(12000) });
+      try { await response.body?.cancel(); } catch { /* already closed */ }
+      return true;
+    } catch { /* not acknowledged; retry once */ }
+  }
+  return false;
 }
 
 // This endpoint is hit two ways:
@@ -55,12 +63,20 @@ export default async function handler(req, res) {
 
   const manual = isAdmin && !isCron;
 
+  // Acknowledge a chained pass immediately so the caller knows it was delivered.
+  if (isCron && chainDepth > 0) {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.flushHeaders?.();
+  }
+  await recordInvocation(sb, { outcome: 'started', trigger: manual ? 'manual' : 'auto', chainDepth });
+  const send = (status, body) => res.headersSent ? res.end(JSON.stringify(body)) : res.status(status).json(body);
+
   try {
     const cfg = await getAutoSyncConfig(sb);
     const { intercomToken, openaiKey, geminiKeys, embeddingProvider, chatProvider, chatModel } = await getKeys();
     const hasEmbeddingKey = embeddingProvider === 'gemini' ? (geminiKeys && geminiKeys.length > 0) : !!openaiKey;
     if (!intercomToken || !hasEmbeddingKey) {
-      return res.status(200).json({ ran: false, reason: `Intercom or ${embeddingProvider === 'gemini' ? 'Gemini' : 'OpenAI'} embedding key is not set yet.` });
+      return send(200, { ran: false, reason: `Intercom or ${embeddingProvider === 'gemini' ? 'Gemini' : 'OpenAI'} embedding key is not set yet.` });
     }
 
     const { count: queuedCount } = await sb
@@ -80,7 +96,7 @@ export default async function handler(req, res) {
     const shouldRun = manual || hasQueue || (cfg.enabled && intervalElapsed);
     if (!shouldRun) {
       const remaining = Math.max(0, (cfg.intervalHours - graceHours) - elapsedHours);
-      return res.status(200).json({
+      return send(200, {
         ran: false,
         reason: cfg.enabled ? `Next automatic sync in about ${remaining.toFixed(1)}h.` : 'Automatic sync is turned off.',
         enabled: cfg.enabled, intervalHours: cfg.intervalHours, lastAutoSyncAt: cfg.lastAutoSyncAt
@@ -89,12 +105,12 @@ export default async function handler(req, res) {
 
     // Stay safely under the platform limit while draining as much as possible.
     // A pass stops starting new steps after 10s. A step can take up to ~45s in the worst case, so the whole pass stays inside the 60s function limit.
-    const budgetMs = 10000;
+    const budgetMs = 6000;
     const trigger = manual ? 'manual' : 'auto';
     const result = await withSyncLease(sb, trigger, () => runAutoSync(sb, { intercomToken, openaiKey, geminiKeys, embeddingProvider, chatProvider, chatModel }, { trigger, budgetMs }));
     if (result.locked) {
       await recordInvocation(sb, { outcome: 'locked', trigger, chainDepth });
-      return res.status(202).json({ ran: false, trigger, ...result });
+      return send(202, { ran: false, trigger, ...result });
     }
     // Continue in the background while queued work remains and no pause or
     // error stops it. A quota pause, error or empty queue ends the chain.
@@ -106,8 +122,9 @@ export default async function handler(req, res) {
       if ((count || 0) > 0 && !paused) chained = await kickNextPass(req, chainDepth);
     }
     await recordInvocation(sb, { outcome: result.error ? 'error' : 'ok', trigger, chainDepth, chained, error: result.error || null, indexed: result.articlesIndexed ?? null, steps: result.steps ?? null });
-    return res.status(200).json({ ran: true, trigger, chained, ...result });
+    return send(200, { ran: true, trigger, chained, ...result });
   } catch (e) {
-    return res.status(500).json({ error: e.message });
+    await recordInvocation(sb, { outcome: 'crashed', error: String(e?.message || e).slice(0, 300) });
+    return send(500, { error: e.message });
   }
 }
