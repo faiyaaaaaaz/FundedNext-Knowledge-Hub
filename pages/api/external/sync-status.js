@@ -28,7 +28,7 @@ export default async function handler(req, res) {
     const [queue, total, settings, keys] = await Promise.all([
       sb.from('articles').select('intercom_id,title,body').eq('needs_index', true).limit(400),
       sb.from('articles').select('intercom_id', { count: 'exact', head: true }).eq('needs_index', true),
-      sb.from('settings').select('key,value').in('key', ['sync_heartbeat_v1', 'faq_image_quota_cooldown_until', 'faq_image_key_cooldowns_v1', 'faq_image_events_v1', 'faq_image_failures_v1']),
+      sb.from('settings').select('key,value').in('key', ['sync_heartbeat_v1', 'faq_image_quota_cooldown_until', 'faq_image_key_cooldowns_v1', 'faq_image_events_v1', 'faq_image_failures_v1', 'cron_invocation_v1']),
       getKeys()
     ]);
     for (const result of [queue, total, settings]) if (result.error) throw new Error(result.error.message);
@@ -37,6 +37,7 @@ export default async function handler(req, res) {
     const rested = json(values.faq_image_key_cooldowns_v1, {});
     const events = json(values.faq_image_events_v1, {}).events || [];
     const heartbeat = json(values.sync_heartbeat_v1, {});
+    const cron = json(values.cron_invocation_v1, null);
     const rows = queue.data || [];
     const ids = rows.map(row => 'faq_image_stage_' + row.intercom_id);
     const stages = ids.length ? await sb.from('settings').select('key,value').in('key', ids) : { data: [] };
@@ -66,6 +67,7 @@ export default async function handler(req, res) {
         last: lastBeat, lockedAt: heartbeat.lockedAt || null, lockedCount: heartbeat.lockedCount || 0,
         note: 'The 120-second database lease is not readable from this route; running/interrupted is inferred from the heartbeat.'
       },
+      background: cron ? { lastInvocationAt: cron.at, outcome: cron.outcome, trigger: cron.trigger || null, chainDepth: cron.chainDepth ?? null, chained: cron.chained ?? null, error: cron.error || null, indexedLastPass: cron.indexed ?? null, cronSecretConfigured: cron.cronSecretConfigured ?? null } : null,
       pause: { cooldownUntil, active: !!cooldownUntil && Date.parse(cooldownUntil) > now, secondsRemaining: cooldownUntil ? Math.max(0, Math.round((Date.parse(cooldownUntil) - now) / 1000)) : 0 },
       keys: (keys.geminiKeyPool || []).map(item => {
         const fingerprint = keyFingerprint(item.key), state = rested[fingerprint];
