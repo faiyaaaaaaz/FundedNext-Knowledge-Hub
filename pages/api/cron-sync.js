@@ -20,14 +20,14 @@ async function recordInvocation(sb, patch) {
 // Background draining without an open browser: after a pass that leaves work
 // queued, ask this same route to run again. The next invocation is a separate
 // serverless function, so the work continues after this one ends.
-const MAX_CHAIN_DEPTH = 400;
+const MAX_CHAIN_DEPTH = 1500;
 async function kickNextPass(req, depth) {
   const secret = process.env.CRON_SECRET;
   const host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
   if (!secret || !/^[a-z0-9.-]+(:\d+)?$/i.test(host) || depth >= MAX_CHAIN_DEPTH) return false;
   try {
-    await fetch(`https://${host}/api/cron-sync`, { method: 'GET', headers: { authorization: `Bearer ${secret}`, 'x-chain-depth': String(depth + 1) }, signal: AbortSignal.timeout(5000) });
-  } catch { /* the 5s wait only confirms delivery; the next pass keeps running */ }
+    await fetch(`https://${host}/api/cron-sync`, { method: 'GET', headers: { authorization: `Bearer ${secret}`, 'x-chain-depth': String(depth + 1) }, signal: AbortSignal.timeout(3000) });
+  } catch { /* the 3s wait only confirms delivery; the next pass keeps running */ }
   return true;
 }
 
@@ -88,8 +88,8 @@ export default async function handler(req, res) {
     }
 
     // Stay safely under the platform limit while draining as much as possible.
-    // Leave room for one final step (up to ~25s) inside the 60s function limit.
-    const budgetMs = 32000;
+    // A pass stops starting new steps after 10s. A step can take up to ~45s in the worst case, so the whole pass stays inside the 60s function limit.
+    const budgetMs = 10000;
     const trigger = manual ? 'manual' : 'auto';
     const result = await withSyncLease(sb, trigger, () => runAutoSync(sb, { intercomToken, openaiKey, geminiKeys, embeddingProvider, chatProvider, chatModel }, { trigger, budgetMs }));
     if (result.locked) {
