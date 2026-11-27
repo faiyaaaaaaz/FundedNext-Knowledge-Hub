@@ -59,7 +59,9 @@ export default async function handler(req, res) {
       if (!texts.some(Boolean)) { results.push({ id, status: 'no-readings', images: images.length }); continue; }
       const { error } = await sb.from('settings').upsert({ key: 'faq_image_stage_' + id, value: JSON.stringify({ fingerprint: imageStageFingerprint(found.data.body), texts }) });
       if (error) throw new Error('Could not save the readings: ' + error.message);
-      const outcome = await withSyncLease(sb, 'manual', async () => syncStep(sb, keys, { articleId: id, publishSaved: true }));
+      let outcome;
+      try { outcome = await withSyncLease(sb, 'manual', async () => syncStep(sb, keys, { articleId: id, publishSaved: true })); }
+      catch (error) { results.push({ id, status: 'error', message: String(error?.message || error).slice(0, 160) }); continue; }
       if (outcome.locked) break; // another indexing pass is running; retry this article next call
       const missing = texts.flatMap((text, i) => text ? [] : [i + 1]);
       results.push({ id, status: outcome.processed === 1 && !outcome.imageFailures ? 'indexed' : 'partial', images: images.length, missingImages: missing, passages: outcome.chunkCount ?? null });
