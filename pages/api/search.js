@@ -10,6 +10,7 @@ import {
 } from '../../lib/server';
 import { retrieveNotices, noticesAccess } from '../../lib/notices';
 import { shouldUseLlmClarifier } from '../../lib/query-planning.mjs';
+import { answerFromArticles } from '../../lib/directAnswer.mjs';
 import { authenticateExternalApiKey } from '../../lib/externalAccess';
 import {
   buildEmbeddingPlan, evidenceBudgetForTopics, focusedEvidenceExcerpt, matchingImageReading,
@@ -509,6 +510,73 @@ export default async function handler(req, res) {
         noticeTitle: 'The selected Account model is not available',
         notice: 'Choose another verified model or search the full product family. The assistant did not broaden the search automatically.'
       });
+    }
+    // PRIMARY PATH: answer from whole Help Center articles with a strong model,
+    // like a support specialist reading the articles. The multi-stage pipeline
+    // below remains as the fallback when this path cannot produce an answer
+    // (switch off with the setting direct_answer_enabled = false).
+    if (!req.body?.clarification && chatProvider === 'gemini' && geminiKeyPool?.length) {
+      let directError = null;
+      try {
+        const directSettings = Object.fromEntries(((await sb.from('settings').select('key,value').in('key', ['direct_answer_enabled', 'direct_answer_model'])).data || []).map((row) => [row.key, row.value]));
+        if (directSettings.direct_answer_enabled !== 'false') {
+          const directModel = String(directSettings.direct_answer_model || 'gemini-2.5-flash').trim();
+          const modelLabel = selectedModelFromUi?.name || `all ${selectedProduct.toUpperCase()} models`;
+          await logActivity({ provider: chatProvider, model: directModel, metadata: { stage: 'Reading source articles', durationMs: Date.now() - started } });
+          const direct = await answerFromArticles({
+            sb, question, product: selectedProduct, modelLabel,
+            embed: (texts) => getEmbeddings(embeddingProvider, embeddingKey, texts),
+            chat: async (messages) => {
+              try { return await tracedAnswerCall(null, directModel, messages, null, geminiKeyPool); }
+              catch (error) { if (directModel !== chatModel) return await tracedAnswerCall(null, chatModel, messages, null, geminiKeyPool); throw error; }
+            },
+            notices: async () => {
+              try {
+                if (!(await noticesAccess(access, sb))) return [];
+                const found = await retrieveNotices(sb, { openaiKey, embeddingProvider, question, product: selectedProduct, model: selectedModelSlug, limit: 4 });
+                return (found.matches || []).map((item) => ({ title: item.meta?.title || item.article_title || 'Notice', text: String(item.meta?.answer_text || item.content || '').slice(0, 1500), date: item.meta?.posted_at ? String(item.meta.posted_at).slice(0, 10) : '' }));
+              } catch { return []; }
+            },
+            snippets: await getRelevantSnippets(question).catch(() => []),
+            calcEvidence: okCalc.map((item) => `${item.title}\n${item.text}`),
+            brand: (text) => text
+          });
+          if (direct) {
+            let brandRulesForDirect = [];
+            try { brandRulesForDirect = await getBrandingRules(); } catch { brandRulesForDirect = []; }
+            const finalAnswer = applyBrandingReplacements(direct.answer, brandRulesForDirect);
+            const inputTokens = Number(direct.usage.prompt_tokens || 0), outputTokens = Number(direct.usage.completion_tokens || 0);
+            const scopeLabel = selectedModelFromUi?.name || `All ${selectedProduct.toUpperCase()} models`;
+            const queryLogId = await logActivity({
+              actorRole: access.role, sessionId: access.sessionId, userName: access.name, userEmail: access.email, authProvider: access.authProvider,
+              questionWordCount: wordCount(question), eventType: 'query', provider: 'gemini',
+              model: `${directModel} · Scope: ${selectedProduct.toUpperCase()}/${selectedModelFromUi?.name || 'All models'}`,
+              inputTokens, outputTokens, estimatedCost: estimateCost('gemini', directModel, inputTokens, outputTokens), success: true,
+              metadata: {
+                status: 'complete', stage: 'Completed', engine: 'direct-articles-v1', confidence: direct.confidence, confidenceLabel: direct.confidenceLabel,
+                sourceCount: direct.sources.length, selectedProduct, selectedModel: selectedModelFromUi?.slug || 'all', selectedScopeLabel: scopeLabel,
+                scopeSource: selectedModelFromUi ? 'selector' : 'all_models', refusalReason: null, durationMs: Date.now() - started,
+                interpretation: { original: question, cleaned: question, selectedProduct, selectedModel: selectedModelFromUi?.slug || 'all', selectedModelLabel: scopeLabel, scopeSource: selectedModelFromUi ? 'selector' : 'all_models', searchQueries: [], topics: direct.questionCoverage.map((item) => ({ question: item.question, queries: [] })) },
+                evidenceTrail: { acceptedCandidateCount: direct.trail.articles.length, selectedForAnswer: direct.trail.articles.map((item, index) => ({ position: index + 1, id: item.id, title: item.title, url: item.url, kind: 'faq', similarity: item.similarity })), finalSources: direct.sources.map((item) => ({ title: item.title, url: item.url, kind: item.kind })), unknownNumbers: direct.trail.unknownNumbers, removedLinks: direct.trail.removedLinks, notices: direct.trail.notices },
+                processing: { fallback: false, engine: 'direct-articles-v1' },
+                questionCoverage: direct.questionCoverage, coverageSummary: direct.coverageSummary,
+                noticeConflict: { detected: false }, question, questionPreview: question.slice(0, 180), answer: finalAnswer, answerPreview: finalAnswer.slice(0, 240), answerWordCount: wordCount(finalAnswer),
+                sources: direct.sources.map((item) => ({ title: item.title, url: item.url, kind: item.kind, excerpt: String(item.excerpt || '').slice(0, 4000) }))
+              }
+            });
+            return res.status(200).json({
+              answer: finalAnswer, sources: direct.sources, segments: direct.segments, answerProvider: 'gemini', usedFallback: false,
+              confidence: direct.confidence, confidenceLabel: direct.confidenceLabel, queryLogId, reliabilityRevision: '2026-11-27-direct-articles-v1',
+              confidenceReasons: direct.confidenceReasons, selectedScope: { product: selectedProduct, model: selectedModelFromUi?.slug || 'all', label: scopeLabel },
+              ambiguous: false, interpretations: [], usedCalculator: okCalc.length > 0, questionCoverage: direct.questionCoverage, coverageSummary: direct.coverageSummary,
+              noticeConflict: false, escalations: []
+            });
+          }
+        }
+      } catch (error) {
+        directError = String(error?.message || error).replace(/(?:AIza|sk-)[A-Za-z0-9_-]+/g, '[redacted]').slice(0, 300);
+      }
+      if (directError) await logActivity({ metadata: { stage: 'Direct answer unavailable; using standard pipeline', directError, durationMs: Date.now() - started } });
     }
     const allQuestionModels = modelsMentioned(question, scopeCatalog.models);
     // A model label can appear in more than one product catalogue. A selected
