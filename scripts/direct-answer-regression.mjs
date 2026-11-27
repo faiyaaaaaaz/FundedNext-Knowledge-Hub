@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { otherProductAlert, articleProduct, isLocalizedTitle, splitQuestions, mergeChunks, rankArticles, plainText, sanitizeLinks, answerFromArticles } from '../lib/directAnswer.mjs';
+import { repairLinks, otherProductAlert, articleProduct, isLocalizedTitle, splitQuestions, mergeChunks, rankArticles, plainText, sanitizeLinks, answerFromArticles } from '../lib/directAnswer.mjs';
 
 // products and localization
 assert.equal(articleProduct('https://helpfutures.fundednext.com/en/articles/1-x', 'Anything'), 'futures');
@@ -86,3 +86,13 @@ assert.ok(otherProductAlert('What are NinjaTrader margins for futures?', 'cfd').
 assert.equal(otherProductAlert('What is the daily loss limit?', 'cfd'), '');
 assert.equal(otherProductAlert('Is a flexible schedule allowed?', 'cfd'), '');
 console.log('direct answer: multi-question selection passed');
+{
+  const arts = [{ title: 'What are the commission charges for Stellar Challenges and FundedNext Accounts?', url: 'https://help.fundednext.com/en/articles/10701368-what-are-the-commission-charges' }];
+  const bare = repairLinks('It is $5. For more details, you can read the article What are the commission charges for Stellar Challenges and FundedNext Accounts?.', arts);
+  assert.ok(bare.includes('[What are the commission charges for Stellar Challenges and FundedNext Accounts?](https://help.fundednext.com/en/articles/10701368-what-are-the-commission-charges)'));
+  const wrong = repairLinks('Read [What are the commission charges for Stellar Challenges and FundedNext Accounts?](https://help.fundednext.com/en/articles/999-wrong).', arts);
+  assert.ok(wrong.includes('10701368') && !wrong.includes('999-wrong'));
+  assert.equal(repairLinks('Read [Some other thing](https://evil.example/x).', arts), 'Read [Some other thing](https://evil.example/x).');
+  assert.equal(repairLinks('No mention here.', arts), 'No mention here.');
+}
+console.log('direct answer: link repair passed');
