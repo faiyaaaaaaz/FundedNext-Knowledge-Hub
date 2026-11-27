@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { articleProduct, isLocalizedTitle, splitQuestions, mergeChunks, rankArticles, plainText, sanitizeLinks, answerFromArticles } from '../lib/directAnswer.mjs';
+import { otherProductAlert, articleProduct, isLocalizedTitle, splitQuestions, mergeChunks, rankArticles, plainText, sanitizeLinks, answerFromArticles } from '../lib/directAnswer.mjs';
 
 // products and localization
 assert.equal(articleProduct('https://helpfutures.fundednext.com/en/articles/1-x', 'Anything'), 'futures');
@@ -81,4 +81,8 @@ console.log('direct answer: all scenarios passed');
   assert.ok(sent.includes('What is the refund policy of FundedNext?'), 'the refund article reaches the model');
   assert.ok(out2.sources.some((s) => s.url.includes('/9-x')));
 }
+assert.ok(otherProductAlert('What is the commission for EUR/USD on Stellar 1-Step?', 'futures').includes('switch the Product selector to CFD'));
+assert.ok(otherProductAlert('What are NinjaTrader margins for futures?', 'cfd').includes('Futures'));
+assert.equal(otherProductAlert('What is the daily loss limit?', 'cfd'), '');
+assert.equal(otherProductAlert('Is a flexible schedule allowed?', 'cfd'), '');
 console.log('direct answer: multi-question selection passed');
