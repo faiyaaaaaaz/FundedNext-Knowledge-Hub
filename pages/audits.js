@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { ConversationSearch, MetricScoresView, AgentScoresView } from '../components/ScoreViews';
 import { humanEfficiencyStory } from '../lib/auditFeedback.mjs';
 import ScorecardVerdict, { ScorecardResultCard } from '../components/ScorecardVerdict';
+import { handlingEventAnchors } from '../lib/scorecards.mjs';
 import { anchorTargetId, evidenceAsDeduction, historyJobMatches, scorecardKpis } from '../components/scorecardFormat.mjs';
 
 function Logo() {
@@ -1187,6 +1188,15 @@ const REASON_STOP_WORDS = new Set([
   'other',
 ]);
 function deductionEvidenceTargets(item, index, timeline, metrics) {
+  const reason = String(item?.reason || '');
+  if (/snooz|clos(?:e|ing|ure)/i.test(reason)) {
+    const candidates = handlingEventAnchors(metrics || {}, 0).filter(a =>
+      (a.partType === 'snoozed' ? /snooz/i : /clos/i).test(reason));
+    const exact = candidates.filter(a => String(a.eventId) === String(item.evidenceId));
+    const matched = exact.length ? exact : candidates.length === 1 ? candidates : [];
+    const targets = matched.map(a => ({ id: anchorTargetId(a, timeline.map(t => t.id), timeline), label: a.label })).filter(t => t.id);
+    if (targets.length) return targets;
+  }
   if (item?.category === 'efficiency') return efficiencyEvidenceTargets(item, timeline, metrics);
   const id = deductionEvidenceTarget(item, index, timeline, metrics);
   if (id) return [{ id, label: item?.levelBased ? 'View what the client asked' : item?.evidenceApproximate ? 'View most likely message' : 'View evidence in conversation' }];
@@ -1284,8 +1294,8 @@ function comparisonTimeline(turns, result) {
       displayAt: timelineSeconds(cycle.replyAt),
       timelineKind: 'metric',
       metricTone: 'miss',
-      authorName: `ART breach ${index + 1}`,
-      body: `${formatSeconds(cycle.seconds)} · Missed 90s target for this client-to-agent response cycle`,
+      authorName: result?.scorecard ? `Slower reply ${index + 1}` : `ART breach ${index + 1}`,
+      body: result?.scorecard ? `${formatSeconds(cycle.seconds)} for this reply. ART is scored on the average.` : `${formatSeconds(cycle.seconds)} · Missed 90s target for this client-to-agent response cycle`,
     }),
   );
   // Results saved before per-cycle timing was introduced retain the aggregate marker.

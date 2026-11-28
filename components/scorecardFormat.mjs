@@ -78,6 +78,7 @@ export function targetText(metric) {
 
 export function valueText(metric) {
   const value = num(metric?.value);
+  if (metric?.key === 'art' && value !== null && !Number.isInteger(value)) return `${Number(value.toFixed(2))}s`;
   return value === null ? 'n/a' : secondsText(value);
 }
 
@@ -115,6 +116,11 @@ export function evidenceAsDeduction(item) {
 export function anchorTargetId(anchor, ids = [], turns = []) {
   const has = (id) => id !== undefined && id !== null && id !== '' && ids.some((x) => String(x) === String(id));
   if (has(anchor?.eventId)) return String(anchor.eventId);
+  if (anchor?.partType) {
+    const pattern = anchor.partType === 'close' ? /^closed?$/i : /^snoozed?$/i;
+    const match = turns.filter(t => Number(t.at) === Number(anchor.at) && pattern.test(t.partType));
+    return match.length === 1 ? String(match[0].id) : null;
+  }
   if (has(anchor?.id)) return String(anchor.id);
   const base = String(anchor?.id || '');
   if (/^metric-art-/.test(base)) {
@@ -130,6 +136,7 @@ export function anchorTargetId(anchor, ids = [], turns = []) {
 }
 
 export function anchorLabel(anchor, many) {
+  if (anchor?.label) return anchor.label;
   if (!many) return 'View evidence in conversation';
   const id = String(anchor?.id || '');
   if (/assignment/.test(id)) return 'View evidence in conversation: assignment';

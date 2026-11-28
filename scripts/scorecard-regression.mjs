@@ -141,3 +141,16 @@ console.log('scorecards: verifier passed');
   refs.set(3, { speaker: 'agent', at: 30, text: quote });
   assert.equal(check({}).findings[0].evidence[0].ref, 3);
 }
+
+{
+  const times = [35, 54, 91, 30, 101, 58, 70, 39, 41, 92, 81, 23, 65, 39];
+  const art = responseTimes => liveChatEfficiency({ responseTimes, artBreaches: 3 })[1];
+  assert.equal(art(times).status, 'hit');
+  assert.equal(art(times).value, 58.5);
+  assert.equal(art([89,91]).status, 'hit');
+  assert.equal(art([90,90,91]).status, 'breach');
+  assert.equal(art([]).status, 'unavailable');
+  const cycles = ['close','snoozed'].map((endType, i) => ({ endType, endEventId: String(i+1), endAt: 500+i, wrapUpSeconds: 400 }));
+  const links = liveChatEfficiency({ ahtCycles: cycles })[2].anchors;
+  assert.deepEqual(links.slice(0,2).map(a => a.eventId), ['1','2']);
+}

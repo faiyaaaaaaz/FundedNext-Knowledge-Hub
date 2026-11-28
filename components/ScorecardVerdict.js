@@ -1,3 +1,4 @@
+import { averageReplyMetric, handlingEventAnchors } from '../lib/scorecards.mjs';
 import { useEffect, useId, useState } from 'react';
 import {
   anchorLabel,
@@ -209,7 +210,15 @@ function Evidence({ items, onJump, canJump }) {
   );
 }
 
-function Finding({ finding, onJump, canJump }) {
+function Finding({ finding, metrics, onJump, canJump }) {
+  const text = String(finding.what || '');
+  const times = new Set((finding.evidence || []).map(e => Number(e.at)).filter(Boolean));
+  const mentioned = handlingEventAnchors(metrics || {}, 0).filter(a =>
+    (a.partType === 'snoozed' ? /snooz/i : /clos(?:e|ing|ure)/i).test(text));
+  const linked = mentioned.filter(a => times.has(Number(a.at)) || (metrics?.ahtCycles || []).some(c =>
+    String(c.endEventId) === String(a.eventId) && times.has(Number(c.replyAt))));
+  const events = linked.length ? linked : mentioned.length === 1 ? mentioned : [];
+
   return (
     <div className="scm-finding">
       <div className="scm-block">
@@ -235,6 +244,7 @@ function Finding({ finding, onJump, canJump }) {
           <p>{finding.clientContext}</p>
         </div>
       ) : null}
+      {events.map(anchor => <JumpButton key={anchor.eventId || anchor.at} target={{ type: 'anchor', anchor }} label={anchor.label} onJump={onJump} canJump={canJump} />)}
       <Evidence items={finding.evidence} onJump={onJump} canJump={canJump} />
     </div>
   );
@@ -243,6 +253,22 @@ function Finding({ finding, onJump, canJump }) {
 // ---------------------------------------------------------------------------
 // Efficiency Metrics
 // ---------------------------------------------------------------------------
+function reviewMetrics(result) {
+  const sc = result.scorecard;
+  if (sc?.track !== 'live_chat' || !result.metrics || !sc.efficiency) return sc;
+  const metrics = sc.efficiency.metrics.map(metric => {
+    if (metric.key === 'art' && (result.metrics.responseTimes?.length || result.metrics.responseCycles?.some(c => Number.isFinite(c.seconds)))) {
+      return averageReplyMetric(result.metrics, metric.target ?? 90);
+    }
+    if (metric.key === 'aht') {
+      const events = handlingEventAnchors(result.metrics, metric.targetWrap ?? 360);
+      return { ...metric, anchors: [...events, ...(metric.anchors || []).filter(a => !a.partType)] };
+    }
+    return metric;
+  });
+  return { ...sc, efficiency: { ...sc.efficiency, metrics } };
+}
+
 function EfficiencyMetric({ metric, onJump, canJump }) {
   const status = metricStatusInfo(metric.status);
   const target = targetText(metric);
@@ -307,7 +333,7 @@ function EfficiencyMetric({ metric, onJump, canJump }) {
 //   canJump     same argument => boolean (hides the button when no message can be matched)
 export default function ScorecardVerdict({ result, canReview = false, onEdit, onJump, canJump }) {
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, '');
-  const sc = result?.scorecard;
+  const sc = reviewMetrics(result);
   const [open, setOpen] = useState({});
   const [editKey, setEditKey] = useState(null);
   const editCount = sc?.edits?.length || 0;
@@ -373,7 +399,7 @@ export default function ScorecardVerdict({ result, canReview = false, onEdit, on
       return (
         <Row key={cause.key} id={id} level={3} open={!!open[id]} onToggle={() => toggle(id)} name={cause.label} chip={<Chip tone="risk">Marked</Chip>}>
           {cause.findings.map((finding, index) => (
-            <Finding key={index} finding={finding} onJump={onJump} canJump={canJump} />
+            <Finding key={index} finding={finding} metrics={result.metrics} onJump={onJump} canJump={canJump} />
           ))}
         </Row>
       );
@@ -405,6 +431,9 @@ export default function ScorecardVerdict({ result, canReview = false, onEdit, on
         </div>
       </section>
 
+      {result.scorecard.efficiency?.metrics?.find(m => m.key === 'art')?.status !== sc.efficiency?.metrics?.find(m => m.key === 'art')?.status && (
+        <p className="scm-detail">ART below uses the average-reply rule. The recorded points above were awarded under the earlier rule.</p>
+      )}
       {summary.headline ? (
         <section className="scm-summary">
           <span className="scm-label">AI verdict</span>
@@ -635,7 +664,7 @@ export default function ScorecardVerdict({ result, canReview = false, onEdit, on
 // (link, copy button, dispute badge) so it matches the legacy card exactly.
 // ---------------------------------------------------------------------------
 export function ScorecardResultCard({ result, onCompare, conversationLine }) {
-  const sc = result.scorecard;
+  const sc = reviewMetrics(result);
   const outcome = outcomeInfo(sc);
   const failed = (sc.clusters || []).filter((cluster) => cluster.failed);
   const metrics = (sc.efficiency?.metrics || []).filter((metric) => metric.key !== 'resolution');
