@@ -520,7 +520,7 @@ export default async function handler(req, res) {
       try {
         const directSettings = Object.fromEntries(((await sb.from('settings').select('key,value').in('key', ['direct_answer_enabled', 'direct_answer_model'])).data || []).map((row) => [row.key, row.value]));
         if (directSettings.direct_answer_enabled !== 'false') {
-          const directModel = String(directSettings.direct_answer_model || 'gemini-2.5-flash').trim();
+          const directModel = String(directSettings.direct_answer_model || 'gemini-3.8-flash').trim();
           const modelLabel = selectedModelFromUi?.name || `all ${selectedProduct.toUpperCase()} models`;
           await logActivity({ provider: chatProvider, model: directModel, metadata: { stage: 'Reading source articles', durationMs: Date.now() - started } });
           const direct = await answerFromArticles({
