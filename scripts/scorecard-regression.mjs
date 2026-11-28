@@ -128,3 +128,16 @@ console.log('scorecards: edits passed');
   assert.equal(v.findings.length, 1, 'a quote with an ellipsis matches each part');
 }
 console.log('scorecards: verifier passed');
+{
+  const quote = 'The internal review is awaiting a supervisor.';
+  const refs = new Map([[1, { speaker: 'agent', at: 10, internalNote: true, text: quote }],
+    [2, { speaker: 'agent', at: 20, text: 'I will check this.' }]]);
+  const finding = { cluster: 'confidentiality', rootCause: 'internal_disclosure', refs: [1], quotes: [quote], what: 'Shared an internal review.' };
+  const check = change => validateScorecardOutput({ findings: [{ ...finding, ...change }], summary: { headline: finding.what } }, { track: 'live_chat', refs });
+  assert.equal(check({}).findings.length, 0);
+  assert.equal(check({refs: [2]}).findings.length, 0);
+  assert.equal(check({absence: true, quotes: [], refs: [2]}).findings.length, 0);
+  assert.equal(check({}).summary.headline, '');
+  refs.set(3, { speaker: 'agent', at: 30, text: quote });
+  assert.equal(check({}).findings[0].evidence[0].ref, 3);
+}
