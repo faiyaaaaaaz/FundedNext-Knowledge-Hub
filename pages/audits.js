@@ -2831,7 +2831,7 @@ export default function Audits() {
           )}
 
           {['results', 'history', 'metrics-l1', 'metrics-l2', 'agents-l1', 'agents-l2'].includes(view) && (
-            <ConversationSearch key={view} request={request} onOpen={openComparison} />
+            <ConversationSearch key={`lookup-${view}`} request={request} onOpen={openComparison} />
           )}
 
           {(view === 'metrics-l1' || view === 'metrics-l2') && data?.access?.canRun && (

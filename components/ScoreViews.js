@@ -152,12 +152,12 @@ function Chip({ tone = 'none', children, title }) {
 // ---------------------------------------------------------------------------
 // Metric Scores
 // ---------------------------------------------------------------------------
-function Kpis({ overview, previous }) {
+function Kpis({ overview, previous, open }) {
   return (
     <div className="scv-kpis">
       {kpiTiles(overview, previous).map((tile) => (
         <div key={tile.key} className="scv-kpi">
-          <span className="scv-kpi-label">{tile.label}</span>
+          {tile.value === 'n/a' ? <span className="scv-kpi-label">{tile.label}</span> : <button type="button" className="scv-card-action scv-kpi-label" onClick={() => open(tile.label, 'total', false, tile.key)}>{tile.label}</button>}
           <strong>{tile.value}</strong>
           <span className={`scv-delta ${tile.change.tone}`} aria-label={tile.change.label}>
             {tile.change.arrow && <i aria-hidden="true">{tile.change.arrow}</i>}
@@ -170,14 +170,14 @@ function Kpis({ overview, previous }) {
   );
 }
 
-function HealthCard({ cluster, legacy }) {
+function HealthCard({ cluster, legacy, open }) {
   const { tone } = cluster;
   const kept = cluster.keptPercent;
   const causes = topCauses(cluster, 3);
   return (
     <article className="scv-health-card">
       <header>
-        <h4>{cluster.displayName}</h4>
+        <h4><button type="button" className="scv-card-action" onClick={() => open(cluster.displayName, cluster.key)}>{cluster.displayName}</button></h4>
         <span className="scv-max">{legacy ? 'Out of 10' : `${cluster.max} points`}</span>
       </header>
       <div className="scv-health-main">
@@ -209,7 +209,7 @@ function HealthCard({ cluster, legacy }) {
   );
 }
 
-function CriticalStrip({ items }) {
+function CriticalStrip({ items, open }) {
   if (!items?.length) return null;
   return (
     <section className="scv-section" aria-labelledby="scv-critical-title">
@@ -217,7 +217,7 @@ function CriticalStrip({ items }) {
       <ul className="scv-critical">
         {items.map((item) => (
           <li key={item.key}>
-            <span>{item.name}</span>
+            <button type="button" className="scv-detail-action" onClick={() => open(item.name, item.key, item.failed > 0)}>{item.name}</button>
             {item.failed > 0 ? <Chip tone="bad">{item.failed} failed</Chip> : <Chip tone="good">None</Chip>}
           </li>
         ))}
@@ -226,7 +226,7 @@ function CriticalStrip({ items }) {
   );
 }
 
-function EfficiencyPanel({ items, track }) {
+function EfficiencyPanel({ items, track, open }) {
   if (!items?.length) return null;
   return (
     <section className="scv-section" aria-labelledby="scv-eff-title">
@@ -241,7 +241,7 @@ function EfficiencyPanel({ items, track }) {
               const tone = breachTone(item.breachRate);
               return (
                 <tr key={item.key}>
-                  <th scope="row">{efficiencyName(item.key, track, item.label).long}</th>
+                  <th scope="row"><button type="button" className="scv-detail-action" onClick={() => open(item.label, `efficiency:${item.key}`, item.breachRate > 0)}>{efficiencyName(item.key, track, item.label).long}</button></th>
                   <td className="num">{formatNumber(item.measured)}</td>
                   <td className="num"><Chip tone={tone}>{formatPercent(item.breachRate)}</Chip></td>
                   <td className="num">{formatDuration(item.avgSeconds)}</td>
@@ -257,7 +257,7 @@ function EfficiencyPanel({ items, track }) {
   );
 }
 
-function TrendChart({ trend }) {
+function TrendChart({ trend, open }) {
   const geo = useMemo(() => trendGeometry(trend), [trend]);
   const hasPass = geo.pass.points.length > 0;
   if (!geo.avg.points.length) return <p className="scv-muted">No weekly data in this period.</p>;
@@ -285,14 +285,14 @@ function TrendChart({ trend }) {
         <summary>View trend as a table</summary>
         <table className="scv-table">
           <thead><tr><th scope="col">Week starting</th><th scope="col" className="num">Evaluated</th><th scope="col" className="num">Average score</th>{hasPass && <th scope="col" className="num">Pass rate</th>}</tr></thead>
-          <tbody>{trend.map((row) => <tr key={row.week}><th scope="row">{row.week}</th><td className="num">{row.evaluated}</td><td className="num">{formatPercent(row.avgScore)}</td>{hasPass && <td className="num">{formatPercent(row.passRate)}</td>}</tr>)}</tbody>
+          <tbody>{trend.map((row) => <tr key={row.week}><th scope="row"><button type="button" className="scv-detail-action" onClick={() => open(`Week starting ${row.week}`, 'total', false, undefined, row.week)}>{row.week}</button></th><td className="num">{row.evaluated}</td><td className="num">{formatPercent(row.avgScore)}</td>{hasPass && <td className="num">{formatPercent(row.passRate)}</td>}</tr>)}</tbody>
         </table>
       </details>
     </div>
   );
 }
 
-function MetricTrack({ track, source }) {
+function MetricTrack({ track, source, open }) {
   const overview = track.overview || {};
   const previous = track.previous || null;
   const legacy = source === 'legacy' || !!overview.legacy;
@@ -308,21 +308,21 @@ function MetricTrack({ track, source }) {
         <p className="scv-empty">No evaluated conversations in this period.</p>
       ) : (
         <>
-          <Kpis overview={overview} previous={previous} />
+          <Kpis open={open} overview={overview} previous={previous} />
           <section className="scv-section" aria-labelledby={`scv-health-${track.track}`}>
             <h3 id={`scv-health-${track.track}`}>Health by metric</h3>
-            <div className="scv-health-grid">{clusters.map((cluster) => <HealthCard key={cluster.key} cluster={cluster} legacy={legacy} />)}</div>
+            <div className="scv-health-grid">{clusters.map((cluster) => <HealthCard open={open} key={cluster.key} cluster={cluster} legacy={legacy} />)}</div>
             <p className="scv-key">Share of points kept: <Chip tone="good">90% or more</Chip> <Chip tone="warn">75% to under 90%</Chip> <Chip tone="bad">Under 75%</Chip></p>
           </section>
-          {!legacy && <CriticalStrip items={overview.critical} />}
-          {!legacy && <EfficiencyPanel items={overview.efficiency} track={track.track} />}
+          {!legacy && <CriticalStrip open={open} items={overview.critical} />}
+          {!legacy && <EfficiencyPanel open={open} items={overview.efficiency} track={track.track} />}
           <section className="scv-section" aria-labelledby={`scv-trend-${track.track}`}>
             <h3 id={`scv-trend-${track.track}`}>Weekly trend</h3>
-            <TrendChart trend={overview.trend || []} />
+            <TrendChart open={open} trend={overview.trend || []} />
           </section>
           <section className="scv-section" aria-labelledby={`scv-insights-${track.track}`}>
             <h3 id={`scv-insights-${track.track}`}>Insights</h3>
-            {insights.length ? <ul className="scv-insights">{insights.map((item) => <li key={item.key}>{item.text}</li>)}</ul> : <p className="scv-muted">Not enough data for insights.</p>}
+            {insights.length ? <ul className="scv-insights">{insights.map((item) => <li key={item.key}><button type="button" onClick={() => open(item.text, item.metric, item.failedOnly, item.subset)}>{item.text}<span aria-hidden="true"> →</span></button></li>)}</ul> : <p className="scv-muted">Not enough data for insights.</p>}
           </section>
         </>
       )}
@@ -332,6 +332,7 @@ function MetricTrack({ track, source }) {
 
 export function MetricScoresView({ level = 'L1', request, onOpenResult, DateFilter }) {
   const filters = useScoreFilters(level);
+  const [drawer, setDrawer] = useState(null);
   const query = useScoreQuery(request, 'score-overview', { level, from: filters.from, to: filters.to, source: filters.source });
   const track = pickTrack(query.data, filters.track, filters.source);
   return (
@@ -340,9 +341,10 @@ export function MetricScoresView({ level = 'L1', request, onOpenResult, DateFilt
       <div className="scv-body" role={level === 'L2' && filters.source === 'scorecard' ? 'tabpanel' : undefined}>
         {query.loading ? <Skeleton tiles rows={5} />
           : query.error ? <InlineError message={query.error} onRetry={query.retry} />
-            : track ? <MetricTrack track={track} source={filters.source} />
+            : track ? <MetricTrack track={track} source={filters.source} open={(label, metric = 'total', failedOnly = false, subset, week) => setDrawer({ label, metric, failedOnly, subset, week, allAgents: true, agentName: 'Conversations', track: track.track, trackLabel: track.trackLabel })} />
               : <p className="scv-empty">No scores in this period.</p>}
       </div>
+      {drawer && <ScoreDrawer target={drawer} level={level} from={filters.from} to={filters.to} source={filters.source} request={request} onOpenResult={onOpenResult} onClose={() => setDrawer(null)} />}
     </div>
   );
 }
@@ -380,7 +382,7 @@ function AgentsTable({ group, source, onOpen }) {
     label: metricLabel(metric, { clusters: agent.clusters, critical: agent.critical, efficiency: agent.efficiency, track: group.track, legacy }),
   });
   const sortable = (key, label, className = '') => (
-    <th scope="col" className={className} aria-sort={sort?.key === key ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+    <th key={key} scope="col" className={className} aria-sort={sort?.key === key ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
       <button type="button" className="scv-sort" onClick={() => setSort((current) => nextSort(current, key))}>
         {label}<i aria-hidden="true">{sort?.key === key ? (sort.dir === 'asc' ? '↑' : '↓') : '↕'}</i>
       </button>
@@ -484,7 +486,7 @@ function ConversationRow({ item, metric, track, busy, onOpen }) {
       <button type="button" className="scv-conv-main" onClick={() => onOpen(item)} disabled={busy} aria-label={`Open conversation ${item.conversationId} review`}>
         <span className="scv-conv-top">
           <span className="scv-conv-date">{dhakaDate(item.conversationDate)}</span>
-          <code>{item.conversationId}</code>
+          <code>{item.conversationId}</code><span>{item.agentName}</span>
           {item.track !== 'legacy' && <span className="scv-conv-total">Total {formatPercent(item.total)}</span>}
           <Chip tone={outcome.tone}>{outcome.label}</Chip>
           {item.manualReview && <Chip tone="warn">Manual review</Chip>}
@@ -509,7 +511,7 @@ function ScoreDrawer({ target, level, from, to, source, request, onOpenResult, o
   const closeButton = useRef(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
-  const query = useScoreQuery(request, 'score-conversations', { level, track: target.track, agentId: target.agentId, metric: target.metric, from, to, source, failedOnly });
+  const query = useScoreQuery(request, 'score-conversations', { level, track: target.track, agentId: target.agentId, allAgents: target.allAgents, subset: target.subset, week: target.week, metric: target.metric, from, to, source, failedOnly });
 
   function dismiss() {
     if (closing.current) return;
@@ -566,11 +568,11 @@ function ScoreDrawer({ target, level, from, to, source, request, onOpenResult, o
           </div>
           <button type="button" className="scv-close" onClick={dismiss} aria-label="Close" ref={closeButton}>×</button>
         </header>
-        <div className="scv-drawer-tools">
+        {!['pass', 'critical', 'manual'].includes(target.subset) && <div className="scv-drawer-tools">
           <button type="button" role="switch" aria-checked={failedOnly} className={`scv-switch ${failedOnly ? 'on' : ''}`} onClick={() => setFailedOnly((value) => !value)}>
             <span className="scv-switch-track" aria-hidden="true"><span /></span>Show only failed
           </button>
-        </div>
+        </div>}
         <div className="scv-drawer-body">
           {rowError && <InlineError message={rowError} onRetry={() => setRowError('')} />}
           {query.loading ? <Skeleton rows={6} />

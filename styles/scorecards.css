@@ -254,3 +254,12 @@
   .scv-lookup { grid-template-columns: minmax(0, 1fr); padding: 14px; }
   .scv-kpis .scv-kpi:last-child:nth-child(odd) { grid-column: 1 / -1; }
 }
+
+.scv-health-card, .scv-kpi { position: relative; }
+.scv-card-action, .scv-detail-action, .scv-insights button { color: inherit; background: transparent; border: 0; font: inherit; text-align: start; cursor: pointer; }
+.scv-card-action, .scv-detail-action { padding: 0; }
+.scv-card-action::after { content: ''; position: absolute; inset: 0; border-radius: inherit; }
+.scv-card-action:hover, .scv-detail-action:hover { text-decoration: underline; }
+.scv-insights li { padding: 0; }
+.scv-insights button { width: 100%; padding: 12px 16px; display: flex; align-items: center; gap: 16px; justify-content: space-between; }
+.scv-insights button:hover, .scv-card-action:hover::after { background: var(--accent-subtle); }

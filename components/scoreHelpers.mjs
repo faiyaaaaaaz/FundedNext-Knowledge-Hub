@@ -134,36 +134,36 @@ export function buildInsights(overview, previous, { track = '' } = {}) {
     const cause = topCause(weakest);
     let text = `${weakest.displayName} is the weakest area: it keeps ${formatPercent(weakest.keptPercent)} of its points, and ${formatPercent(weakest.failRate)} of ${plural(weakest.evaluated, 'evaluated conversation', 'evaluated conversations')} failed it.`;
     if (cause) text += ` The most common root cause is ${cause.label} (${plural(cause.count, 'time', 'times')}).`;
-    out.push({ key: 'weakest', text });
+    out.push({ key: 'weakest', metric: weakest.key, failedOnly: weakest.failRate > 0, text });
   }
 
   if (previous && previous.evaluated > 0) {
     const candidates = [];
     if (isNum(overview.avgScore) && isNum(previous.avgScore)) candidates.push({ name: 'The average score', now: overview.avgScore, then: previous.avgScore });
-    if (!legacy && isNum(overview.passRate) && isNum(previous.passRate)) candidates.push({ name: 'The pass rate', now: overview.passRate, then: previous.passRate });
+    if (!legacy && isNum(overview.passRate) && isNum(previous.passRate)) candidates.push({ name: 'The pass rate', subset: 'pass', now: overview.passRate, then: previous.passRate });
     for (const cluster of clusters) {
       const before = (previous.clusters || []).find((item) => item.key === cluster.key);
-      if (before && isNum(before.keptPercent)) candidates.push({ name: `Points kept in ${cluster.displayName}`, now: cluster.keptPercent, then: before.keptPercent });
+      if (before && isNum(before.keptPercent)) candidates.push({ name: `Points kept in ${cluster.displayName}`, metric: cluster.key, now: cluster.keptPercent, then: before.keptPercent });
     }
     const moved = candidates.map((item) => ({ ...item, delta: Math.round((item.now - item.then) * 10) / 10 })).filter((item) => item.delta !== 0).sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))[0];
-    if (moved) out.push({ key: 'change', text: `${moved.name} ${moved.delta > 0 ? 'rose' : 'fell'} by ${Math.abs(moved.delta)} points versus the previous period, from ${formatPercent(moved.then)} to ${formatPercent(moved.now)}. This is the biggest change among the headline numbers.` });
+    if (moved) out.push({ key: 'change', metric: moved.metric, subset: moved.subset, text: `${moved.name} ${moved.delta > 0 ? 'rose' : 'fell'} by ${Math.abs(moved.delta)} points versus the previous period, from ${formatPercent(moved.then)} to ${formatPercent(moved.now)}. This is the biggest change among the headline numbers.` });
   }
 
   const efficiency = (overview.efficiency || []).filter((item) => item.measured > 0 && isNum(item.breachRate));
   if (efficiency.length) {
     const worst = [...efficiency].sort((a, b) => b.breachRate - a.breachRate)[0];
     const name = efficiencyName(worst.key, track, worst.label).long;
-    if (worst.breachRate > 0) out.push({ key: 'efficiency', text: `${name} breaches most often: ${formatPercent(worst.breachRate)} of ${plural(worst.measured, 'measured conversation', 'measured conversations')} missed the ${isNum(worst.targetSeconds) ? `${formatDuration(worst.targetSeconds)} target` : 'target'}.` });
+    if (worst.breachRate > 0) out.push({ key: 'efficiency', metric: `efficiency:${worst.key}`, failedOnly: true, text: `${name} breaches most often: ${formatPercent(worst.breachRate)} of ${plural(worst.measured, 'measured conversation', 'measured conversations')} missed the ${isNum(worst.targetSeconds) ? `${formatDuration(worst.targetSeconds)} target` : 'target'}.` });
     else out.push({ key: 'efficiency', text: 'No efficiency metric breached its target in this period.' });
   }
 
   if (!legacy && (overview.critical || []).length) {
     const worst = [...overview.critical].sort((a, b) => b.failed - a.failed)[0];
-    if (worst && worst.failed > 0) out.push({ key: 'critical', text: `${worst.name} is the critical check that failed most: ${plural(worst.failed, 'conversation', 'conversations')} (${formatPercent(worst.failed / overview.evaluated * 100)} of those evaluated).` });
+    if (worst && worst.failed > 0) out.push({ key: 'critical', metric: worst.key, failedOnly: true, text: `${worst.name} is the critical check that failed most: ${plural(worst.failed, 'conversation', 'conversations')} (${formatPercent(worst.failed / overview.evaluated * 100)} of those evaluated).` });
     else out.push({ key: 'critical', text: 'No critical check failed in this period.' });
   }
 
-  if (overview.manualReviewCount > 0) out.push({ key: 'manual', text: `${plural(overview.manualReviewCount, 'conversation needs', 'conversations need')} manual review out of ${formatNumber(overview.evaluated)} evaluated.` });
+  if (overview.manualReviewCount > 0) out.push({ key: 'manual', subset: 'manual', text: `${plural(overview.manualReviewCount, 'conversation needs', 'conversations need')} manual review out of ${formatNumber(overview.evaluated)} evaluated.` });
   return out;
 }
 
