@@ -1,11 +1,14 @@
 import { translationBatches, parseTranslations } from '../../lib/transcriptTranslation.mjs';
+import { handleScoreAction } from '../../lib/scorecardApi';
+import { scoreScorecardTarget, scorecardResultFields, ticketTargetIds } from '../../lib/scorecardAudit';
+import { ticketTurns } from '../../lib/scorecards.mjs';
 import {
   authenticateRequest, getKeys, logActivity, supabaseAdmin, geminiChatDetailed
 } from '../../lib/server';
 import {
   AUDIT_RUBRIC_VERSION, auditConnections, auditCsv, auditHtml, auditInputFingerprint,
   buildAgentWorkloadLedger, canManageAudits, canReviewAuditDisputes, canUseAudits, conversationTurns, deriveMetrics, fetchConversation,
-  fetchIntercomAdmins, findConversationCandidates, getAuditAccessConfig, getAuditPermission, getAuditSelfAccessConfig,
+  fetchIntercomAdmins, fetchTicket, findConversationCandidates, getAuditAccessConfig, getAuditPermission, getAuditSelfAccessConfig,
   getAuditAgentConfig, getAuditLevel2Config, getAuditModels, getAuditThresholdConfig, meaningfulAgentIds, parseConversationIds,
   redactConversation, restoreAuditTokens, retrieveAuditEvidence, runAuditModel, sampleCandidates,
   saveAuditAccessConfig, saveAuditAgentConfig, saveAuditLevel2Config, saveAuditModels, saveAuditSelfAccessConfig, saveAuditThresholdConfig
@@ -30,7 +33,7 @@ function publicJob(row, enrichment = {}) {
     status: meta.status || (row?.success ? 'completed' : 'failed'), mode: meta.mode || 'sample',
     stage: meta.stage || '', total: Number(meta.total || 0), processed: Number(meta.processed || 0),
     completed: Number(meta.completed || 0), skipped: Number(meta.skipped || 0), failed: Number(meta.failed || 0),
-    evaluations: Number(meta.evaluations || 0), currentConversationId: meta.currentConversationId || null,
+    evaluations: Number(meta.evaluations || 0), scorecard: meta.scorecard === 2, currentConversationId: meta.currentConversationId || null,
     pauseRequested: !!meta.pauseRequested, cancelRequested: !!meta.cancelRequested,
     filters: meta.filters || {}, seed: meta.seed || '', rubricVersion: meta.rubricVersion || AUDIT_RUBRIC_VERSION,
     updatedAt: meta.updatedAt || row?.created_at, finishedAt: meta.finishedAt || '', error: meta.error || '', directIds: meta.directIds || [], agentNames,
@@ -291,10 +294,12 @@ async function cachedAuditResult(sb, fingerprint) {
 
 // Only the conversation and agent ids are needed to avoid repeats, so the large saved audits are not downloaded.
 // If the database rejects the slim query, the full one still works.
-async function previouslyAuditedRows(sb) {
-  const slim = await sb.from('activity_logs').select('conversationId:metadata->>conversationId,agentId:metadata->>agentId').eq('event_type', 'conversation_audit_result').eq('success', true).limit(5000);
-  if (!slim.error && Array.isArray(slim.data)) return slim.data.map((row) => ({ metadata: { conversationId: row.conversationId, agentId: row.agentId } }));
-  return checked(await sb.from('activity_logs').select('metadata').eq('event_type', 'conversation_audit_result').eq('success', true).limit(5000), 'Could not check previous audits');
+async function previouslyAuditedRows(sb, scorecardMode = false) {
+  // A scorecard audit may re-audit a conversation that only the old metrics have covered.
+  const slim = await sb.from('activity_logs').select('conversationId:metadata->>conversationId,agentId:metadata->>agentId,scorecardVersion:metadata->>scorecardVersion').eq('event_type', 'conversation_audit_result').eq('success', true).limit(5000);
+  if (!slim.error && Array.isArray(slim.data)) return slim.data.filter((row) => !scorecardMode || String(row.scorecardVersion || '') === '2').map((row) => ({ metadata: { conversationId: row.conversationId, agentId: row.agentId } }));
+  const full = checked(await sb.from('activity_logs').select('metadata').eq('event_type', 'conversation_audit_result').eq('success', true).limit(5000), 'Could not check previous audits');
+  return (full || []).filter((row) => !scorecardMode || Number(row.metadata?.scorecardVersion) === 2);
 }
 
 async function createJob(req, access, sb, body) {
@@ -337,7 +342,7 @@ async function createJob(req, access, sb, body) {
     if (requestedSize > 100) throw new Error('The total sample cannot exceed 100 conversations.');
     const [candidates, previousRows] = await Promise.all([
       findConversationCandidates(keys.intercomToken, { agentIds: requested, from: body.from, to: body.to, maxPerAgent: Math.max(150, requestedSize * 4) }),
-      previouslyAuditedRows(sb)
+      previouslyAuditedRows(sb, body.scorecard === true)
     ]);
     if (!candidates.length) throw new Error('Intercom returned no conversations for the selected agents and date range.');
     const previouslyAudited = new Set((previousRows || []).map((row) => {
@@ -354,7 +359,7 @@ async function createJob(req, access, sb, body) {
   const metadata = {
     status: 'queued', mode, stage: selection ? 'Finding eligible conversations' : 'Ready to fetch conversations', total: selection ? selection.requested : queue.length, processed: 0, completed: 0,
     skipped: 0, failed: 0, evaluations: 0, queue, filters, directIds, seed, pauseRequested: false, cancelRequested: false,
-    rubricVersion: AUDIT_RUBRIC_VERSION, thresholds, selection, agentNames, auditOrigin: access.external ? 'developer_api' : 'workspace_ui', updatedAt: new Date().toISOString()
+    rubricVersion: body.scorecard === true ? 'scorecard-2026.11.28-r1' : AUDIT_RUBRIC_VERSION, scorecard: body.scorecard === true ? 2 : undefined, thresholds, selection, agentNames, auditOrigin: access.external ? 'developer_api' : 'workspace_ui', updatedAt: new Date().toISOString()
   };
   const id = await logActivity({ actorRole: access.role, sessionId: access.sessionId, userName: access.name, userEmail: access.email, authProvider: access.authProvider, eventType: 'conversation_audit_job', success: true, metadata }, { sb });
   if (!id) throw new Error('Could not create the audit job.');
@@ -491,6 +496,13 @@ async function processNext(access, sb, jobId) {
     const turns = conversationTurns(conversation, admins);
     const meaningful = meaningfulAgentIds(turns);
     const targetIds = auditTargetIds(item, meaningful);
+    // Level 2 agents answer PSTF cases inside the ticket linked to the conversation, so they are targets too.
+    let ticketBundle = null;
+    if (meta.scorecard === 2 && level2AgentIds.length) {
+      const level2Strings = level2AgentIds.map(String);
+      const found = await ticketTargetIds({ token: keys.intercomToken, conversation, admins, level2AgentIds: level2Strings, item });
+      if (found.ticketIds.length) { ticketBundle = found; for (const id of found.targets) if (!targetIds.includes(id)) targetIds.push(id); }
+    }
     if (!targetIds.length) {
       const reason = meaningful.length ? 'The selected agent did not provide a meaningful support response.' : 'No human agent provided a meaningful support response.';
       await insertResult(sb, access, { jobId: String(jobId), status: 'skipped', conversationId: String(item.id), conversationDate: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '', skipReason: reason, intercomLink: intercomLink(conversation), rubricVersion: AUDIT_RUBRIC_VERSION });
@@ -502,7 +514,7 @@ async function processNext(access, sb, jobId) {
     const alreadyScored = new Set((savedRows || []).map((saved) => String(saved.metadata?.agentId || '')));
     const pendingIds = targetIds.filter((id) => !alreadyScored.has(String(id)));
     // Only start ahead after a recent healthy uncached model response; never fan out during cooldown.
-    if (['sample','direct'].includes(meta.mode) && targetIds.length === 1 && meta.allowParallelNext && meta.workloadAnchorsPrepared) {
+    if (['sample','direct'].includes(meta.mode) && meta.scorecard !== 2 && targetIds.length === 1 && meta.allowParallelNext && meta.workloadAnchorsPrepared) {
       const upcoming = queue.slice(index + 1, index + 3);
       if (upcoming.length) pendingPrefetch = runLimited(upcoming, 2, (candidate) => prefetchConversationResult(candidate, { access, sb, jobId, keys, admins, level2AgentIds, meta, deadlineAt }));
     }
@@ -526,6 +538,20 @@ async function processNext(access, sb, jobId) {
       const prefix = `${item.id}:${targetId}:`; const ahtAnchors = {};
       for (const [key, value] of Object.entries(meta.workloadAnchors || {})) if (key.startsWith(prefix)) ahtAnchors[key.slice(prefix.length)] = value;
       const metrics = deriveMetrics(conversation, turns, targetId, { supportLevel: level2AgentIds.includes(String(targetId)) ? 'level2' : 'standard', thresholds: meta.thresholds, ahtAnchors });
+      if (meta.scorecard === 2) {
+        const level2 = level2AgentIds.map(String).includes(String(targetId));
+        const outcome = await scoreScorecardTarget({ sb, keys, deadlineAt, conversation, turns, targetId, agent, level2, redacted, knowledge, metrics, thresholds: meta.thresholds, admins, ticketBundle, cachedLookup: (fingerprint) => cachedAuditResult(sb, fingerprint) });
+        const hit = outcome.cached || null;
+        const fields = hit ? { scorecardVersion: 2, scorecardRevision: hit.scorecardRevision, track: hit.track, scorecard: hit.scorecard, scorecardLite: hit.scorecardLite, audit: hit.audit, ...(hit.ticket ? { ticket: hit.ticket } : {}), auditInputFingerprint: outcome.fingerprint } : scorecardResultFields(outcome);
+        return insertResult(sb, access, {
+          jobId: String(jobId), status: 'completed', conversationId: String(item.id), conversationDate: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '',
+          agentId: targetId, agentName: agent.name, agentEmail: agent.email || '', intercomLink: intercomLink(conversation), metrics: outcome.track === 'pstf' ? { supportLevel: 'level2', pstf: true } : metrics,
+          evidence: (knowledge.evidence || []).map(({ kind, id, title, url, postedAt }) => ({ kind, id, title, url, postedAt })), evidenceRetrievedAt: knowledge.retrievedAt,
+          redactionCount: redacted.redactionCount, rubricVersion: 'scorecard-2026.11.28-r1', ...fields,
+          reusedDeterministicResult: !!hit, reusedFromResultId: hit?.id || null, provider: hit?.provider || 'gemini', model: hit?.model || outcome.model?.model,
+          keyName: hit?.keyName || outcome.model?.keyName, keyFingerprint: hit?.keyFingerprint || outcome.model?.keyFingerprint, routeAttempts: hit ? [] : outcome.model?.attempts, usage: hit ? {} : outcome.model?.usage
+        });
+      }
       const auditFingerprint = auditInputFingerprint({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgentId: targetId });
       const cached = await cachedAuditResult(sb, auditFingerprint);
       const model = cached ? null : await runAuditModel({ transcript: redacted.transcript, evidence: knowledge.evidence, metrics, targetAgent: { token: redacted.agentTokens[targetId] || '[TARGET_AGENT]', conversationAt: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '' } }, sb, { deadlineAt, keys });
@@ -679,10 +705,10 @@ export default async function handler(req, res) {
       const jobIds = (jobs || []).map((row) => String(row.id));
       let recentResults = [];
       if (jobIds.length) {
-        const resultQuery = await sb.from('activity_logs').select('id,metadata').eq('event_type', 'conversation_audit_result').in('metadata->>jobId', jobIds).limit(5000);
+        const resultQuery = await sb.from('activity_logs').select('id,jobId:metadata->>jobId,status:metadata->>status,agentId:metadata->>agentId,agentName:metadata->>agentName,agentEmail:metadata->>agentEmail,audit:metadata->audit,metrics:metadata->metrics,scorecard:metadata->scorecardLite').eq('event_type', 'conversation_audit_result').in('metadata->>jobId', jobIds).limit(5000);
         if (!resultQuery.error) recentResults = resultQuery.data || [];
       }
-      recentResults = recentResults.map((row) => ({ id: row.id, ...(row.metadata || {}) }));
+      recentResults = recentResults.map((row) => ({ ...row }));
       if (permission === 'self') {
         recentResults = recentResults.filter((result) => resultOwnedBy(result, access.email, identity.agentIds));
         const ownedJobs = new Set(recentResults.map((result) => String(result.jobId)));
@@ -690,12 +716,14 @@ export default async function handler(req, res) {
       }
       const namesByJob = new Map();
       const scoresByJob = new Map();
+      const scorecardsByJob = new Map();
       const timingByJob = new Map();
       for (const row of recentResults) {
         const jobId = String(row.jobId || ''); if (!jobId) continue;
         if (!namesByJob.has(jobId)) namesByJob.set(jobId, new Set());
         if (row.agentName) namesByJob.get(jobId).add(row.agentName);
-        if (row.status === 'completed' && row.audit) {
+        if (row.status === 'completed' && row.scorecard) { if (!scorecardsByJob.has(jobId)) scorecardsByJob.set(jobId, []); scorecardsByJob.get(jobId).push(row.scorecard); }
+        else if (row.status === 'completed' && row.audit) {
           if (!scoresByJob.has(jobId)) scoresByJob.set(jobId, []);
           scoresByJob.get(jobId).push(row.audit);
           if (!timingByJob.has(jobId)) timingByJob.set(jobId, []);
@@ -707,7 +735,7 @@ export default async function handler(req, res) {
         const id = String(row.id); const filterNames = permission === 'self' ? [] : (row.metadata?.filters?.agentIds || []).map((agentId) => adminNameById.get(String(agentId))).filter(Boolean);
         const scores = scoresByJob.get(id) || []; const average = (key) => scores.length ? Number((scores.reduce((sum, audit) => sum + Number(audit?.[key] || 0), 0) / scores.length).toFixed(2)) : null;
         const quality = average('quality'); const efficiency = average('efficiency'); const process = average('complexity');
-        const visible = publicJob(row, { agentNames: [...filterNames, ...(namesByJob.get(id) || [])], scoreSummary: scores.length ? { quality, efficiency, process, final: Number(((quality + efficiency + process) / 3).toFixed(2)) } : null, timingSummary: timingByJob.get(id)?.length ? summarizeTiming(timingByJob.get(id)) : null });
+        const visible = publicJob(row, { agentNames: [...filterNames, ...(namesByJob.get(id) || [])], scoreSummary: scores.length ? { quality, efficiency, process, final: Number(((quality + efficiency + process) / 3).toFixed(2)) } : (scorecardsByJob.get(id)?.length ? (() => { const list = scorecardsByJob.get(id); return { scorecard: true, evaluated: list.length, avgScore: Number((list.reduce((sum, item) => sum + Number(item.total || 0), 0) / list.length * 100).toFixed(1)), passRate: Number((list.filter((item) => item.passed).length / list.length * 100).toFixed(1)), criticalFailures: list.filter((item) => item.critical?.failed).length, final: Number((list.reduce((sum, item) => sum + Number(item.total || 0), 0) / list.length * 10).toFixed(2)) }; })() : null), timingSummary: timingByJob.get(id)?.length ? summarizeTiming(timingByJob.get(id)) : null });
         return permission === 'self' ? { ...visible, total: scores.length, processed: scores.length, completed: scores.length, evaluations: scores.length, skipped: 0, failed: 0, currentConversationId: null, filters: {} } : visible;
       });
       const canReviewDisputes = !access.external && canReviewAuditDisputes(access);
@@ -724,6 +752,23 @@ export default async function handler(req, res) {
 
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.' });
     const body = req.body || {};
+    const scoreResponse = await handleScoreAction({ action, body, sb, access, permission, identity, recordView, canReview: !access.external && canReviewAuditDisputes(access) });
+    if (scoreResponse) return res.json(scoreResponse);
+    if (action === 'ticket-probe') {
+      // Shows how Intercom links a conversation to a ticket (structure only, no message text) so PSTF scoring can be verified.
+      if (permission === 'self') return res.status(403).json({ error: 'Ticket diagnostics need audit access.' });
+      const probeKeys = await getKeys(); const probeId = parseConversationIds(body.conversationId)[0];
+      if (!probeKeys.intercomToken || !probeId) throw new Error('A conversation ID and an Intercom connection are required.');
+      const probeConversation = await fetchConversation(probeKeys.intercomToken, probeId);
+      const linked = (probeConversation.linked_objects?.data || []).map((entry) => ({ type: entry.type, id: String(entry.id || ''), category: entry.category || null }));
+      const ticketIds = [...new Set([...linked.filter((entry) => entry.type === 'ticket').map((entry) => entry.id), probeConversation.ticket?.id ? String(probeConversation.ticket.id) : ''].filter(Boolean))];
+      const tickets = [];
+      for (const ticketId of ticketIds.slice(0, 3)) {
+        try { const ticket = await fetchTicket(probeKeys.intercomToken, ticketId); const parts = ticketTurns(ticket, []); tickets.push({ id: ticketId, topLevelKeys: Object.keys(ticket || {}).slice(0, 40), partCount: parts.length, partTypes: [...new Set(parts.map((part) => part.partType))], assignments: parts.filter((part) => part.partType === 'assignment').map((part) => ({ at: part.at, assignedTo: part.assignedTo })), agentComments: parts.filter((part) => part.kind === 'agent' && !part.internalNote).map((part) => ({ at: part.at, authorId: part.authorId })).slice(0, 10), states: parts.filter((part) => part.ticketState).map((part) => ({ at: part.at, label: part.ticketState.label, resolved: part.ticketState.resolved })) }); }
+        catch (error) { tickets.push({ id: ticketId, error: String(error.message || error).slice(0, 200) }); }
+      }
+      return res.json({ conversationId: probeId, sourceType: probeConversation.source?.type || null, hasTicketObject: !!probeConversation.ticket, linkedObjects: linked, tickets });
+    }
     if (action === 'health') {
       if (permission === 'self') return res.json({ health: { state: 'healthy', checkedAt: new Date().toISOString(), intercom: { connected: true, detail: 'My Audits access ready' }, gemini: [], healthyGeminiKeys: 0 } });
       return res.json({ health: await auditConnections() });
@@ -813,11 +858,22 @@ export default async function handler(req, res) {
         const redacted = redactConversation(fullTurns, conversation, admins);
         return res.json({ conversation: { id: conversationId, intercomLink: intercomLink(conversation), redactedTranscript: redacted.transcript, redactionCount: redacted.redactionCount, turns: [] } });
       }
-      const turns = fullTurns.map((turn) => ({
+      let turns = fullTurns.map((turn) => ({
         id: turn.id, at: turn.at, kind: turn.kind, authorId: turn.authorId, authorName: turn.authorName,
         body: turn.body, partType: turn.partType, assignedTo: turn.assignedTo, attachments: turn.attachments || []
       }));
-      return res.json({ conversation: { id: conversationId, intercomLink: intercomLink(conversation), turns } });
+      let ticketInfo = null;
+      if (body.resultId) {
+        // A PSTF result is judged on the linked ticket, so the viewer shows the ticket thread.
+        const saved = checked(await sb.from('activity_logs').select('metadata->>track,ticket:metadata->ticket').eq('id', String(body.resultId)).eq('event_type', 'conversation_audit_result').maybeSingle(), 'Could not read the result');
+        const ticketId = saved?.ticket?.id;
+        if (saved?.track === 'pstf' && ticketId) {
+          const ticket = await fetchTicket(keys.intercomToken, ticketId);
+          turns = ticketTurns(ticket, admins).map((turn) => ({ id: turn.id, at: turn.at, kind: turn.kind, authorId: turn.authorId, authorName: turn.authorName, body: turn.internalNote ? `[Internal note] ${turn.body}` : turn.ticketState ? `Ticket state changed to ${turn.ticketState.label || 'a new state'}` : turn.body, partType: turn.partType, assignedTo: turn.assignedTo || null, attachments: [] }));
+          ticketInfo = { id: String(ticketId) };
+        }
+      }
+      return res.json({ conversation: { id: conversationId, intercomLink: intercomLink(conversation), turns, ...(ticketInfo ? { ticket: ticketInfo, track: 'pstf' } : {}) } });
     }
     if (action === 'create-job') { requireRunner(permission, access); return res.json({ job: await createJob(req, access, sb, body) }); }
     if (action === 'process-next') { requireRunner(permission, access); return res.json(await processNext(access, sb, body.jobId)); }
