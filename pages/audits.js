@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Head from 'next/head';
 import Link from 'next/link';
+import { MetricScoresView, AgentScoresView } from '../components/ScoreViews';
 import { humanEfficiencyStory } from '../lib/auditFeedback.mjs';
+import ScorecardVerdict, { ScorecardResultCard } from '../components/ScorecardVerdict';
+import { anchorTargetId, evidenceAsDeduction, historyJobMatches, scorecardKpis } from '../components/scorecardFormat.mjs';
 
 function Logo() {
   return (
@@ -1241,7 +1244,8 @@ function comparisonTimeline(turns, result) {
     authorName: turn.authorName || turn.author || 'Unknown',
     timelineKind: timelineKind(turn),
   }));
-  const metrics = result?.metrics || {};
+  // PSTF results show the linked ticket thread; conversation timing markers do not apply to it.
+  const metrics = result?.metrics?.pstf ? {} : result?.metrics || {};
   const metricEvents = [];
   if (metrics.assignmentInferred && metrics.assignmentAt)
     metricEvents.push({
@@ -1340,6 +1344,26 @@ function ResultCard({ result, onCompare, onRetry }) {
           </div>
         </div>
       </article>
+    );
+  if (result.scorecard)
+    return (
+      <ScorecardResultCard
+        result={result}
+        onCompare={onCompare}
+        conversationLine={
+          <div className="result-conversation-line">
+            <a href={conversationHref(result)} target="_blank" rel="noreferrer">
+              Conversation {result.conversationId} ↗
+            </a>
+            <CopyConversationId value={result.conversationId} />
+            {result.dispute && (
+              <span className={`audit-dispute-status ${result.dispute.status}`}>
+                {result.dispute.status === 'pending' ? 'Disputed' : result.dispute.status}
+              </span>
+            )}
+          </div>
+        }
+      />
     );
   const audit = result.audit || {};
   const finalScore = calculatedFinal(audit);
@@ -1573,7 +1597,20 @@ function MetricReview({ category, title, score, comment, correction, canReview, 
   );
 }
 
-function ConversationReviewModal({ state, onClose, onSubmitDispute, onReviewDispute, onEditScore, canReview }) {
+// Scorecard evidence and Efficiency anchors resolve to a transcript message with the same resolvers the legacy view uses.
+function scorecardJumpTarget(target, timeline, metrics) {
+  if (target?.type === 'anchor') return anchorTargetId(target.anchor, timeline.map((turn) => turn.id), timeline);
+  const item = evidenceAsDeduction(target?.evidence);
+  const found = deductionEvidenceTarget(item, 0, timeline, metrics);
+  if (found) return found;
+  // PSTF findings can quote an internal note, which the customer-message resolver skips.
+  const key = normalizeQuote(cleanFlagPhrase(item.transcriptExample));
+  if (key.length < 5) return null;
+  const note = timeline.find((turn) => turn.timelineKind === 'internal-note' && normalizeQuote(turn.body).includes(key));
+  return note ? note.id : null;
+}
+
+function ConversationReviewModal({ state, onClose, onSubmitDispute, onReviewDispute, onEditScore, onEditScorecard, canReview }) {
   const [previewImage, setPreviewImage] = useState(null);
   const [showDispute, setShowDispute] = useState(false);
   const [reason, setReason] = useState('');
@@ -1652,6 +1689,19 @@ function ConversationReviewModal({ state, onClose, onSubmitDispute, onReviewDisp
         ) : (
           <div className="comparison-columns">
             <article className="comparison-verdict">
+              {result.scorecard ? (
+                <ScorecardVerdict
+                  result={result}
+                  canReview={canReview}
+                  onEdit={(key, failed, reason) => onEditScorecard(result, key, failed, reason)}
+                  onJump={(target) => {
+                    const id = scorecardJumpTarget(target, timeline, metrics);
+                    if (id) jumpToEvidence(id);
+                  }}
+                  canJump={(target) => !!scorecardJumpTarget(target, timeline, metrics)}
+                />
+              ) : (
+              <>
               <section className="verdict-hero">
                 <ScoreRing value={finalScore} />
                 <div className="verdict-hero-copy">
@@ -1740,6 +1790,8 @@ function ConversationReviewModal({ state, onClose, onSubmitDispute, onReviewDisp
                   )}
                 </div>
               ))}
+              </>
+              )}
               <section className="audit-dispute-panel">
                 <div>
                   <b>Audit dispute</b>
@@ -1962,6 +2014,7 @@ export default function Audits() {
   const [comparison, setComparison] = useState(null);
   const [selectedHistoryJobs, setSelectedHistoryJobs] = useState([]);
   const [deletingHistory, setDeletingHistory] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState('scorecard');
   const stopRef = useRef(false);
   const processingRef = useRef(false);
   const directMode = conversationIds.trim().length > 0;
@@ -2140,6 +2193,7 @@ export default function Audits() {
       )
         throw new Error('Choose a whole number with no more than 100 conversations in total.');
       const result = await request('create-job', {
+        scorecard: true,
         conversationIds,
         agentIds: selectedAgents,
         from,
@@ -2168,7 +2222,7 @@ export default function Audits() {
     setResults([]);
     setView('results');
     try {
-      const result = await request('create-job', { conversationIds: String(conversationId) });
+      const result = await request('create-job', { scorecard: true, conversationIds: String(conversationId) });
       setCurrentJob(result.job);
       setResults([]);
       setView('results');
@@ -2523,6 +2577,23 @@ export default function Audits() {
     }
   }
 
+  async function editScorecard(result, key, failed, reason) {
+    setError('');
+    try {
+      const response = await request('edit-scorecard', { resultId: result.id, key, failed, reason });
+      const updated = response.result;
+      if (!updated) throw new Error('The change was saved but the updated result was not returned. Reload to see it.');
+      setResults((current) => current.map((item) => (String(item.id) === String(result.id) ? { ...item, ...updated } : item)));
+      setComparison((current) =>
+        current?.result && String(current.result.id) === String(result.id) ? { ...current, result: { ...current.result, ...updated } } : current,
+      );
+      setNotice('Scorecard verdict changed. The score was recalculated and the original verdict stays in the edit history.');
+    } catch (err) {
+      setError(err.message);
+      throw err;
+    }
+  }
+
   async function saveAuditSnippet(snippet, updates) {
     setSavingAdmin(`snippet-${snippet.id}`);
     setError('');
@@ -2583,6 +2654,7 @@ export default function Audits() {
       </main>
     );
 
+  const historyJobs = (data?.jobs || []).filter((job) => historyJobMatches(job, historyFilter));
   const progress = currentJob?.total ? Math.round((currentJob.processed / currentJob.total) * 100) : 0;
   const avg = (key) =>
     completedResults.length
@@ -2655,6 +2727,20 @@ export default function Audits() {
                 <span>Audit settings</span>
               </button>
             )}
+            {[...(data?.access?.canRun ? [['Metric Scores', 'metrics', 'M']] : []), ['Agent Scores', 'agents', 'A']].map(([groupTitle, prefix, initial]) => (
+              <div className="scv-nav-group" key={prefix} role="group" aria-label={groupTitle}>
+                <span className="scv-nav-title">{groupTitle}</span>
+                {['L1', 'L2'].map((lvl) => {
+                  const key = `${prefix}-${lvl.toLowerCase()}`;
+                  return (
+                    <button key={key} className={`scv-nav-sub ${view === key ? 'active' : ''}`} title={`${groupTitle}, ${lvl} Agents`} aria-label={`${groupTitle}, ${lvl} Agents`} aria-current={view === key ? 'page' : undefined} onClick={() => setView(key)}>
+                      <i aria-hidden="true">{initial}{lvl.slice(1)}</i>
+                      <span>{lvl} Agents</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
           </nav>
           <div className="sidebar-health">
             <StatusOrb state={health?.state || 'checking'} />
@@ -2700,7 +2786,11 @@ export default function Audits() {
                         ? 'Audit disputes'
                         : view === 'snippets'
                           ? 'Audit snippets'
-                          : 'Audit settings'}
+                          : view.startsWith('metrics-')
+                            ? `Metric Scores, ${view.slice(-2).toUpperCase()} Agents`
+                            : view.startsWith('agents-')
+                              ? `Agent Scores, ${view.slice(-2).toUpperCase()} Agents`
+                              : 'Audit settings'}
               </h1>
             </div>
             <div className="audit-top-actions">
@@ -2728,6 +2818,13 @@ export default function Audits() {
               <span>{notice}</span>
               <button onClick={() => setNotice('')}>×</button>
             </div>
+          )}
+
+          {(view === 'metrics-l1' || view === 'metrics-l2') && data?.access?.canRun && (
+            <MetricScoresView key={view} level={view === 'metrics-l2' ? 'L2' : 'L1'} request={request} DateFilter={AuditDateRangeFilter} onOpenResult={(result) => openComparison(result)} />
+          )}
+          {(view === 'agents-l1' || view === 'agents-l2') && (
+            <AgentScoresView key={view} level={view === 'agents-l2' ? 'L2' : 'L1'} request={request} DateFilter={AuditDateRangeFilter} onOpenResult={(result) => openComparison(result)} />
           )}
 
           {view === 'control' && data?.access?.canRun && (
@@ -2984,6 +3081,9 @@ export default function Audits() {
                       : `${perAgent && selectedAgents.length > 1 ? Number(customSample || sampleSize) * selectedAgents.length : customSample || sampleSize} priority conversations across ${selectedAgents.length} agent${selectedAgents.length === 1 ? '' : 's'}`}
                   </h2>
                   <p>Audits are saved after every conversation and can safely resume after a refresh.</p>
+                  <p className="scm-launch-note">
+                    Scorecard audit: L1 agents are scored on Live Chat; L2 agents on Email, or PSTF when the agent answered in the linked ticket.
+                  </p>
                 </div>
                 <div className="launch-action">
                   <AuditTip text="Creates a saved batch and processes one conversation at a time. Progress survives refreshes and can be paused or cancelled." />
@@ -3078,13 +3178,31 @@ export default function Audits() {
                   </section>
                   <ProgressReport job={currentJob} results={results} running={running} elapsed={elapsed} pace={pace} />
                   <div className="audit-kpis">
-                    <Metric label="Completed chats" value={completedConversationCount} />
-                    <Metric label="Agent evaluations" value={completedResults.length} />
-                    <Metric label="Average quality" value={avg('quality')} />
-                    <Metric label="Average efficiency" value={avg('efficiency')} />
-                    <Metric label="Average complexity" value={avgComplexity} />
-                    <Metric label="Average final" value={avg('finalScore')} tone="accent" />
-                    <Metric label="Manual review" value={completedResults.filter((item) => item.audit?.manualReview).length} />
+                    {currentJob?.scorecard === true ? (
+                      (() => {
+                        const kpi = scorecardKpis(results);
+                        return (
+                          <>
+                            <Metric label="Completed chats" value={completedConversationCount} />
+                            <Metric label="Agent evaluations" value={kpi.evaluations} />
+                            <Metric label="Average score" value={kpi.average} tone="accent" />
+                            <Metric label="Pass rate" value={kpi.passRate} />
+                            <Metric label="Critical failures" value={kpi.criticalFailures} />
+                            <Metric label="Manual review" value={kpi.manualReview} />
+                          </>
+                        );
+                      })()
+                    ) : (
+                      <>
+                        <Metric label="Completed chats" value={completedConversationCount} />
+                        <Metric label="Agent evaluations" value={completedResults.length} />
+                        <Metric label="Average quality" value={avg('quality')} />
+                        <Metric label="Average efficiency" value={avg('efficiency')} />
+                        <Metric label="Average complexity" value={avgComplexity} />
+                        <Metric label="Average final" value={avg('finalScore')} tone="accent" />
+                        <Metric label="Manual review" value={completedResults.filter((item) => item.audit?.manualReview).length} />
+                      </>
+                    )}
                   </div>
                   <section className="speed-summary" aria-label="Speed averages for this batch">
                     <header>
@@ -3175,21 +3293,36 @@ export default function Audits() {
                     )}
                   </div>
                 </div>
-                {data?.access?.canManage && !!(data?.jobs || []).length && (
+                <div className="scm-history-filter">
+                  <label>
+                    <span>Show</span>
+                    <select
+                      value={historyFilter}
+                      onChange={(event) => {
+                        setHistoryFilter(event.target.value);
+                        setSelectedHistoryJobs([]);
+                      }}
+                    >
+                      <option value="scorecard">Scorecard evaluations</option>
+                      <option value="legacy">Old Metrics Evaluations</option>
+                    </select>
+                  </label>
+                </div>
+                {data?.access?.canManage && !!historyJobs.length && (
                   <div className="history-selection-bar">
                     <label>
                       <input
                         type="checkbox"
                         checked={
-                          (data.jobs || []).filter((job) => !['queued', 'running', 'paused'].includes(job.status)).length > 0 &&
-                          (data.jobs || [])
+                          historyJobs.filter((job) => !['queued', 'running', 'paused'].includes(job.status)).length > 0 &&
+                          historyJobs
                             .filter((job) => !['queued', 'running', 'paused'].includes(job.status))
                             .every((job) => selectedHistoryJobs.includes(String(job.id)))
                         }
                         onChange={(event) =>
                           setSelectedHistoryJobs(
                             event.target.checked
-                              ? (data.jobs || [])
+                              ? historyJobs
                                   .filter((job) => !['queued', 'running', 'paused'].includes(job.status))
                                   .map((job) => String(job.id))
                               : [],
@@ -3206,7 +3339,7 @@ export default function Audits() {
                   </div>
                 )}
                 <div className="history-list">
-                  {(data?.jobs || []).map((job) => {
+                  {historyJobs.map((job) => {
                     const active = ['queued', 'running', 'paused'].includes(job.status);
                     const selected = selectedHistoryJobs.includes(String(job.id));
                     return (
@@ -3236,7 +3369,20 @@ export default function Audits() {
                             </b>
                             <small>{formatDate(job.createdAt)} · Structured result data only</small>
                           </span>
-                          {job.scoreSummary && (
+                          {job.scorecard === true && job.scoreSummary?.scorecard && (
+                            <span className="history-scores scm-history-scores" aria-label="Scorecard summary">
+                              <b className="final" title="Average score">
+                                Avg {job.scoreSummary.avgScore ?? '—'}%
+                              </b>
+                              <b className="quality" title="Pass rate">
+                                Pass {job.scoreSummary.passRate ?? '—'}%
+                              </b>
+                              <b className="process" title="Critical failures">
+                                Critical {job.scoreSummary.criticalFailures ?? 0}
+                              </b>
+                            </span>
+                          )}
+                          {job.scoreSummary && !job.scoreSummary.scorecard && (
                             <span className="history-scores">
                               <b className="quality">Q {job.scoreSummary.quality}</b>
                               <b className="efficiency">E {job.scoreSummary.efficiency}</b>
@@ -3277,6 +3423,12 @@ export default function Audits() {
                     <div className="empty-results">
                       <h3>No audit history yet</h3>
                       <p>Your completed and resumable batches will appear here.</p>
+                    </div>
+                  )}
+                  {!!data?.jobs?.length && !historyJobs.length && (
+                    <div className="empty-results">
+                      <h3>{historyFilter === 'legacy' ? 'No old metrics evaluations' : 'No scorecard evaluations yet'}</h3>
+                      <p>{historyFilter === 'legacy' ? 'Batches scored with the old three metrics would appear here.' : 'Choose Old Metrics Evaluations to see earlier batches.'}</p>
                     </div>
                   )}
                 </div>
@@ -3703,6 +3855,7 @@ export default function Audits() {
         onSubmitDispute={submitAuditDispute}
         onReviewDispute={reviewAuditDispute}
         onEditScore={editAuditScore}
+        onEditScorecard={editScorecard}
         canReview={data?.access?.canReviewDisputes}
       />
     </>

@@ -1,0 +1,395 @@
+/* ==========================================================================
+   NEXT OKR Dashboard design system: theme override layer.
+   Loaded LAST (after refresh.css). Additive only: redefines the existing token
+   names and adds scoped overrides where a token swap cannot reach.
+   Source of truth: okr-dashboard-design-system.md. Remove the import in
+   pages/_app.js to revert everything.
+   ========================================================================== */
+
+/* ---------- 1. Tokens: light ---------- */
+:root,
+:root[data-theme="light"] {
+  /* background ladder: canvas / surface / nested / hover step */
+  --bg: #F5F5F7;
+  --bg-tint-a: transparent;
+  --bg-tint-b: transparent;
+  --surface: #FFFFFF;
+  --surface-2: #F5F5F7;
+  --surface-3: #EAEAED;
+  --glass: #FFFFFF;
+  --elevated: #FAFAFA;
+  --sunken: #EAEAED;
+  --input-bg: #FFFFFF;
+
+  /* text */
+  --ink: #18181B;
+  --ink-2: #52525B;
+  --muted: #52525B;
+  --faint: #71717A;
+
+  /* borders */
+  --line: rgba(24, 24, 27, 0.10);
+  --line-strong: rgba(24, 24, 27, 0.16);
+
+  /* brand accent */
+  --accent: #2C237E;
+  --accent-hover: color-mix(in srgb, #2C237E 88%, #000);
+  --accent-active: color-mix(in srgb, #2C237E 72%, #000);
+  --accent-subtle: color-mix(in srgb, #2C237E 12%, transparent);
+  --accent-muted: color-mix(in srgb, #2C237E 22%, transparent);
+  --accent-soft: color-mix(in srgb, #2C237E 10%, #FFFFFF);
+  --focus: #2C237E;
+  --link-hover: var(--accent-hover);
+  --violet: #2C237E;
+  --violet-2: #302689;
+  --violet-3: #A09BFF;
+  --violet-soft: color-mix(in srgb, #2C237E 10%, #FFFFFF);
+  --violet-ink: #2C237E;
+  --on-accent: #FFFFFF;
+
+  /* selected chrome on the canvas (not the rail) */
+  --sel-bg: color-mix(in srgb, #2C237E 10%, #FFFFFF);
+  --sel-bg-hover: color-mix(in srgb, #2C237E 16%, #FFFFFF);
+  --sel-border: color-mix(in srgb, #2C237E 36%, transparent);
+  --sel-fg: #2C237E;
+
+  /* status ladder: green / amber / red (purple never means health) */
+  --success: #059669;
+  --success-soft: #ECFDF3;
+  --warn: #CA8A04;
+  --warn-soft: #FFFAEB;
+  --danger: #DC2626;
+  --danger-soft: #FFF5F6;
+  --destructive: #FF3844;
+  --destructive-hover: #C80D18;
+
+  /* shadows: none at rest, small for clickable hover, medium for menus/dialogs */
+  --shadow-sm: none;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-xl: 0 4px 24px rgba(0, 0, 0, 0.08);
+  --ring: 0 0 0 2px #F5F5F7, 0 0 0 4px #2C237E;
+
+  /* radius */
+  --radius: 6px;
+  --r-sm: 6px;
+  --r-md: 6px;
+  --r-lg: 6px;
+  --radius-sm: 4px;
+  --radius-dialog: 10px;
+  --radius-island: 12px;
+  --backdrop: rgba(0, 0, 0, 0.30);
+
+  /* type: Inter is the single UI face */
+  --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --display: var(--font);
+  --answer-font: var(--font);
+  --mono: 'SF Mono', 'Fira Code', ui-monospace, Menlo, Consolas, monospace;
+  --fs-sm: 14px;
+  --fs-md: 14px;
+  --fs-lg: 18px;
+  --fs-xl: 20px;
+  --fs-2xl: 24px;
+
+  /* rail (same in both themes) */
+  --rail-gradient: linear-gradient(180deg, #2D2482 0%, #2C237E 55%, #272071 100%);
+  --rail-text: #FFFFFF;
+  --rail-text-muted: rgba(255, 255, 255, 0.82);
+  --rail-text-faint: rgba(255, 255, 255, 0.62);
+  --rail-nav: rgba(255, 255, 255, 0.92);
+  --rail-section: rgba(255, 255, 255, 0.78);
+  --rail-divider: rgba(255, 255, 255, 0.08);
+  --rail-hover: rgba(255, 255, 255, 0.16);
+  --rail-active: rgba(255, 255, 255, 0.26);
+  --rail-active-border: rgba(255, 255, 255, 0.22);
+  --rail-tile: rgba(255, 255, 255, 0.10);
+  --rail-callout-border: rgba(255, 255, 255, 0.12);
+  --rail-focus: color-mix(in srgb, #A09BFF 70%, #FFFFFF);
+}
+
+/* ---------- 2. Tokens: dark ---------- */
+:root[data-theme="dark"] {
+  --bg: #10121B;
+  --bg-tint-a: transparent;
+  --bg-tint-b: transparent;
+  --surface: #202939;
+  --surface-2: #181B26;
+  --surface-3: #333151;
+  --glass: #202939;
+  --elevated: #333151;
+  --sunken: #181B26;
+  --input-bg: rgba(255, 255, 255, 0.04);
+
+  --ink: #FFFFFF;
+  --ink-2: #9AA4B2;
+  --muted: #9AA4B2;
+  --faint: #788496;
+
+  --line: rgba(255, 255, 255, 0.10);
+  --line-strong: rgba(255, 255, 255, 0.15);
+
+  --accent: #635BFF;
+  --accent-hover: color-mix(in srgb, #635BFF 86%, #000);
+  --accent-active: color-mix(in srgb, #635BFF 70%, #000);
+  --accent-subtle: color-mix(in srgb, #635BFF 8%, transparent);
+  --accent-muted: color-mix(in srgb, #635BFF 16%, transparent);
+  --accent-soft: color-mix(in srgb, #635BFF 22%, #202939);
+  --focus: #A09BFF;
+  --link-hover: #A09BFF;
+  --violet: #635BFF;
+  --violet-2: #A09BFF;
+  --violet-3: #4E36F5;
+  --violet-soft: color-mix(in srgb, #635BFF 22%, #202939);
+  --violet-ink: #A09BFF;
+  --on-accent: #FFFFFF;
+
+  --sel-bg: color-mix(in srgb, #635BFF 22%, #202939);
+  --sel-bg-hover: color-mix(in srgb, #635BFF 30%, #202939);
+  --sel-border: color-mix(in srgb, #A09BFF 48%, transparent);
+  --sel-fg: #A09BFF;
+
+  --success: #12B76A;
+  --success-soft: color-mix(in srgb, #12B76A 14%, #202939);
+  --warn: #EAB308;
+  --warn-soft: color-mix(in srgb, #FDB022 14%, #202939);
+  --danger: #FF3440;
+  --danger-soft: color-mix(in srgb, #FF3440 12%, #202939);
+  --destructive: #FF3844;
+  --destructive-hover: #C80D18;
+
+  --shadow-sm: none;
+  --shadow: 0 2px 2px rgba(0, 0, 0, 0.03);
+  --shadow-xl: 0 4px 20px rgba(0, 0, 0, 0.10);
+  --ring: 0 0 0 2px #10121B, 0 0 0 4px #635BFF;
+  --backdrop: rgba(0, 0, 0, 0.50);
+}
+
+/* ---------- 3. Foundations ---------- */
+body {
+  background: var(--bg);
+  background-attachment: scroll;
+  font-family: var(--font);
+  font-feature-settings: normal;
+  text-rendering: auto;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+code, kbd, samp, pre, .mono { font-family: var(--mono); }
+::selection { background: var(--accent); color: #FFFFFF; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* decorative glow / glass removed */
+.login-glow { display: none; }
+:root .audit-shell,
+:root[data-theme="light"] .audit-shell { background: var(--audit-bg); }
+:root .audit-launch-loader { background: var(--audit-bg); }
+:root .audit-loader-scene { background: transparent; }
+:root .composer-wrap { background: var(--bg); }
+
+/* ---------- 4. Cards and panels: surface, 1px border, 6px, no shadow at rest ---------- */
+:root .settings-card, :root .audit-card, :root .audit-result-card, :root .audit-snippet-card,
+:root .audit-progress-card, :root .audit-dispute-panel, :root .final-score-card, :root .launch-card,
+:root .metric-card, :root .model-card, :root .model-list-card, :root .notice-latest-card,
+:root .query-log-card, :root .thinking-card, :root .storage-health-card, :root .connection-card,
+:root .direct-card, :root .thresholds-card, :root .article-scope-card, :root .danger-card,
+:root .query-filter-card, :root .developer-api-card, :root .activity-log-card,
+:root .diagnostic-download-card, :root .audit-batch-preparation, :root .composer,
+:root .rail-sync-console, :root .sidebar-health {
+  background-color: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+:root .rail-sync-console,
+:root .rail-sync-console.is-retrying,
+:root .audit-batch-preparation { background-image: none; }
+:root .composer { border-color: var(--line-strong); }
+:root .composer:focus-within { border-color: var(--accent); box-shadow: var(--ring); }
+:root .query-log-card.has-feedback { box-shadow: none; }
+
+/* dialogs and the sign-in card: 10px, medium shadow */
+:root .modal-card, :root .tour-card, :root .entry-card, :root .login-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-dialog);
+  box-shadow: var(--shadow-xl);
+  backdrop-filter: none;
+}
+/* menus: elevated, 6px */
+:root .app-select-menu {
+  background: var(--elevated);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-xl);
+  backdrop-filter: none;
+}
+/* backdrops: plain black scrim */
+:root .modal-backdrop, :root .audit-modal-backdrop, :root .workspace-drawer-backdrop {
+  background: var(--backdrop);
+  backdrop-filter: none;
+}
+:root .workspace-list-status, :root .workspace-pagination { background: var(--bg); backdrop-filter: none; box-shadow: none; }
+
+/* ---------- 5. Buttons ---------- */
+:root .btn { border-radius: var(--radius); font-weight: 600; letter-spacing: 0; }
+:root .btn-small { border-radius: var(--radius); }
+:root .btn-primary {
+  background: var(--accent);
+  color: #FFFFFF;
+  box-shadow: none;
+}
+:root .btn-primary::after { display: none; }
+:root .btn-primary:hover:not(:disabled) { background: var(--accent-hover); box-shadow: none; }
+:root .btn-primary:active:not(:disabled) { background: var(--accent-active); }
+:root .btn-secondary {
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  color: var(--ink);
+  box-shadow: none;
+}
+:root .btn-secondary:not(:disabled):hover,
+:root .btn-secondary:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+:root .btn-danger { background: var(--destructive); color: #FFFFFF; box-shadow: none; }
+:root .btn-danger:hover:not(:disabled) { background: var(--destructive-hover); }
+:root .icon-btn { border-radius: var(--radius); box-shadow: none; }
+:root .composer button { border-radius: var(--radius); background: var(--accent); color: #FFFFFF; box-shadow: none; }
+:root .composer button:hover:not(:disabled) { background: var(--accent-hover); }
+:root .composer button:disabled { box-shadow: none; }
+:root .app-select > button { border-radius: var(--radius); box-shadow: none; background: var(--surface); }
+:root .app-select > button:hover,
+:root .app-select > button.open { background: var(--surface-2); border-color: var(--line-strong); }
+:root .app-select > button.open { border-color: var(--accent); box-shadow: var(--ring); }
+
+/* ---------- 6. Inputs: 40px, 6px, 1px border, brand focus ---------- */
+input, textarea, select { border-radius: var(--radius); background: var(--input-bg); }
+input:where([type=text], [type=email], [type=search], [type=password], [type=number], [type=url], [type=tel], [type=date], [type=datetime-local]),
+select { min-height: 40px; }
+input:focus, textarea:focus, select:focus {
+  background: var(--input-bg);
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+.field-block input, .field-block select, .field-block textarea { background: var(--input-bg); border-radius: var(--radius); }
+.field-block input:focus, .field-block select:focus, .field-block textarea:focus { border-color: var(--accent); }
+input::placeholder, textarea::placeholder { color: var(--faint); }
+input:-webkit-autofill, textarea:-webkit-autofill, select:-webkit-autofill {
+  -webkit-text-fill-color: var(--ink);
+  box-shadow: 0 0 0 1000px var(--surface) inset;
+  transition: background-color 9999s ease-out 0s;
+}
+
+/* ---------- 7. Badges: 3px radius, rectangular ---------- */
+:root .state-pill, :root .scope-status-badge, :root .sync-badge, :root .status-chip,
+:root .role-badge, :root .score-pill, :root .confidence-pill, :root .query-feedback-badge,
+:root .override-pill {
+  border-radius: 3px;
+}
+
+/* ---------- 8. Selected chrome on the canvas: brand tint, not frost ---------- */
+:root .provider-grid button.selected,
+:root .app-select-group > button.selected,
+:root .scope-status-actions button.selected,
+:root .dispute-list > button.selected {
+  background: var(--sel-bg);
+  border-color: var(--sel-border);
+  color: var(--sel-fg);
+  box-shadow: none;
+}
+:root .app-select-group > button:hover,
+:root .scope-status-actions button:hover { background: var(--sel-bg-hover); }
+
+/* ---------- 9. Left navigation rail (purple in both themes) ---------- */
+:root .workspace-nav,
+:root .workspace-v2 .workspace-nav,
+:root .admin-sidebar,
+:root .workspace-admin-v2 .admin-sidebar,
+:root .audit-shell .audit-sidebar {
+  background: var(--rail-gradient);
+  border-right: 0;
+  color: var(--rail-text);
+  backdrop-filter: none;
+}
+
+/* shared rail text roles */
+:root .workspace-nav .fn-logo .fn-letters,
+:root .admin-sidebar .fn-logo .fn-letters,
+:root .audit-shell .audit-logo { fill: #FFFFFF; }
+:root .workspace-nav .fn-logo .fn-tri,
+:root .admin-sidebar .fn-logo .fn-tri,
+:root .audit-shell .audit-logo .accent { fill: #E0DEFC; }
+
+/* main app rail: .workspace-nav */
+:root .workspace-wordmark, :root .workspace-wordmark > div { color: var(--rail-text); }
+:root .workspace-nav .workspace-wordmark small { color: var(--rail-text-faint); }
+:root .workspace-wordmark > .sidebar-brand-mark { background: var(--rail-tile); border-color: var(--rail-callout-border); }
+:root .workspace-nav .nav-caption { color: var(--rail-section); }
+:root .workspace-nav .nav-tip { color: var(--rail-text-faint); }
+:root .workspace-nav :is(button, .nav-admin, .nav-audits) {
+  color: var(--rail-nav);
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+}
+:root .workspace-nav :is(button, .nav-admin, .nav-audits):hover { background: var(--rail-hover); color: var(--rail-text); }
+:root .workspace-nav :is(button, .nav-admin, .nav-audits):is(.active, [aria-current="page"]) {
+  background: var(--rail-active);
+  box-shadow: inset 0 0 0 1px var(--rail-active-border);
+  color: var(--rail-text);
+}
+:root .workspace-nav .sidebar-developer-card { background: var(--rail-tile); border-color: var(--rail-callout-border); }
+:root .workspace-nav .sidebar-developer-card small { color: var(--rail-text-faint); }
+:root .workspace-nav .sidebar-developer-card span { color: var(--rail-text); }
+:root .workspace-nav :focus-visible,
+:root .admin-sidebar :focus-visible,
+:root .audit-sidebar :focus-visible { outline-color: var(--rail-focus); }
+
+/* admin rail: .admin-sidebar */
+:root .admin-sidebar .brand, :root .admin-sidebar .brand b { color: var(--rail-text); }
+:root .admin-sidebar .brand span { color: var(--rail-text-faint); }
+:root .admin-sidebar nav button { color: var(--rail-nav); font-size: 14px; font-weight: 500; border-radius: var(--radius-sm); }
+:root .admin-sidebar nav button span { color: currentColor; }
+:root .admin-sidebar nav button:hover { background: var(--rail-hover); color: var(--rail-text); }
+:root .admin-sidebar nav button.active {
+  background: var(--rail-active);
+  box-shadow: inset 0 0 0 1px var(--rail-active-border);
+  color: var(--rail-text);
+}
+:root .admin-sidebar .sidebar-foot { color: var(--rail-text-faint); }
+:root .admin-sidebar .sidebar-foot a { color: var(--rail-text-muted); }
+
+/* audits rail: .audit-sidebar */
+:root .audit-shell .audit-brand b { color: var(--rail-text); }
+:root .audit-shell .audit-brand span { color: var(--rail-text-faint); }
+:root .audit-shell .audit-sidebar nav button { color: var(--rail-nav); font-size: 14px; font-weight: 500; border-radius: var(--radius-sm); }
+:root .audit-shell .audit-sidebar nav button i { color: currentColor; }
+:root .audit-shell .audit-sidebar nav button em { background: var(--rail-tile); color: var(--rail-text); }
+:root .audit-shell .audit-sidebar nav button:hover { background: var(--rail-hover); color: var(--rail-text); }
+:root .audit-shell .audit-sidebar nav button.active {
+  background: var(--rail-active);
+  box-shadow: inset 0 0 0 1px var(--rail-active-border);
+  color: var(--rail-text);
+}
+:root .audit-shell .audit-sidebar nav button.active i { color: var(--rail-text); }
+:root .audit-shell .audit-sidebar nav button.active::before { display: none; }
+:root .audit-shell .sidebar-health { background: var(--rail-tile); border-color: var(--rail-callout-border); }
+:root .audit-shell .sidebar-health b { color: var(--rail-text); }
+:root .audit-shell .sidebar-health small { color: var(--rail-text-faint); }
+:root .audit-shell .audit-side-foot a { color: var(--rail-text-muted); }
+:root .audit-shell .audit-side-foot a:hover { color: var(--rail-text); }
+
+/* ---------- 10. Reduced motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ---------- 11. Chat hyperlinks ---------- */
+.answer a.answer-link { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; font-weight: 600; word-break: break-word; }
+.answer a.answer-link:hover { color: var(--link-hover); }

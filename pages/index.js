@@ -101,6 +101,28 @@ function plainText(text) {
     .trim();
 }
 
+// Markdown links in an answer, [Article title](https://...), are shown as real
+// hyperlinks. Only http(s) addresses are linked; everything else stays plain
+// text, and "Copy answer" still copies the original text with its links.
+function renderInline(text) {
+  const raw = String(text || '');
+  const out = [];
+  const pattern = /\[([^\]\n]{1,300})\]\((https?:\/\/[^\s)]+)\)/g;
+  const keepSpaces = (piece) => {
+    const clean = plainText(piece);
+    if (!clean) return /\s/.test(piece) ? ' ' : '';
+    return (/^\s/.test(piece) ? ' ' : '') + clean + (/\s$/.test(piece) ? ' ' : '');
+  };
+  let last = 0, match, key = 0;
+  while ((match = pattern.exec(raw))) {
+    if (match.index > last) out.push(keepSpaces(raw.slice(last, match.index)));
+    out.push(<a key={`link-${key++}`} className="answer-link" href={match[2]} target="_blank" rel="noopener noreferrer">{plainText(match[1])}</a>);
+    last = match.index + match[0].length;
+  }
+  if (last < raw.length) out.push(keepSpaces(raw.slice(last)));
+  return out.length ? out : plainText(raw);
+}
+
 function renderBlocks(text) {
   const blocks = [];
   let list = [];
@@ -108,7 +130,7 @@ function renderBlocks(text) {
   const flush = () => {
     if (!list.length) return;
     const Tag = listType === 'number' ? 'ol' : 'ul';
-    blocks.push(<Tag key={`list-${blocks.length}`}>{list.map((item, index) => <li key={index}>{plainText(item)}</li>)}</Tag>);
+    blocks.push(<Tag key={`list-${blocks.length}`}>{list.map((item, index) => <li key={index}>{renderInline(item)}</li>)}</Tag>);
     list = []; listType = '';
   };
   normalizeSpaces(text).split('\n').forEach((raw) => {
@@ -122,7 +144,7 @@ function renderBlocks(text) {
       listType = type; list.push((bullet || numbered)[1]); return;
     }
     flush();
-    blocks.push(<p key={`p-${blocks.length}`}>{plainText(line)}</p>);
+    blocks.push(<p key={`p-${blocks.length}`}>{renderInline(line)}</p>);
   });
   flush();
   return blocks;
