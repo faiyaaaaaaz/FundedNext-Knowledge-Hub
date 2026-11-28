@@ -29,6 +29,53 @@ function useScoreQuery(request, action, body) {
   return { ...state, retry: () => setNonce((value) => value + 1) };
 }
 
+export function ConversationSearch({ request, onOpen }) {
+  const [value, setValue] = useState('');
+  const id = value.trim();
+  return <section className="scv-lookup" aria-label="Conversation search">
+    <label htmlFor="audit-conversation-search">Find a saved result</label>
+    <input id="audit-conversation-search" type="search" inputMode="numeric" autoComplete="off"
+      placeholder="Search by conversation ID" value={value} onChange={event => setValue(event.target.value)} />
+    {id && (/^\d{1,40}$/.test(id)
+      ? <ConversationMatches key={id} id={id} request={request} onOpen={onOpen} />
+      : <p role="status">Enter a numeric conversation ID.</p>)}
+  </section>;
+}
+
+function ConversationMatches({ id, request, onOpen }) {
+  const [items, setItems] = useState(null);
+  const [error, setError] = useState('');
+  const [opening, setOpening] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const live = useRef(false);
+  const latest = useRef(request);
+  latest.current = request;
+  useEffect(() => {
+    live.current = true;
+    let active = true;
+    const timer = setTimeout(async () => {
+      try {
+        const response = await latest.current('search-results', { conversationId: id });
+        if (active) setItems(response.items);
+      } catch (err) { if (active) setError(err.message || 'Search failed.'); }
+    }, 300);
+    return () => { active = false; live.current = false; clearTimeout(timer); };
+  }, [id, attempt]);
+  async function open(resultId) {
+    setOpening(true);
+    try {
+      const response = await latest.current('score-result', { resultId });
+      if (live.current) onOpen(response.result);
+    } catch (err) { if (live.current) setError(err.message || 'Could not open result.'); }
+    finally { if (live.current) setOpening(false); }
+  }
+  if (error) return <InlineError message={error} onRetry={() => { setError(''); setItems(null); setAttempt(n => n + 1); }} />;
+  if (!items?.length) return <p role="status">{items ? 'No saved result found for this ID.' : 'Searching…'}</p>;
+  return <ul>{items.map(item => <li key={item.id}><button type="button" disabled={opening} onClick={() => open(item.id)}>
+    <strong>{id}</strong><span>{item.agentName} · {new Date(item.createdAt).toLocaleString('en-GB', { timeZone: 'Asia/Dhaka' })} Dhaka</span><b aria-hidden="true">→</b>
+  </button></li>)}</ul>;
+}
+
 function useScoreFilters(level) {
   const [range, setRange] = useState(() => ({ from: dhakaToday(-29), to: dhakaToday() }));
   const [source, setSource] = useState('scorecard');
@@ -320,6 +367,7 @@ function unionBy(list, pick) {
 }
 
 function AgentsTable({ group, source, onOpen }) {
+  const [detailed, setDetailed] = useState(false);
   const [sort, setSort] = useState(null);
   const agents = useMemo(() => sortAgents(group.agents, sort), [group.agents, sort]);
   const legacy = source === 'legacy';
@@ -339,6 +387,8 @@ function AgentsTable({ group, source, onOpen }) {
     </th>
   );
   return (
+    <>
+    <div className="scv-segment" role="group" aria-label="Table detail"><button type="button" className={!detailed ? "active" : ""} aria-pressed={!detailed} onClick={() => setDetailed(false)}>Summary</button><button type="button" className={detailed ? "active" : ""} aria-pressed={detailed} onClick={() => setDetailed(true)}>Metric breakdown</button></div>
     <div className="scv-table-wrap scv-agents-wrap">
       <table className="scv-table scv-agents">
         <thead>
@@ -346,9 +396,9 @@ function AgentsTable({ group, source, onOpen }) {
             {sortable('agent', 'Agent', 'sticky')}
             {sortable('evaluated', 'Evaluated', 'num')}
             {sortable('total', 'Total score', 'num')}
-            {clusters.map((cluster) => sortable(`cluster:${cluster.key}`, clusterName(cluster), 'num'))}
+            {detailed && clusters.map((cluster) => sortable(`cluster:${cluster.key}`, clusterName(cluster), 'num'))}
             {!legacy && sortable('critical', 'Critical', 'num')}
-            {!legacy && <th scope="col">Efficiency</th>}
+            {detailed && !legacy && <th scope="col">Efficiency</th>}
           </tr>
         </thead>
         <tbody>
@@ -357,7 +407,7 @@ function AgentsTable({ group, source, onOpen }) {
               <th scope="row" className="sticky">{agent.agentName}</th>
               <td className="num">{formatNumber(agent.evaluated)}</td>
               <td className="num"><ScoreChip value={agent.avgScore} tone={healthTone(agent.avgScore)} label={`${agent.agentName} total score`} onClick={() => open(agent, 'total')} /></td>
-              {clusters.map((def) => {
+              {detailed && clusters.map((def) => {
                 const cluster = (agent.clusters || []).find((item) => item.key === def.key);
                 return (
                   <td key={def.key} className="num">
@@ -384,7 +434,7 @@ function AgentsTable({ group, source, onOpen }) {
                   })()}
                 </td>
               )}
-              {!legacy && (
+              {detailed && !legacy && (
                 <td>
                   <span className="scv-chip-row">
                     {efficiency.map((def) => {
@@ -406,6 +456,7 @@ function AgentsTable({ group, source, onOpen }) {
         </tbody>
       </table>
     </div>
+    </>
   );
 }
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Head from 'next/head';
 import Link from 'next/link';
-import { MetricScoresView, AgentScoresView } from '../components/ScoreViews';
+import { ConversationSearch, MetricScoresView, AgentScoresView } from '../components/ScoreViews';
 import { humanEfficiencyStory } from '../lib/auditFeedback.mjs';
 import ScorecardVerdict, { ScorecardResultCard } from '../components/ScorecardVerdict';
 import { anchorTargetId, evidenceAsDeduction, historyJobMatches, scorecardKpis } from '../components/scorecardFormat.mjs';
@@ -2818,6 +2818,10 @@ export default function Audits() {
               <span>{notice}</span>
               <button onClick={() => setNotice('')}>×</button>
             </div>
+          )}
+
+          {['results', 'history', 'metrics-l1', 'metrics-l2', 'agents-l1', 'agents-l2'].includes(view) && (
+            <ConversationSearch key={view} request={request} onOpen={openComparison} />
           )}
 
           {(view === 'metrics-l1' || view === 'metrics-l2') && data?.access?.canRun && (
