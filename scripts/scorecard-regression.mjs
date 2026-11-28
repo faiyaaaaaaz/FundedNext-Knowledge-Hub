@@ -58,8 +58,10 @@ let m = liveChatEfficiency({ frtSeconds: 20, responseTimes: [40, 60], artBreache
 assert.deepEqual(m.map((x) => x.status), ['hit', 'hit', 'hit']);
 m = liveChatEfficiency({ frtSeconds: 45, responseTimes: [100], artBreaches: 1, responseCycles: [{ replyId: 'r1', breached: true, replyAt: 5 }], ahtSeconds: 900, ahtCycles: [{ responseSeconds: 800, wrapUpSeconds: 100 }] }, limits);
 assert.deepEqual(m.map((x) => x.status), ['breach', 'breach', 'breach']); assert.equal(m[1].anchors[0].id, 'metric-art-r1');
-m = liveChatEfficiency({ frtSeconds: 20, responseTimes: [40], artBreaches: 0, responseCycles: [], ahtSeconds: 600, ahtCycles: [{ responseSeconds: 300, wrapUpSeconds: 400 }] }, limits); assert.equal(m[2].status, 'breach', '6 minute post-reply window');
-m = liveChatEfficiency({ frtSeconds: 20, responseTimes: [40], artBreaches: 0, responseCycles: [], ahtSeconds: 300, ahtCycles: [{ responseSeconds: 300, wrapUpSeconds: 60 }], lateSnoozes: [{ delaySeconds: 250, at: 9 }] }, limits); assert.equal(m[2].status, 'breach'); assert.ok(m[2].reasons[0].includes('Snoozed'));
+m = liveChatEfficiency({ frtSeconds: 20, responseTimes: [40], artBreaches: 0, responseCycles: [], ahtSeconds: 600, ahtCycles: [{ responseSeconds: 300, wrapUpSeconds: 400 }], lateSnoozes: [{ delaySeconds: 400, at: 7 }] }, limits); assert.equal(m[2].status, 'breach', 'an agent snooze more than 6 minutes after the reply');
+m = liveChatEfficiency({ frtSeconds: 20, responseTimes: [40], artBreaches: 0, responseCycles: [], ahtSeconds: 600, ahtCycles: [{ responseSeconds: 300, wrapUpSeconds: 362 }] }, limits); assert.equal(m[2].status, 'hit', 'a system timer snooze at 6m 2s is not the agent\'s breach');
+m = liveChatEfficiency({ frtSeconds: 20, responseTimes: [40], artBreaches: 0, responseCycles: [], ahtSeconds: 300, ahtCycles: [{ responseSeconds: 300, wrapUpSeconds: 60 }], lateSnoozes: [{ delaySeconds: 250, at: 9 }] }, limits); assert.equal(m[2].status, 'hit', 'a 4 minute snooze is inside the 6 minute window');
+m = liveChatEfficiency({ frtSeconds: 20, responseTimes: [40], artBreaches: 0, responseCycles: [], ahtSeconds: 300, ahtCycles: [{ responseSeconds: 300, wrapUpSeconds: 60 }], lateSnoozes: [{ delaySeconds: 500, at: 9 }] }, limits); assert.equal(m[2].status, 'breach'); assert.ok(m[2].reasons[0].includes('Snoozed'));
 m = liveChatEfficiency({ frtSeconds: null, responseTimes: [], responseCycles: [], ahtSeconds: null, ahtCycles: [{ incomplete: true }], timingUnavailableReasons: ['No assignment event'] }, limits);
 assert.deepEqual(m.map((x) => x.status), ['unavailable', 'unavailable', 'unavailable']);
 assert.equal(efficiencySection('live_chat', m).status, 'unavailable', 'unmeasurable timing is excluded, not scored as a breach');
@@ -110,3 +112,19 @@ console.log('scorecards: all scenarios passed');
   const e2 = applyScorecardEdit(score('live_chat', [], false), { key: 'efficiency', failed: true, reason: 'Late snooze confirmed manually.' }); assert.equal(e2.totalPoints, 75); assert.equal(e2.efficiency.status, 'breach');
 }
 console.log('scorecards: edits passed');
+// The verifier attaches a verbatim quote to the right TARGET message even when the model numbered the wrong one,
+// accepts display names for criteria, and still refuses invented quotes and client words.
+{
+  const r2 = new Map([[1, { at: 10, speaker: 'client', text: 'Thanks, can you help with my withdrawal?' }], [2, { at: 20, speaker: 'agent', text: 'Hello! Please leave us a review on Trustpilot if you are satisfied.' }], [3, { at: 30, speaker: 'agent', text: 'Let me check your account.' }]]);
+  let v = validateScorecardOutput({ findings: [{ cluster: 'review', rootCause: 'incorrect_review', refs: [3], quotes: ['leave us a review on Trustpilot'], what: 'Review asked before any help', why: 'w', recommendation: 'r' }] }, { track: 'live_chat', refs: r2, evidence: [] });
+  assert.equal(v.findings.length, 1); assert.equal(v.findings[0].evidence.find((e) => e.verified).ref, 2); assert.equal(v.findings[0].evidence.find((e) => e.verified).relocated, true);
+  v = validateScorecardOutput({ findings: [{ cluster: 'Review Approach', rootCause: 'Incorrect Review Approach', refs: [2], quotes: ['leave us a review on Trustpilot'], what: 'x', why: 'y', recommendation: 'z' }] }, { track: 'live_chat', refs: r2, evidence: [] });
+  assert.equal(v.findings.length, 1, 'display names are accepted'); assert.equal(v.findings[0].cluster, 'review');
+  v = validateScorecardOutput({ findings: [{ cluster: '', rootCause: 'incorrect_review', refs: [2], quotes: ['please leave us a review on Trustpilot'], what: 'x', why: 'y', recommendation: 'z' }] }, { track: 'live_chat', refs: r2, evidence: [] });
+  assert.equal(v.findings.length, 1, 'a unique root cause key identifies its cluster');
+  v = validateScorecardOutput({ findings: [{ cluster: 'review', rootCause: 'incorrect_review', refs: [1], quotes: ['can you help with my withdrawal'], what: 'x' }] }, { track: 'live_chat', refs: r2, evidence: [] });
+  assert.equal(v.findings.length, 0, 'client words never count'); assert.ok(v.rejected[0].debug);
+  v = validateScorecardOutput({ findings: [{ cluster: 'generic', rootCause: 'unpersonalized_template', refs: [2], quotes: ['Hello! ... Trustpilot if you are satisfied'], what: 'x', why: 'y', recommendation: 'z' }] }, { track: 'live_chat', refs: r2, evidence: [] });
+  assert.equal(v.findings.length, 1, 'a quote with an ellipsis matches each part');
+}
+console.log('scorecards: verifier passed');

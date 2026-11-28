@@ -359,7 +359,7 @@ async function createJob(req, access, sb, body) {
   const metadata = {
     status: 'queued', mode, stage: selection ? 'Finding eligible conversations' : 'Ready to fetch conversations', total: selection ? selection.requested : queue.length, processed: 0, completed: 0,
     skipped: 0, failed: 0, evaluations: 0, queue, filters, directIds, seed, pauseRequested: false, cancelRequested: false,
-    rubricVersion: body.scorecard === true ? 'scorecard-2026.11.28-r1' : AUDIT_RUBRIC_VERSION, scorecard: body.scorecard === true ? 2 : undefined, thresholds, selection, agentNames, auditOrigin: access.external ? 'developer_api' : 'workspace_ui', updatedAt: new Date().toISOString()
+    rubricVersion: body.scorecard === true ? 'scorecard-2026.11.28-r2' : AUDIT_RUBRIC_VERSION, scorecard: body.scorecard === true ? 2 : undefined, thresholds, selection, agentNames, auditOrigin: access.external ? 'developer_api' : 'workspace_ui', updatedAt: new Date().toISOString()
   };
   const id = await logActivity({ actorRole: access.role, sessionId: access.sessionId, userName: access.name, userEmail: access.email, authProvider: access.authProvider, eventType: 'conversation_audit_job', success: true, metadata }, { sb });
   if (!id) throw new Error('Could not create the audit job.');
@@ -547,7 +547,7 @@ async function processNext(access, sb, jobId) {
           jobId: String(jobId), status: 'completed', conversationId: String(item.id), conversationDate: conversation.created_at ? new Date(conversation.created_at * 1000).toISOString() : '',
           agentId: targetId, agentName: agent.name, agentEmail: agent.email || '', intercomLink: intercomLink(conversation), metrics: outcome.track === 'pstf' ? { supportLevel: 'level2', pstf: true } : metrics,
           evidence: (knowledge.evidence || []).map(({ kind, id, title, url, postedAt }) => ({ kind, id, title, url, postedAt })), evidenceRetrievedAt: knowledge.retrievedAt,
-          redactionCount: redacted.redactionCount, rubricVersion: 'scorecard-2026.11.28-r1', ...fields,
+          redactionCount: redacted.redactionCount, rubricVersion: 'scorecard-2026.11.28-r2', ...fields,
           reusedDeterministicResult: !!hit, reusedFromResultId: hit?.id || null, provider: hit?.provider || 'gemini', model: hit?.model || outcome.model?.model,
           keyName: hit?.keyName || outcome.model?.keyName, keyFingerprint: hit?.keyFingerprint || outcome.model?.keyFingerprint, routeAttempts: hit ? [] : outcome.model?.attempts, usage: hit ? {} : outcome.model?.usage
         });
